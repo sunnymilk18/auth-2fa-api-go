@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/rsa"
 	"errors"
 	"time"
 
@@ -18,33 +19,49 @@ type Claims struct {
 	TokenType string `json:"type"` // "access" or "refresh"
 }
 
+// TokenManager issues and validates two kinds of tokens:
+//   - Access tokens: signed with RS256 (private key). Any external system
+//     can verify them on its own using only the public key (see the JWKS
+//     endpoint) — no call back to this API required.
+//   - Refresh tokens: signed with HS256 (shared secret). These are only
+//     ever presented back to this API's own /auth/refresh endpoint, so a
+//     symmetric secret is simpler and just as safe here.
 type TokenManager struct {
-	accessSecret  []byte
-	refreshSecret []byte
-	accessTTL     time.Duration
-	refreshTTL    time.Duration
+	accessPrivateKey *rsa.PrivateKey
+	accessPublicKey  *rsa.PublicKey
+	accessKeyID      string
+	refreshSecret    []byte
+	accessTTL        time.Duration
+	refreshTTL       time.Duration
 }
 
-func NewTokenManager(accessSecret, refreshSecret string, accessTTL, refreshTTL time.Duration) *TokenManager {
+func NewTokenManager(accessPrivateKey *rsa.PrivateKey, accessKeyID, refreshSecret string, accessTTL, refreshTTL time.Duration) *TokenManager {
 	return &TokenManager{
-		accessSecret:  []byte(accessSecret),
-		refreshSecret: []byte(refreshSecret),
-		accessTTL:     accessTTL,
-		refreshTTL:    refreshTTL,
+		accessPrivateKey: accessPrivateKey,
+		accessPublicKey:  &accessPrivateKey.PublicKey,
+		accessKeyID:      accessKeyID,
+		refreshSecret:    []byte(refreshSecret),
+		accessTTL:        accessTTL,
+		refreshTTL:       refreshTTL,
 	}
 }
 
 func (tm *TokenManager) IssueAccessToken(userID, email string) (string, error) {
-	return tm.issue(userID, email, "access", tm.accessSecret, tm.accessTTL)
+	claims := tm.newClaims(userID, email, "access", tm.accessTTL)
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = tm.accessKeyID
+	return token.SignedString(tm.accessPrivateKey)
 }
 
 func (tm *TokenManager) IssueRefreshToken(userID, email string) (string, error) {
-	return tm.issue(userID, email, "refresh", tm.refreshSecret, tm.refreshTTL)
+	claims := tm.newClaims(userID, email, "refresh", tm.refreshTTL)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString(tm.refreshSecret)
 }
 
-func (tm *TokenManager) issue(userID, email, tokenType string, secret []byte, ttl time.Duration) (string, error) {
+func (tm *TokenManager) newClaims(userID, email, tokenType string, ttl time.Duration) Claims {
 	now := time.Now()
-	claims := Claims{
+	return Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -53,31 +70,38 @@ func (tm *TokenManager) issue(userID, email, tokenType string, secret []byte, tt
 		Email:     email,
 		TokenType: tokenType,
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(secret)
 }
 
 func (tm *TokenManager) ParseAccessToken(tokenStr string) (*Claims, error) {
-	return tm.parse(tokenStr, "access", tm.accessSecret)
+	claims := &Claims{}
+	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+		if _, ok := t.Method.(*jwt.SigningMethodRSA); !ok {
+			return nil, ErrInvalidToken
+		}
+		return tm.accessPublicKey, nil
+	})
+	if err != nil || !token.Valid || claims.TokenType != "access" {
+		return nil, ErrInvalidToken
+	}
+	return claims, nil
 }
 
 func (tm *TokenManager) ParseRefreshToken(tokenStr string) (*Claims, error) {
-	return tm.parse(tokenStr, "refresh", tm.refreshSecret)
-}
-
-func (tm *TokenManager) parse(tokenStr, expectedType string, secret []byte) (*Claims, error) {
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, ErrInvalidToken
 		}
-		return secret, nil
+		return tm.refreshSecret, nil
 	})
-	if err != nil || !token.Valid {
-		return nil, ErrInvalidToken
-	}
-	if claims.TokenType != expectedType {
+	if err != nil || !token.Valid || claims.TokenType != "refresh" {
 		return nil, ErrInvalidToken
 	}
 	return claims, nil
+}
+
+// PublicKey exposes the RSA public key and its key id, used to publish the
+// JWKS document that other systems fetch to verify access tokens.
+func (tm *TokenManager) PublicKey() (*rsa.PublicKey, string) {
+	return tm.accessPublicKey, tm.accessKeyID
 }

@@ -1,0 +1,329 @@
+openapi: 3.0.3
+info:
+  title: auth-2fa-api
+  description: |
+    API independiente de autenticación con doble factor por correo (2FA).
+    Flujo: registro → login (password) → código OTP enviado por email →
+    verificación del código → tokens JWT (access + refresh).
+
+    Los access tokens se firman con RS256. Cualquier sistema que reciba un
+    token de un cliente puede verificarlo por su cuenta usando la clave
+    pública publicada en `/.well-known/jwks.json`, sin necesidad de llamar
+    de vuelta a esta API.
+  version: "1.0.0"
+
+servers:
+  - url: http://localhost:8080
+    description: Desarrollo local
+
+tags:
+  - name: auth
+    description: Registro, login de dos factores y gestión de tokens
+  - name: user
+    description: Datos del usuario autenticado
+  - name: system
+    description: Endpoints de infraestructura (salud, claves públicas)
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Estado del servicio
+      responses:
+        "200":
+          description: El servicio está operativo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /.well-known/jwks.json:
+    get:
+      tags: [system]
+      summary: Clave pública para verificar access tokens (JWKS)
+      description: >
+        Cualquier sistema puede consultar este endpoint (idealmente cacheando
+        el resultado) para verificar la firma RS256 de un access token sin
+        llamar de vuelta a esta API.
+      responses:
+        "200":
+          description: Conjunto de claves públicas en formato JWKS
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKS"
+
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Registrar un nuevo usuario
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Usuario creado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "400":
+          description: Solicitud inválida (email vacío o password muy corto)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: El email ya está registrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados registros desde esta IP, intenta más tarde
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Paso 1 del login - Verifica email/password y envía el código OTP por correo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Credenciales válidas, código enviado por email
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Email o contraseña incorrectos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados intentos desde esta IP, intenta más tarde
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/verify-otp:
+    post:
+      tags: [auth]
+      summary: Paso 2 del login - Verifica el código OTP y emite los tokens JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyOTPRequest"
+      responses:
+        "200":
+          description: Código válido, tokens emitidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          description: Código inválido o sesión de login expirada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados intentos fallidos, se debe reiniciar el login
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Emite un nuevo par de tokens a partir de un refresh token válido
+      description: Rota el refresh token (el anterior queda revocado).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "200":
+          description: Nuevo par de tokens
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          description: Refresh token inválido, expirado o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Revoca un refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefreshRequest"
+      responses:
+        "204":
+          description: Token revocado
+
+  /me:
+    get:
+      tags: [user]
+      summary: Datos del usuario autenticado (ejemplo de ruta protegida)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Datos del usuario
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserResponse"
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Access token JWT (RS256), obtenido tras completar el login de dos
+        factores. Enviar como `Authorization: Bearer <access_token>`.
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+          minLength: 8
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      properties:
+        login_token:
+          type: string
+          description: Token temporal que se debe presentar junto al código OTP en /auth/verify-otp.
+        message:
+          type: string
+          example: verification code sent to email
+
+    VerifyOTPRequest:
+      type: object
+      required: [login_token, code]
+      properties:
+        login_token:
+          type: string
+        code:
+          type: string
+          example: "123456"
+
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT firmado con RS256, verificable con la clave pública de /.well-known/jwks.json.
+        refresh_token:
+          type: string
+          description: JWT firmado con HS256, de uso exclusivo con /auth/refresh y /auth/logout.
+        token_type:
+          type: string
+          example: Bearer
+
+    UserResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+
+    JWKS:
+      type: object
+      properties:
+        keys:
+          type: array
+          items:
+            type: object
+            properties:
+              kty:
+                type: string
+                example: RSA
+              use:
+                type: string
+                example: sig
+              kid:
+                type: string
+              alg:
+                type: string
+                example: RS256
+              n:
+                type: string
+                description: Módulo RSA, codificado en base64url.
+              e:
+                type: string
+                description: Exponente público RSA, codificado en base64url.
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string

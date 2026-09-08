@@ -7,15 +7,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/redis/go-redis/v9"
 
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/user"
 )
 
-// NewRouter wires all routes: public auth endpoints and a sample protected
-// endpoint that any consuming system can imitate to guard its own routes.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service) http.Handler {
+// NewRouter wires all routes: public auth endpoints, API docs, and a sample
+// protected endpoint that any consuming system can imitate to guard its own
+// routes.
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -29,10 +31,24 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 
+	// Publishes the RS256 public key so any consuming system can verify
+	// access tokens on its own, without calling back to this API.
+	r.Get("/.well-known/jwks.json", authHandlers.JWKS)
+
+	// API documentation (OpenAPI/Swagger).
+	r.Get("/openapi.yaml", serveOpenAPISpec)
+	r.Get("/docs", serveDocs)
+
+	// Rate limits blunt brute-force attempts against credentials and OTP
+	// codes. Fixed windows, keyed by client IP, backed by Redis.
+	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour)
+	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute)
+	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute)
+
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/register", authHandlers.Register)
-		r.Post("/login", authHandlers.Login)
-		r.Post("/verify-otp", authHandlers.VerifyOTP)
+		r.With(registerLimiter.Middleware).Post("/register", authHandlers.Register)
+		r.With(loginLimiter.Middleware).Post("/login", authHandlers.Login)
+		r.With(otpLimiter.Middleware).Post("/verify-otp", authHandlers.VerifyOTP)
 		r.Post("/refresh", authHandlers.Refresh)
 		r.Post("/logout", authHandlers.Logout)
 	})

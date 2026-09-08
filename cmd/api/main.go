@@ -50,8 +50,13 @@ func run() error {
 	userRepo := user.NewRepository(pgPool)
 	userSvc := user.NewService(userRepo)
 
+	privateKey, err := auth.LoadPrivateKey(cfg.JWTPrivateKeyPath)
+	if err != nil {
+		return err
+	}
+
 	otpStore := auth.NewOTPStore(rdb, cfg.OTPTTL, cfg.OTPMaxTries, cfg.OTPLength)
-	tokenMgr := auth.NewTokenManager(cfg.JWTAccessSecret, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	tokenMgr := auth.NewTokenManager(privateKey, cfg.JWTKeyID, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	refreshRepo := auth.NewRefreshRepository(pgPool)
 
 	gmailMailer := mailer.NewGmailMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
@@ -59,7 +64,7 @@ func run() error {
 	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, rdb)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

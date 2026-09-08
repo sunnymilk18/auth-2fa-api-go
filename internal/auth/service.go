@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"time"
@@ -134,6 +135,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 // Logout revokes a refresh token so it can no longer be used.
 func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	return s.refresh.Revoke(ctx, refreshToken)
+}
+
+// PublicKey exposes the access-token signing key's public half, for JWKS.
+func (s *Service) PublicKey() (*rsa.PublicKey, string) {
+	return s.tokens.PublicKey()
 }
 
 var ErrUnauthorized = errors.New("unauthorized")

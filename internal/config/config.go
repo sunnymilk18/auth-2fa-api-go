@@ -19,7 +19,13 @@ type Config struct {
 	// rediss://default:<password>@<host>:<port> as provided by Upstash.
 	RedisURL string
 
-	JWTAccessSecret  string
+	// Access tokens are signed with RS256 using this private key file; the
+	// public key is published via /.well-known/jwks.json so other systems
+	// can verify tokens without calling back to this API.
+	JWTPrivateKeyPath string
+	JWTKeyID          string
+	// Refresh tokens stay HS256 (shared secret) — they're only ever
+	// presented back to this API's own /auth/refresh endpoint.
 	JWTRefreshSecret string
 	AccessTokenTTL   time.Duration
 	RefreshTokenTTL  time.Duration
@@ -47,8 +53,9 @@ func Load() (*Config, error) {
 
 		RedisURL: getEnv("REDIS_URL", "redis://localhost:6379/0"),
 
-		JWTAccessSecret:  getEnv("JWT_ACCESS_SECRET", ""),
-		JWTRefreshSecret: getEnv("JWT_REFRESH_SECRET", ""),
+		JWTPrivateKeyPath: getEnv("JWT_PRIVATE_KEY_PATH", "keys/private.pem"),
+		JWTKeyID:          getEnv("JWT_KEY_ID", "auth-2fa-api-1"),
+		JWTRefreshSecret:  getEnv("JWT_REFRESH_SECRET", ""),
 
 		SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
 		SMTPUser:     getEnv("SMTP_USER", ""),
@@ -76,8 +83,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
-	if cfg.JWTAccessSecret == "" || cfg.JWTRefreshSecret == "" {
-		return nil, fmt.Errorf("JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be set")
+	if cfg.JWTRefreshSecret == "" {
+		return nil, fmt.Errorf("JWT_REFRESH_SECRET must be set")
+	}
+	if cfg.JWTPrivateKeyPath == "" {
+		return nil, fmt.Errorf("JWT_PRIVATE_KEY_PATH must be set")
 	}
 
 	return cfg, nil
