@@ -58,7 +58,7 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 		if !allowed {
 			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", rl.window.Seconds()))
-			http.Error(w, `{"error":"too many requests, please try again later"}`, http.StatusTooManyRequests)
+			http.Error(w, `{"error":"demasiadas solicitudes, intenta de nuevo más tarde"}`, http.StatusTooManyRequests)
 			return
 		}
 

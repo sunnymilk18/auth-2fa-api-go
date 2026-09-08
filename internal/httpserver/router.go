@@ -79,7 +79,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 			u, err := users.FindByID(r.Context(), userID)
 			if err != nil {
-				http.Error(w, `{"error":"user not found"}`, http.StatusNotFound)
+				http.Error(w, `{"error":"usuario no encontrado"}`, http.StatusNotFound)
 				return
 			}
 

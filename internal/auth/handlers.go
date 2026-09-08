@@ -48,28 +48,28 @@ type registerRequest struct {
 func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 	var req registerRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 	if req.Email == "" || len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "email is required and password must be at least 8 characters")
+		writeError(w, http.StatusBadRequest, "el correo es obligatorio y la contraseña debe tener al menos 8 caracteres")
 		return
 	}
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing or invalid api key")
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
 		return
 	}
 
 	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, user.ErrEmailTaken) {
-			writeError(w, http.StatusConflict, "email already registered")
+			writeError(w, http.StatusConflict, "el correo ya está registrado")
 			return
 		}
 		log.Printf("register error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not register user")
+		writeError(w, http.StatusInternalServerError, "no se pudo registrar el usuario")
 		return
 	}
 
@@ -94,30 +94,30 @@ type loginResponse struct {
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "missing or invalid api key")
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
 		return
 	}
 
 	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, user.ErrInvalidCredentials) {
-			writeError(w, http.StatusUnauthorized, "invalid email or password")
+			writeError(w, http.StatusUnauthorized, "correo o contraseña incorrectos")
 			return
 		}
 		log.Printf("login error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not start login")
+		writeError(w, http.StatusInternalServerError, "no se pudo iniciar el proceso de login")
 		return
 	}
 
 	writeJSON(w, http.StatusOK, loginResponse{
 		LoginToken: loginToken,
-		Message:    "verification code sent to email",
+		Message:    "código de verificación enviado por correo",
 	})
 }
 
@@ -137,7 +137,7 @@ type tokenResponse struct {
 func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	var req verifyRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 
@@ -145,14 +145,14 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrLoginSessionNotFound):
-			writeError(w, http.StatusUnauthorized, "login session not found or expired, please login again")
+			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
 		case errors.Is(err, ErrInvalidCode):
-			writeError(w, http.StatusUnauthorized, "invalid code")
+			writeError(w, http.StatusUnauthorized, "código inválido")
 		case errors.Is(err, ErrTooManyAttempts):
-			writeError(w, http.StatusTooManyRequests, "too many attempts, please login again")
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos, vuelve a iniciar sesión")
 		default:
 			log.Printf("verify otp error: %v", err)
-			writeError(w, http.StatusInternalServerError, "could not verify code")
+			writeError(w, http.StatusInternalServerError, "no se pudo verificar el código")
 		}
 		return
 	}
@@ -173,13 +173,13 @@ type refreshRequest struct {
 func (h *Handlers) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 
 	access, refresh, err := h.svc.Refresh(r.Context(), req.RefreshToken)
 	if err != nil {
-		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
+		writeError(w, http.StatusUnauthorized, "refresh token inválido o expirado")
 		return
 	}
 
@@ -195,12 +195,12 @@ func (h *Handlers) Refresh(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 
 	if err := h.svc.Logout(r.Context(), req.RefreshToken); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not logout")
+		writeError(w, http.StatusInternalServerError, "no se pudo cerrar sesión")
 		return
 	}
 
@@ -225,28 +225,28 @@ type registerDeviceResponse struct {
 func (h *Handlers) RegisterDevice(w http.ResponseWriter, r *http.Request) {
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, "no autorizado")
 		return
 	}
 
 	var req registerDeviceRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 	if req.DeviceID == "" {
-		writeError(w, http.StatusBadRequest, "device_id is required")
+		writeError(w, http.StatusBadRequest, "device_id es obligatorio")
 		return
 	}
 
 	deviceToken, err := h.svc.RegisterDevice(r.Context(), userID, req.DeviceID, req.DeviceName, req.Pin)
 	if err != nil {
 		if errors.Is(err, device.ErrInvalidPinFormat) {
-			writeError(w, http.StatusBadRequest, "pin must be exactly 6 digits")
+			writeError(w, http.StatusBadRequest, "el PIN debe tener exactamente 6 dígitos")
 			return
 		}
 		log.Printf("register device error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not register device")
+		writeError(w, http.StatusInternalServerError, "no se pudo registrar el dispositivo")
 		return
 	}
 
@@ -271,7 +271,7 @@ type deviceLoginResponse struct {
 func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 	var req deviceLoginRequest
 	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
 
@@ -279,14 +279,14 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, device.ErrDeviceNotTrusted):
-			writeError(w, http.StatusUnauthorized, "device not trusted, please login with password and email code")
+			writeError(w, http.StatusUnauthorized, "dispositivo no confiable, inicia sesión con tu contraseña y el código de correo")
 		case errors.Is(err, device.ErrInvalidPin):
-			writeError(w, http.StatusUnauthorized, "invalid pin")
+			writeError(w, http.StatusUnauthorized, "PIN inválido")
 		case errors.Is(err, device.ErrTooManyPinTries):
-			writeError(w, http.StatusTooManyRequests, "too many failed pin attempts, please login again")
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos de PIN fallidos, vuelve a iniciar sesión")
 		default:
 			log.Printf("device login error: %v", err)
-			writeError(w, http.StatusInternalServerError, "could not login with device")
+			writeError(w, http.StatusInternalServerError, "no se pudo iniciar sesión con el dispositivo")
 		}
 		return
 	}
@@ -311,14 +311,14 @@ type deviceInfoResponse struct {
 func (h *Handlers) ListDevices(w http.ResponseWriter, r *http.Request) {
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, "no autorizado")
 		return
 	}
 
 	devices, err := h.svc.ListDevices(r.Context(), userID)
 	if err != nil {
 		log.Printf("list devices error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not list devices")
+		writeError(w, http.StatusInternalServerError, "no se pudieron listar los dispositivos")
 		return
 	}
 
@@ -340,18 +340,18 @@ func (h *Handlers) ListDevices(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 	userID, ok := UserIDFromContext(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		writeError(w, http.StatusUnauthorized, "no autorizado")
 		return
 	}
 
 	id := chi.URLParam(r, "id")
 	if err := h.svc.RevokeDevice(r.Context(), userID, id); err != nil {
 		if errors.Is(err, device.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "device not found")
+			writeError(w, http.StatusNotFound, "dispositivo no encontrado")
 			return
 		}
 		log.Printf("revoke device error: %v", err)
-		writeError(w, http.StatusInternalServerError, "could not revoke device")
+		writeError(w, http.StatusInternalServerError, "no se pudo revocar el dispositivo")
 		return
 	}
 

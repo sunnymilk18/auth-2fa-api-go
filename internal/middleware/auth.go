@@ -16,13 +16,13 @@ func RequireAuth(tokens *auth.TokenManager) func(http.Handler) http.Handler {
 			header := r.Header.Get("Authorization")
 			parts := strings.SplitN(header, " ", 2)
 			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-				http.Error(w, `{"error":"missing or malformed Authorization header"}`, http.StatusUnauthorized)
+				http.Error(w, `{"error":"falta el header Authorization o tiene un formato inválido"}`, http.StatusUnauthorized)
 				return
 			}
 
 			claims, err := tokens.ParseAccessToken(parts[1])
 			if err != nil {
-				http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
+				http.Error(w, `{"error":"token inválido o expirado"}`, http.StatusUnauthorized)
 				return
 			}
 

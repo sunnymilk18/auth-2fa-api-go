@@ -16,16 +16,16 @@ func RequireAPIKey(svc *apiclient.Service) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get("X-API-Key")
 			if key == "" {
-				http.Error(w, `{"error":"missing X-API-Key header"}`, http.StatusUnauthorized)
+				http.Error(w, `{"error":"falta el header X-API-Key"}`, http.StatusUnauthorized)
 				return
 			}
 
 			client, err := svc.Authenticate(r.Context(), key)
 			if err != nil {
 				status := http.StatusUnauthorized
-				msg := "invalid api key"
+				msg := "API key inválida"
 				if errors.Is(err, apiclient.ErrInactive) {
-					msg = "api key is inactive"
+					msg = "la API key está inactiva"
 				}
 				http.Error(w, `{"error":"`+msg+`"}`, status)
 				return
