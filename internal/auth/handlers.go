@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 
 	"auth-2fa-api/internal/user"
@@ -58,6 +59,7 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "email already registered")
 			return
 		}
+		log.Printf("register error: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not register user")
 		return
 	}
@@ -93,6 +95,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid email or password")
 			return
 		}
+		log.Printf("login error: %v", err)
 		writeError(w, http.StatusInternalServerError, "could not start login")
 		return
 	}
@@ -133,6 +136,7 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrTooManyAttempts):
 			writeError(w, http.StatusTooManyRequests, "too many attempts, please login again")
 		default:
+			log.Printf("verify otp error: %v", err)
 			writeError(w, http.StatusInternalServerError, "could not verify code")
 		}
 		return
