@@ -6,6 +6,9 @@ import (
 	"log"
 	"net/http"
 
+	"github.com/go-chi/chi/v5"
+
+	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/user"
 )
 
@@ -191,3 +194,156 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// --- Trusted devices + PIN (shortcut around password+OTP on a known device) ---
+
+type registerDeviceRequest struct {
+	DeviceID   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
+	Pin        string `json:"pin"`
+}
+
+type registerDeviceResponse struct {
+	DeviceToken string `json:"device_token"`
+}
+
+// RegisterDevice marks the caller's device as trusted. Requires a valid
+// access token — i.e. the client must have just completed a full
+// password+OTP login before calling this.
+func (h *Handlers) RegisterDevice(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req registerDeviceRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.DeviceID == "" {
+		writeError(w, http.StatusBadRequest, "device_id is required")
+		return
+	}
+
+	deviceToken, err := h.svc.RegisterDevice(r.Context(), userID, req.DeviceID, req.DeviceName, req.Pin)
+	if err != nil {
+		if errors.Is(err, device.ErrInvalidPinFormat) {
+			writeError(w, http.StatusBadRequest, "pin must be exactly 6 digits")
+			return
+		}
+		log.Printf("register device error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not register device")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, registerDeviceResponse{DeviceToken: deviceToken})
+}
+
+type deviceLoginRequest struct {
+	DeviceID    string `json:"device_id"`
+	DeviceToken string `json:"device_token"`
+	Pin         string `json:"pin"`
+}
+
+type deviceLoginResponse struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	DeviceToken  string `json:"device_token"` // rotated — replace the client's stored copy
+	TokenType    string `json:"token_type"`
+}
+
+// DeviceLogin lets a previously trusted device skip password+OTP by
+// presenting its device_token (possession) + pin (knowledge) instead.
+func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
+	var req deviceLoginRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	access, refresh, newDeviceToken, err := h.svc.DeviceLogin(r.Context(), req.DeviceID, req.DeviceToken, req.Pin)
+	if err != nil {
+		switch {
+		case errors.Is(err, device.ErrDeviceNotTrusted):
+			writeError(w, http.StatusUnauthorized, "device not trusted, please login with password and email code")
+		case errors.Is(err, device.ErrInvalidPin):
+			writeError(w, http.StatusUnauthorized, "invalid pin")
+		case errors.Is(err, device.ErrTooManyPinTries):
+			writeError(w, http.StatusTooManyRequests, "too many failed pin attempts, please login again")
+		default:
+			log.Printf("device login error: %v", err)
+			writeError(w, http.StatusInternalServerError, "could not login with device")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, deviceLoginResponse{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		DeviceToken:  newDeviceToken,
+		TokenType:    "Bearer",
+	})
+}
+
+type deviceInfoResponse struct {
+	ID         string `json:"id"`
+	DeviceName string `json:"device_name"`
+	TrustedAt  string `json:"trusted_at"`
+	LastUsedAt string `json:"last_used_at"`
+	ExpiresAt  string `json:"expires_at"`
+}
+
+// ListDevices returns the authenticated user's trusted devices.
+func (h *Handlers) ListDevices(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	devices, err := h.svc.ListDevices(r.Context(), userID)
+	if err != nil {
+		log.Printf("list devices error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not list devices")
+		return
+	}
+
+	resp := make([]deviceInfoResponse, 0, len(devices))
+	for _, d := range devices {
+		resp = append(resp, deviceInfoResponse{
+			ID:         d.ID,
+			DeviceName: d.DeviceName,
+			TrustedAt:  d.TrustedAt.Format(timeFormat),
+			LastUsedAt: d.LastUsedAt.Format(timeFormat),
+			ExpiresAt:  d.ExpiresAt.Format(timeFormat),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{"devices": resp})
+}
+
+// RevokeDevice revokes one of the authenticated user's trusted devices.
+func (h *Handlers) RevokeDevice(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if err := h.svc.RevokeDevice(r.Context(), userID, id); err != nil {
+		if errors.Is(err, device.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "device not found")
+			return
+		}
+		log.Printf("revoke device error: %v", err)
+		writeError(w, http.StatusInternalServerError, "could not revoke device")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+const timeFormat = "2006-01-02T15:04:05Z07:00"

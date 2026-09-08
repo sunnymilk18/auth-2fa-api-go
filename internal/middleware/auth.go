@@ -8,13 +8,6 @@ import (
 	"auth-2fa-api/internal/auth"
 )
 
-type contextKey string
-
-const (
-	ctxUserID contextKey = "userID"
-	ctxEmail  contextKey = "email"
-)
-
 // RequireAuth validates the Bearer access token on protected routes and
 // injects the authenticated user's id/email into the request context.
 func RequireAuth(tokens *auth.TokenManager) func(http.Handler) http.Handler {
@@ -33,19 +26,19 @@ func RequireAuth(tokens *auth.TokenManager) func(http.Handler) http.Handler {
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), ctxUserID, claims.Subject)
-			ctx = context.WithValue(ctx, ctxEmail, claims.Email)
+			ctx := auth.ContextWithUser(r.Context(), claims.Subject, claims.Email)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
+// UserIDFromContext and EmailFromContext are thin re-exports of the auth
+// package's context helpers, kept here so existing callers importing
+// middleware don't need to change.
 func UserIDFromContext(ctx context.Context) (string, bool) {
-	v, ok := ctx.Value(ctxUserID).(string)
-	return v, ok
+	return auth.UserIDFromContext(ctx)
 }
 
 func EmailFromContext(ctx context.Context) (string, bool) {
-	v, ok := ctx.Value(ctxEmail).(string)
-	return v, ok
+	return auth.EmailFromContext(ctx)
 }

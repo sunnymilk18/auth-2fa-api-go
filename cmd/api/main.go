@@ -12,6 +12,7 @@ import (
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/config"
 	"auth-2fa-api/internal/db"
+	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/mailer"
 	"auth-2fa-api/internal/user"
@@ -59,9 +60,12 @@ func run() error {
 	tokenMgr := auth.NewTokenManager(privateKey, cfg.JWTKeyID, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	refreshRepo := auth.NewRefreshRepository(pgPool)
 
+	deviceRepo := device.NewRepository(pgPool)
+	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL, cfg.DevicePinMaxTries)
+
 	gmailMailer := mailer.NewGmailMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL)
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, rdb)

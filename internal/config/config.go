@@ -34,6 +34,10 @@ type Config struct {
 	OTPTTL      time.Duration
 	OTPMaxTries int
 
+	// Trusted device + PIN shortcut around password+OTP.
+	DeviceTrustTTL    time.Duration
+	DevicePinMaxTries int
+
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUser     string
@@ -80,6 +84,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.OTPTTL, err = getEnvDuration("OTP_TTL", 5*time.Minute); err != nil {
+		return nil, err
+	}
+	if cfg.DeviceTrustTTL, err = getEnvDuration("DEVICE_TRUST_TTL", 30*24*time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.DevicePinMaxTries, err = getEnvInt("DEVICE_PIN_MAX_TRIES", 5); err != nil {
 		return nil, err
 	}
 

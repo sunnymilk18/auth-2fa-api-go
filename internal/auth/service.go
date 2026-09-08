@@ -7,17 +7,20 @@ import (
 	"fmt"
 	"time"
 
+	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/mailer"
 	"auth-2fa-api/internal/user"
 )
 
 // Service wires together password verification, OTP issuance/checking and
-// JWT issuance into the full two-factor login flow.
+// JWT issuance into the full two-factor login flow, plus the trusted-device
+// + PIN shortcut that lets a recognized device skip password+OTP.
 type Service struct {
 	users      *user.Service
 	otp        *OTPStore
 	tokens     *TokenManager
 	refresh    *RefreshRepository
+	devices    *device.Service
 	mailer     mailer.Mailer
 	otpTTL     time.Duration
 	refreshTTL time.Duration
@@ -28,6 +31,7 @@ func NewService(
 	otp *OTPStore,
 	tokens *TokenManager,
 	refresh *RefreshRepository,
+	devices *device.Service,
 	m mailer.Mailer,
 	otpTTL time.Duration,
 	refreshTTL time.Duration,
@@ -37,6 +41,7 @@ func NewService(
 		otp:        otp,
 		tokens:     tokens,
 		refresh:    refresh,
+		devices:    devices,
 		mailer:     m,
 		otpTTL:     otpTTL,
 		refreshTTL: refreshTTL,
@@ -80,7 +85,13 @@ func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (acce
 	if err != nil {
 		return "", "", err
 	}
+	return s.issueTokenPair(ctx, userID, email)
+}
 
+// issueTokenPair mints an access+refresh token pair for an already-verified
+// user and persists the refresh token. Shared by every login path (password
+// + OTP, device + PIN, and refresh rotation).
+func (s *Service) issueTokenPair(ctx context.Context, userID, email string) (accessToken, refreshToken string, err error) {
 	accessToken, err = s.tokens.IssueAccessToken(userID, email)
 	if err != nil {
 		return "", "", err
@@ -89,11 +100,9 @@ func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (acce
 	if err != nil {
 		return "", "", err
 	}
-
 	if err := s.refresh.Store(ctx, userID, refreshToken, time.Now().Add(s.refreshTTL)); err != nil {
 		return "", "", err
 	}
-
 	return accessToken, refreshToken, nil
 }
 
@@ -117,19 +126,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 		return "", "", err
 	}
 
-	accessToken, err = s.tokens.IssueAccessToken(claims.Subject, claims.Email)
-	if err != nil {
-		return "", "", err
-	}
-	newRefreshToken, err = s.tokens.IssueRefreshToken(claims.Subject, claims.Email)
-	if err != nil {
-		return "", "", err
-	}
-	if err := s.refresh.Store(ctx, claims.Subject, newRefreshToken, time.Now().Add(s.refreshTTL)); err != nil {
-		return "", "", err
-	}
-
-	return accessToken, newRefreshToken, nil
+	return s.issueTokenPair(ctx, claims.Subject, claims.Email)
 }
 
 // Logout revokes a refresh token so it can no longer be used.
@@ -140,6 +137,46 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 // PublicKey exposes the access-token signing key's public half, for JWKS.
 func (s *Service) PublicKey() (*rsa.PublicKey, string) {
 	return s.tokens.PublicKey()
+}
+
+// RegisterDevice marks deviceID as trusted for the already-authenticated
+// userID (the caller must have just completed a full password+OTP login)
+// and returns a device token the client must store securely — it's shown
+// only once.
+func (s *Service) RegisterDevice(ctx context.Context, userID, deviceID, deviceName, pin string) (deviceToken string, err error) {
+	return s.devices.Register(ctx, userID, deviceID, deviceName, pin)
+}
+
+// DeviceLogin verifies a device_token + pin pair and, on success, issues a
+// fresh access/refresh token pair — the trusted-device shortcut around
+// password+OTP. It also returns a rotated device token that MUST replace
+// the client's stored one; the old one stops working.
+func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin string) (accessToken, refreshToken, newDeviceToken string, err error) {
+	userID, newDeviceToken, err := s.devices.VerifyPin(ctx, deviceID, deviceToken, pin)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	u, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.Email)
+	if err != nil {
+		return "", "", "", err
+	}
+	return accessToken, refreshToken, newDeviceToken, nil
+}
+
+// ListDevices returns the authenticated user's trusted devices.
+func (s *Service) ListDevices(ctx context.Context, userID string) ([]device.Info, error) {
+	return s.devices.List(ctx, userID)
+}
+
+// RevokeDevice revokes one of the authenticated user's trusted devices.
+func (s *Service) RevokeDevice(ctx context.Context, userID, deviceRowID string) error {
+	return s.devices.Revoke(ctx, userID, deviceRowID)
 }
 
 var ErrUnauthorized = errors.New("unauthorized")

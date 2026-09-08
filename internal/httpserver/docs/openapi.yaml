@@ -10,6 +10,12 @@ info:
     token de un cliente puede verificarlo por su cuenta usando la clave
     pública publicada en `/.well-known/jwks.json`, sin necesidad de llamar
     de vuelta a esta API.
+
+    Además de ese flujo, un dispositivo puede quedar marcado como "de
+    confianza": tras un login completo, se registra con un PIN de 6 dígitos
+    y, en aperturas posteriores de la app en el mismo dispositivo, puede
+    reautenticarse con `device_id` + `device_token` + `pin`, sin repetir
+    password ni código por correo.
   version: "1.0.0"
 
 servers:
@@ -19,6 +25,8 @@ servers:
 tags:
   - name: auth
     description: Registro, login de dos factores y gestión de tokens
+  - name: devices
+    description: Dispositivos de confianza + PIN (atajo alrededor de password+OTP)
   - name: user
     description: Datos del usuario autenticado
   - name: system
@@ -192,6 +200,115 @@ paths:
         "204":
           description: Token revocado
 
+  /auth/devices/register:
+    post:
+      tags: [devices]
+      summary: Marca el dispositivo actual como de confianza
+      description: >
+        Requiere haber completado el login completo (password + OTP) justo
+        antes — se llama con el access_token recién obtenido. Genera un PIN
+        y un device_token nuevos para este device_id (si ya existía, los
+        reemplaza).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterDeviceRequest"
+      responses:
+        "201":
+          description: Dispositivo registrado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterDeviceResponse"
+        "400":
+          description: PIN inválido (debe ser exactamente 6 dígitos)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/devices/login:
+    post:
+      tags: [devices]
+      summary: Login con dispositivo de confianza + PIN (sin password ni OTP)
+      description: >
+        Un dispositivo no registrado (device_id desconocido) siempre falla
+        aquí — debe usar /auth/login primero. El device_token se rota en
+        cada uso exitoso: la respuesta trae uno nuevo que reemplaza al
+        anterior.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeviceLoginRequest"
+      responses:
+        "200":
+          description: PIN válido, tokens emitidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceLoginResponse"
+        "401":
+          description: Dispositivo no confiable, expirado, revocado, o PIN incorrecto
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados intentos de PIN fallidos — el dispositivo quedó revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/devices:
+    get:
+      tags: [devices]
+      summary: Lista los dispositivos de confianza del usuario autenticado
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Lista de dispositivos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceListResponse"
+
+  /auth/devices/{id}:
+    delete:
+      tags: [devices]
+      summary: Revoca un dispositivo de confianza
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Dispositivo revocado
+        "404":
+          description: Dispositivo no encontrado (o no pertenece a este usuario)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /me:
     get:
       tags: [user]
@@ -321,6 +438,80 @@ components:
               e:
                 type: string
                 description: Exponente público RSA, codificado en base64url.
+
+    RegisterDeviceRequest:
+      type: object
+      required: [device_id, pin]
+      properties:
+        device_id:
+          type: string
+          description: Identificador único generado por la app una sola vez y guardado en almacenamiento seguro del dispositivo.
+        device_name:
+          type: string
+          example: "iPhone de Juan"
+        pin:
+          type: string
+          description: Exactamente 6 dígitos.
+          example: "123456"
+
+    RegisterDeviceResponse:
+      type: object
+      properties:
+        device_token:
+          type: string
+          description: Token de posesión del dispositivo. Se muestra una sola vez — guardarlo en almacenamiento seguro local.
+
+    DeviceLoginRequest:
+      type: object
+      required: [device_id, device_token, pin]
+      properties:
+        device_id:
+          type: string
+        device_token:
+          type: string
+        pin:
+          type: string
+          example: "123456"
+
+    DeviceLoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        device_token:
+          type: string
+          description: Token rotado — reemplaza al anterior en el almacenamiento local del cliente.
+        token_type:
+          type: string
+          example: Bearer
+
+    DeviceInfo:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        trusted_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+
+    DeviceListResponse:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeviceInfo"
 
     Error:
       type: object

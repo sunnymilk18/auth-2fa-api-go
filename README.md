@@ -9,7 +9,8 @@ API independiente en Go para autenticación con doble factor por correo (email +
 - **JWT**:
   - Access token firmado con **RS256** (clave privada/pública) — cualquier sistema que reciba el token puede verificarlo por su cuenta usando la clave pública publicada en `/.well-known/jwks.json`, sin llamar de vuelta a esta API.
   - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
-- **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login` y `/auth/verify-otp` — mitiga fuerza bruta sobre contraseñas y códigos OTP.
+- **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp` y `/auth/devices/login` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs.
+- **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
 - **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa Gmail SMTP + App Password (solo desarrollo/pruebas). Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
 
@@ -21,6 +22,15 @@ API independiente en Go para autenticación con doble factor por correo (email +
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
 6. `GET /me` — ejemplo de endpoint protegido (requiere `Authorization: Bearer <access_token>`).
+
+### Dispositivo de confianza + PIN (opcional, atajo alrededor de 1-3)
+
+7. `POST /auth/devices/register` (protegido, justo después de un login completo) — marca el dispositivo actual como confiable con un PIN de 6 dígitos; devuelve un `device_token` que el cliente debe guardar en almacenamiento seguro local (se muestra una sola vez).
+8. `POST /auth/devices/login` — con `device_id` + `device_token` + `pin`, emite un nuevo par `access_token`/`refresh_token` sin pasar por password ni OTP. Un dispositivo desconocido siempre falla aquí y debe usar el flujo 1-3. El `device_token` se rota en cada uso — la respuesta trae uno nuevo que reemplaza al anterior.
+9. `GET /auth/devices` (protegido) — lista los dispositivos de confianza del usuario.
+10. `DELETE /auth/devices/{id}` (protegido) — revoca un dispositivo (útil si se perdió el teléfono).
+
+La confianza dura 30 días desde el último uso (ventana deslizante, `DEVICE_TRUST_TTL`), y el dispositivo se revoca automáticamente tras 5 PIN incorrectos seguidos (`DEVICE_PIN_MAX_TRIES`).
 
 ## Requisitos previos
 
@@ -69,13 +79,15 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 
 ## Base de datos
 
-Aplica la migración contra tu base de Neon (o local). Necesitas `psql` instalado, o puedes pegar el contenido de `migrations/0001_init.sql` directamente en el **SQL Editor** que trae el dashboard de Neon (más simple si no quieres instalar `psql`):
+Con `POSTGRES_DSN` configurado en `.env`, aplica todas las migraciones (`migrations/*.sql`, en orden) con la herramienta incluida en el proyecto — no necesitas tener `psql` instalado:
 
 ```bash
-psql "<tu POSTGRES_DSN>" -f migrations/0001_init.sql
+go run ./cmd/migrate
 ```
 
-Redis (Upstash) no necesita migración — las claves OTP se crean solas con TTL.
+(Alternativa manual: pegar el contenido de cada archivo en el **SQL Editor** del dashboard de Neon.)
+
+Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
 
 ## Ejecutar
 
@@ -108,6 +120,18 @@ curl -X POST http://localhost:8080/auth/verify-otp \
 
 # 4. Consumir un endpoint protegido
 curl http://localhost:8080/me -H "Authorization: Bearer <access_token>"
+
+# 5. Marcar este dispositivo como de confianza (usando el access_token del paso 3)
+curl -X POST http://localhost:8080/auth/devices/register \
+  -H "Content-Type: application/json" -H "Authorization: Bearer <access_token>" \
+  -d '{"device_id":"un-uuid-generado-por-tu-app","device_name":"Mi teléfono","pin":"123456"}'
+# -> devuelve { "device_token": "..." } (guardar en almacenamiento seguro, se muestra una sola vez)
+
+# 6. Próximas veces: login solo con PIN, sin password ni OTP
+curl -X POST http://localhost:8080/auth/devices/login \
+  -H "Content-Type: application/json" \
+  -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 5>","pin":"123456"}'
+# -> devuelve access_token + refresh_token + un device_token rotado (reemplaza al anterior)
 ```
 
 ## Documentación de la API

@@ -39,11 +39,12 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Get("/openapi.yaml", serveOpenAPISpec)
 	r.Get("/docs", serveDocs)
 
-	// Rate limits blunt brute-force attempts against credentials and OTP
-	// codes. Fixed windows, keyed by client IP, backed by Redis.
+	// Rate limits blunt brute-force attempts against credentials, OTP codes
+	// and device PINs. Fixed windows, keyed by client IP, backed by Redis.
 	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour)
 	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute)
 	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute)
+	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute)
 
 	r.Route("/auth", func(r chi.Router) {
 		r.With(registerLimiter.Middleware).Post("/register", authHandlers.Register)
@@ -51,6 +52,18 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		r.With(otpLimiter.Middleware).Post("/verify-otp", authHandlers.VerifyOTP)
 		r.Post("/refresh", authHandlers.Refresh)
 		r.Post("/logout", authHandlers.Logout)
+
+		// Trusted device + PIN: a returning device can log in with this
+		// instead of password+OTP. A brand new device always fails here and
+		// must go through the flow above first.
+		r.With(deviceLoginLimiter.Middleware).Post("/devices/login", authHandlers.DeviceLogin)
+
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.RequireAuth(tokens))
+			r.Post("/devices/register", authHandlers.RegisterDevice)
+			r.Get("/devices", authHandlers.ListDevices)
+			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
+		})
 	})
 
 	r.Group(func(r chi.Router) {
