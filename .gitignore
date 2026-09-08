@@ -1,0 +1,21 @@
+# Environment files with real secrets — never commit these
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+/bin/
+/dist/
+*.exe
+*.exe~
+*.test
+*.out
+
+# Go workspace/tooling
+vendor/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
