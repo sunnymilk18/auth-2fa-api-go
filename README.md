@@ -1,4 +1,4 @@
-# auth-2fa-api
+# auth-2fa-api-go
 
 API independiente en Go para autenticación con doble factor por correo (email + contraseña, luego código OTP enviado por email). Pensada para que cualquier otro sistema la consuma vía HTTP.
 
