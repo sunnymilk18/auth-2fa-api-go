@@ -11,12 +11,15 @@ API independiente en Go para autenticación con doble factor por correo (email +
   - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
 - **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp` y `/auth/devices/login` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs.
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
+- **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
 - **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa Gmail SMTP + App Password (solo desarrollo/pruebas). Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
 
 ## Flujo de autenticación
 
-1. `POST /auth/register` — crea el usuario (email + password, hasheado con bcrypt).
+Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#multi-tenant-api-keys) más abajo).
+
+1. `POST /auth/register` — crea el usuario (email + password, hasheado con bcrypt), dentro del sistema identificado por la API key.
 2. `POST /auth/login` — valida email/password. Si son correctos, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
 3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
@@ -89,6 +92,30 @@ go run ./cmd/migrate
 
 Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
 
+**Nota sobre la migración `0004`**: agrega el aislamiento por sistema (multi-tenant) a la tabla `users`. Se auto-protege: si todavía no existe ningún `api_client`, no hace nada (deja aviso en el log de Postgres) — hay que crearlo primero (ver la sección siguiente) y volver a correr `go run ./cmd/migrate` para que la aplique de verdad.
+
+## Multi-tenant (API keys)
+
+Cada sistema que va a consumir esta API (una app móvil, un sitio web, etc.) necesita su propia API key. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas en dos sistemas diferentes.
+
+### Crear el primer cliente
+
+```bash
+go run ./cmd/createclient -name auth-2fa-app-flutter
+```
+
+Esto imprime la API key **una sola vez** — cópiala de inmediato, no se puede recuperar después (solo se guarda su hash). Con al menos un cliente creado, vuelve a correr `go run ./cmd/migrate` para que la migración `0004` complete el aislamiento por tenant sobre los usuarios ya existentes.
+
+### Usarla
+
+El sistema consumidor debe enviar la key en cada request a `/auth/*`:
+
+```
+X-API-Key: sk_live_...
+```
+
+Sin ese header (o con una key inválida/inactiva), la API responde `401`.
+
 ## Ejecutar
 
 ```bash
@@ -101,35 +128,37 @@ El servidor arranca en `http://localhost:8080`.
 ## Probar el flujo
 
 ```bash
+API_KEY="<tu api key de cmd/createclient>"
+
 # 1. Registro
 curl -X POST http://localhost:8080/auth/register \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
 
 # 2. Login (dispara el envío del código por email)
 curl -X POST http://localhost:8080/auth/login \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
 # -> devuelve { "login_token": "...", "message": "..." }
 
 # 3. Verificar el código recibido por correo
 curl -X POST http://localhost:8080/auth/verify-otp \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"login_token":"<el del paso 2>","code":"<el del correo>"}'
 # -> devuelve { "access_token": "...", "refresh_token": "...", "token_type": "Bearer" }
 
-# 4. Consumir un endpoint protegido
+# 4. Consumir un endpoint protegido (no necesita X-API-Key, solo el JWT)
 curl http://localhost:8080/me -H "Authorization: Bearer <access_token>"
 
 # 5. Marcar este dispositivo como de confianza (usando el access_token del paso 3)
 curl -X POST http://localhost:8080/auth/devices/register \
-  -H "Content-Type: application/json" -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>" \
   -d '{"device_id":"un-uuid-generado-por-tu-app","device_name":"Mi teléfono","pin":"123456"}'
 # -> devuelve { "device_token": "..." } (guardar en almacenamiento seguro, se muestra una sola vez)
 
 # 6. Próximas veces: login solo con PIN, sin password ni OTP
 curl -X POST http://localhost:8080/auth/devices/login \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 5>","pin":"123456"}'
 # -> devuelve access_token + refresh_token + un device_token rotado (reemplaza al anterior)
 ```
@@ -156,6 +185,6 @@ El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca d
 ## Notas para producción (pendiente, no implementado aún)
 
 - **Gmail SMTP es solo para desarrollo.** Tiene límites de envío bajos y riesgo de bloqueo de cuenta. Migrar a un proveedor transaccional (SendGrid, SES, Mailgun, Resend) implementando `mailer.Mailer`.
-- **Multi-tenant / API keys**: hoy la API es de un solo consumidor. Para que varios sistemas la consuman de forma aislada, se puede añadir una capa de API keys o client_id/secret por sistema.
 - **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
 - **Rate limiting por email además de por IP**: hoy el límite es solo por IP; se puede añadir un límite adicional por email para frenar ataques dirigidos a una cuenta específica desde múltiples IPs.
+- **Rotación/revocación de API keys**: hoy `cmd/createclient` solo crea; falta un comando o endpoint para rotar o desactivar una key existente sin recrear el cliente.

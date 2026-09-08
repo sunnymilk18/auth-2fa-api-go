@@ -21,15 +21,15 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-func (r *Repository) Create(ctx context.Context, email, passwordHash string) (*User, error) {
+func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHash string) (*User, error) {
 	const q = `
-		INSERT INTO users (email, password_hash)
-		VALUES ($1, $2)
-		RETURNING id, email, password_hash, is_active, created_at, updated_at`
+		INSERT INTO users (api_client_id, email, password_hash)
+		VALUES ($1, $2, $3)
+		RETURNING id, api_client_id, email, password_hash, is_active, created_at, updated_at`
 
 	u := &User{}
-	err := r.pool.QueryRow(ctx, q, email, passwordHash).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+	err := r.pool.QueryRow(ctx, q, apiClientID, email, passwordHash).Scan(
+		&u.ID, &u.APIClientID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		if isUniqueViolation(err) {
@@ -40,14 +40,16 @@ func (r *Repository) Create(ctx context.Context, email, passwordHash string) (*U
 	return u, nil
 }
 
-func (r *Repository) FindByEmail(ctx context.Context, email string) (*User, error) {
+// FindByEmail looks up a user scoped to a single api client — the same
+// email may exist as a different account under a different client.
+func (r *Repository) FindByEmail(ctx context.Context, apiClientID, email string) (*User, error) {
 	const q = `
-		SELECT id, email, password_hash, is_active, created_at, updated_at
-		FROM users WHERE email = $1`
+		SELECT id, api_client_id, email, password_hash, is_active, created_at, updated_at
+		FROM users WHERE api_client_id = $1 AND email = $2`
 
 	u := &User{}
-	err := r.pool.QueryRow(ctx, q, email).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+	err := r.pool.QueryRow(ctx, q, apiClientID, email).Scan(
+		&u.ID, &u.APIClientID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -58,14 +60,16 @@ func (r *Repository) FindByEmail(ctx context.Context, email string) (*User, erro
 	return u, nil
 }
 
+// FindByID looks up a user by their globally-unique id — no api client
+// scoping needed here, since the id alone already identifies one user.
 func (r *Repository) FindByID(ctx context.Context, id string) (*User, error) {
 	const q = `
-		SELECT id, email, password_hash, is_active, created_at, updated_at
+		SELECT id, api_client_id, email, password_hash, is_active, created_at, updated_at
 		FROM users WHERE id = $1`
 
 	u := &User{}
 	err := r.pool.QueryRow(ctx, q, id).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.PasswordHash, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound

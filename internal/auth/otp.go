@@ -23,10 +23,11 @@ var (
 // loginSession is what we keep in Redis between "password verified" and
 // "OTP verified". The code is stored hashed, never in plain text.
 type loginSession struct {
-	UserID   string `json:"user_id"`
-	Email    string `json:"email"`
-	CodeHash string `json:"code_hash"`
-	Attempts int    `json:"attempts"`
+	UserID      string `json:"user_id"`
+	APIClientID string `json:"api_client_id"`
+	Email       string `json:"email"`
+	CodeHash    string `json:"code_hash"`
+	Attempts    int    `json:"attempts"`
 }
 
 // OTPStore manages short-lived login sessions and their one-time codes in
@@ -47,7 +48,7 @@ func NewOTPStore(rdb *redis.Client, ttl time.Duration, maxTries, codeLen int) *O
 // random login token, and returns both the login token (to hand back to the
 // client) and the plain code (to email to the user — never returned to the
 // caller of this API).
-func (s *OTPStore) StartSession(ctx context.Context, userID, email string) (loginToken, code string, err error) {
+func (s *OTPStore) StartSession(ctx context.Context, userID, apiClientID, email string) (loginToken, code string, err error) {
 	code, err = generateNumericCode(s.codeLen)
 	if err != nil {
 		return "", "", fmt.Errorf("generating otp code: %w", err)
@@ -59,10 +60,11 @@ func (s *OTPStore) StartSession(ctx context.Context, userID, email string) (logi
 	}
 
 	sess := loginSession{
-		UserID:   userID,
-		Email:    email,
-		CodeHash: hashCode(code),
-		Attempts: 0,
+		UserID:      userID,
+		APIClientID: apiClientID,
+		Email:       email,
+		CodeHash:    hashCode(code),
+		Attempts:    0,
 	}
 	data, err := json.Marshal(sess)
 	if err != nil {
@@ -79,27 +81,27 @@ func (s *OTPStore) StartSession(ctx context.Context, userID, email string) (logi
 // VerifyCode checks the provided code against the stored session. On
 // success the session is deleted (one-time use). On a wrong code the
 // attempt counter is incremented; after maxTries the session is invalidated.
-func (s *OTPStore) VerifyCode(ctx context.Context, loginToken, code string) (userID, email string, err error) {
+func (s *OTPStore) VerifyCode(ctx context.Context, loginToken, code string) (userID, apiClientID, email string, err error) {
 	key := sessionKey(loginToken)
 
 	raw, err := s.rdb.Get(ctx, key).Bytes()
 	if errors.Is(err, redis.Nil) {
-		return "", "", ErrLoginSessionNotFound
+		return "", "", "", ErrLoginSessionNotFound
 	}
 	if err != nil {
-		return "", "", fmt.Errorf("fetching login session: %w", err)
+		return "", "", "", fmt.Errorf("fetching login session: %w", err)
 	}
 
 	var sess loginSession
 	if err := json.Unmarshal(raw, &sess); err != nil {
-		return "", "", fmt.Errorf("unmarshaling login session: %w", err)
+		return "", "", "", fmt.Errorf("unmarshaling login session: %w", err)
 	}
 
 	if sess.CodeHash != hashCode(code) {
 		sess.Attempts++
 		if sess.Attempts >= s.maxTries {
 			_ = s.rdb.Del(ctx, key).Err()
-			return "", "", ErrTooManyAttempts
+			return "", "", "", ErrTooManyAttempts
 		}
 		updated, _ := json.Marshal(sess)
 		// Preserve remaining TTL instead of resetting it.
@@ -108,11 +110,11 @@ func (s *OTPStore) VerifyCode(ctx context.Context, loginToken, code string) (use
 			ttl = s.ttl
 		}
 		_ = s.rdb.Set(ctx, key, updated, ttl).Err()
-		return "", "", ErrInvalidCode
+		return "", "", "", ErrInvalidCode
 	}
 
 	_ = s.rdb.Del(ctx, key).Err()
-	return sess.UserID, sess.Email, nil
+	return sess.UserID, sess.APIClientID, sess.Email, nil
 }
 
 func sessionKey(loginToken string) string {

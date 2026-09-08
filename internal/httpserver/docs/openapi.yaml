@@ -16,6 +16,12 @@ info:
     y, en aperturas posteriores de la app en el mismo dispositivo, puede
     reautenticarse con `device_id` + `device_token` + `pin`, sin repetir
     password ni código por correo.
+
+    **Multi-tenant**: cada sistema consumidor (app móvil, web, etc.) tiene su
+    propia API key, obtenida con `cmd/createclient`, y debe enviarla en el
+    header `X-API-Key` en cada llamada a `/auth/*`. Los usuarios quedan
+    aislados por sistema — el mismo email puede existir como cuentas
+    distintas bajo dos API keys diferentes.
   version: "1.0.0"
 
 servers:
@@ -69,6 +75,8 @@ paths:
     post:
       tags: [auth]
       summary: Registrar un nuevo usuario
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -105,6 +113,8 @@ paths:
     post:
       tags: [auth]
       summary: Paso 1 del login - Verifica email/password y envía el código OTP por correo
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -135,6 +145,8 @@ paths:
     post:
       tags: [auth]
       summary: Paso 2 del login - Verifica el código OTP y emite los tokens JWT
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -166,6 +178,8 @@ paths:
       tags: [auth]
       summary: Emite un nuevo par de tokens a partir de un refresh token válido
       description: Rota el refresh token (el anterior queda revocado).
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -190,6 +204,8 @@ paths:
     post:
       tags: [auth]
       summary: Revoca un refresh token
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -210,7 +226,8 @@ paths:
         y un device_token nuevos para este device_id (si ya existía, los
         reemplaza).
       security:
-        - bearerAuth: []
+        - apiKeyAuth: []
+          bearerAuth: []
       requestBody:
         required: true
         content:
@@ -246,6 +263,8 @@ paths:
         aquí — debe usar /auth/login primero. El device_token se rota en
         cada uso exitoso: la respuesta trae uno nuevo que reemplaza al
         anterior.
+      security:
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -277,7 +296,8 @@ paths:
       tags: [devices]
       summary: Lista los dispositivos de confianza del usuario autenticado
       security:
-        - bearerAuth: []
+        - apiKeyAuth: []
+          bearerAuth: []
       responses:
         "200":
           description: Lista de dispositivos
@@ -291,7 +311,8 @@ paths:
       tags: [devices]
       summary: Revoca un dispositivo de confianza
       security:
-        - bearerAuth: []
+        - apiKeyAuth: []
+          bearerAuth: []
       parameters:
         - name: id
           in: path
@@ -338,6 +359,14 @@ components:
       description: >
         Access token JWT (RS256), obtenido tras completar el login de dos
         factores. Enviar como `Authorization: Bearer <access_token>`.
+
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >
+        Identifica al sistema consumidor (tenant). Se genera con
+        `cmd/createclient` y se envía en todo request a `/auth/*`.
 
   schemas:
     RegisterRequest:

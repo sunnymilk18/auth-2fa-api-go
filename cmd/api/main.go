@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/config"
 	"auth-2fa-api/internal/db"
@@ -63,12 +64,15 @@ func run() error {
 	deviceRepo := device.NewRepository(pgPool)
 	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL, cfg.DevicePinMaxTries)
 
+	apiClientRepo := apiclient.NewRepository(pgPool)
+	apiClientSvc := apiclient.NewService(apiClientRepo)
+
 	gmailMailer := mailer.NewGmailMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
 
 	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, rdb)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, rdb, apiClientSvc)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

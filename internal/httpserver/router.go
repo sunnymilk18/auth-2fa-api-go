@@ -9,6 +9,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/redis/go-redis/v9"
 
+	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/user"
@@ -17,7 +18,7 @@ import (
 // NewRouter wires all routes: public auth endpoints, API docs, and a sample
 // protected endpoint that any consuming system can imitate to guard its own
 // routes.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client, apiClients *apiclient.Service) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -47,6 +48,10 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute)
 
 	r.Route("/auth", func(r chi.Router) {
+		// Every /auth/* call must identify which consuming system it's from —
+		// used to keep each system's users isolated from the others.
+		r.Use(middleware.RequireAPIKey(apiClients))
+
 		r.With(registerLimiter.Middleware).Post("/register", authHandlers.Register)
 		r.With(loginLimiter.Middleware).Post("/login", authHandlers.Login)
 		r.With(otpLimiter.Middleware).Post("/verify-otp", authHandlers.VerifyOTP)

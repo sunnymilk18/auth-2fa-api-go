@@ -15,8 +15,9 @@ var ErrInvalidToken = errors.New("invalid or expired token")
 // a structure.
 type Claims struct {
 	jwt.RegisteredClaims
-	Email     string `json:"email"`
-	TokenType string `json:"type"` // "access" or "refresh"
+	Email       string `json:"email"`
+	APIClientID string `json:"client_id"` // which consuming system this session belongs to
+	TokenType   string `json:"type"`      // "access" or "refresh"
 }
 
 // TokenManager issues and validates two kinds of tokens:
@@ -46,20 +47,20 @@ func NewTokenManager(accessPrivateKey *rsa.PrivateKey, accessKeyID, refreshSecre
 	}
 }
 
-func (tm *TokenManager) IssueAccessToken(userID, email string) (string, error) {
-	claims := tm.newClaims(userID, email, "access", tm.accessTTL)
+func (tm *TokenManager) IssueAccessToken(userID, apiClientID, email string) (string, error) {
+	claims := tm.newClaims(userID, apiClientID, email, "access", tm.accessTTL)
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = tm.accessKeyID
 	return token.SignedString(tm.accessPrivateKey)
 }
 
-func (tm *TokenManager) IssueRefreshToken(userID, email string) (string, error) {
-	claims := tm.newClaims(userID, email, "refresh", tm.refreshTTL)
+func (tm *TokenManager) IssueRefreshToken(userID, apiClientID, email string) (string, error) {
+	claims := tm.newClaims(userID, apiClientID, email, "refresh", tm.refreshTTL)
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(tm.refreshSecret)
 }
 
-func (tm *TokenManager) newClaims(userID, email, tokenType string, ttl time.Duration) Claims {
+func (tm *TokenManager) newClaims(userID, apiClientID, email, tokenType string, ttl time.Duration) Claims {
 	now := time.Now()
 	return Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -67,8 +68,9 @@ func (tm *TokenManager) newClaims(userID, email, tokenType string, ttl time.Dura
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
-		Email:     email,
-		TokenType: tokenType,
+		Email:       email,
+		APIClientID: apiClientID,
+		TokenType:   tokenType,
 	}
 }
 

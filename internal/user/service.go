@@ -19,8 +19,9 @@ func NewService(repo *Repository) *Service {
 	return &Service{repo: repo}
 }
 
-// Register creates a new user with a bcrypt-hashed password.
-func (s *Service) Register(ctx context.Context, email, password string) (*User, error) {
+// Register creates a new user with a bcrypt-hashed password, scoped to the
+// given api client (tenant).
+func (s *Service) Register(ctx context.Context, apiClientID, email, password string) (*User, error) {
 	email = normalizeEmail(email)
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -28,15 +29,16 @@ func (s *Service) Register(ctx context.Context, email, password string) (*User, 
 		return nil, fmt.Errorf("hashing password: %w", err)
 	}
 
-	return s.repo.Create(ctx, email, string(hash))
+	return s.repo.Create(ctx, apiClientID, email, string(hash))
 }
 
-// VerifyPassword checks credentials and returns the user on success.
-// It does not issue tokens or trigger OTP — that's the auth package's job.
-func (s *Service) VerifyPassword(ctx context.Context, email, password string) (*User, error) {
+// VerifyPassword checks credentials within one api client (tenant) and
+// returns the user on success. It does not issue tokens or trigger OTP —
+// that's the auth package's job.
+func (s *Service) VerifyPassword(ctx context.Context, apiClientID, email, password string) (*User, error) {
 	email = normalizeEmail(email)
 
-	u, err := s.repo.FindByEmail(ctx, email)
+	u, err := s.repo.FindByEmail(ctx, apiClientID, email)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			// Same error as a wrong password: don't leak which part was wrong.

@@ -56,7 +56,13 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := h.svc.Register(r.Context(), req.Email, req.Password)
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid api key")
+		return
+	}
+
+	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, user.ErrEmailTaken) {
 			writeError(w, http.StatusConflict, "email already registered")
@@ -92,7 +98,13 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, err := h.svc.LoginStep1(r.Context(), req.Email, req.Password)
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "missing or invalid api key")
+		return
+	}
+
+	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Email, req.Password)
 	if err != nil {
 		if errors.Is(err, user.ErrInvalidCredentials) {
 			writeError(w, http.StatusUnauthorized, "invalid email or password")

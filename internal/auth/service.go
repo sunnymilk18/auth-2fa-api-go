@@ -48,21 +48,22 @@ func NewService(
 	}
 }
 
-// Register creates a new user account.
-func (s *Service) Register(ctx context.Context, email, password string) (*user.User, error) {
-	return s.users.Register(ctx, email, password)
+// Register creates a new user account, scoped to the calling api client.
+func (s *Service) Register(ctx context.Context, apiClientID, email, password string) (*user.User, error) {
+	return s.users.Register(ctx, apiClientID, email, password)
 }
 
-// LoginStep1 verifies email+password and, on success, generates and emails
-// an OTP code. It returns a login token the client must present in
-// LoginStep2 along with the code — the code itself is never returned here.
-func (s *Service) LoginStep1(ctx context.Context, email, password string) (loginToken string, err error) {
-	u, err := s.users.VerifyPassword(ctx, email, password)
+// LoginStep1 verifies email+password within one api client (tenant) and, on
+// success, generates and emails an OTP code. It returns a login token the
+// client must present in LoginStep2 along with the code — the code itself
+// is never returned here.
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, email, password string) (loginToken string, err error) {
+	u, err := s.users.VerifyPassword(ctx, apiClientID, email, password)
 	if err != nil {
 		return "", err
 	}
 
-	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.Email)
+	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
 		return "", err
 	}
@@ -81,22 +82,22 @@ func (s *Service) LoginStep1(ctx context.Context, email, password string) (login
 // LoginStep2 verifies the OTP code and, on success, issues a fresh
 // access/refresh token pair.
 func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (accessToken, refreshToken string, err error) {
-	userID, email, err := s.otp.VerifyCode(ctx, loginToken, code)
+	userID, apiClientID, email, err := s.otp.VerifyCode(ctx, loginToken, code)
 	if err != nil {
 		return "", "", err
 	}
-	return s.issueTokenPair(ctx, userID, email)
+	return s.issueTokenPair(ctx, userID, apiClientID, email)
 }
 
 // issueTokenPair mints an access+refresh token pair for an already-verified
 // user and persists the refresh token. Shared by every login path (password
 // + OTP, device + PIN, and refresh rotation).
-func (s *Service) issueTokenPair(ctx context.Context, userID, email string) (accessToken, refreshToken string, err error) {
-	accessToken, err = s.tokens.IssueAccessToken(userID, email)
+func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email string) (accessToken, refreshToken string, err error) {
+	accessToken, err = s.tokens.IssueAccessToken(userID, apiClientID, email)
 	if err != nil {
 		return "", "", err
 	}
-	refreshToken, err = s.tokens.IssueRefreshToken(userID, email)
+	refreshToken, err = s.tokens.IssueRefreshToken(userID, apiClientID, email)
 	if err != nil {
 		return "", "", err
 	}
@@ -126,7 +127,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 		return "", "", err
 	}
 
-	return s.issueTokenPair(ctx, claims.Subject, claims.Email)
+	return s.issueTokenPair(ctx, claims.Subject, claims.APIClientID, claims.Email)
 }
 
 // Logout revokes a refresh token so it can no longer be used.
@@ -162,7 +163,7 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 		return "", "", "", err
 	}
 
-	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.Email)
+	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
 		return "", "", "", err
 	}
