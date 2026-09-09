@@ -23,7 +23,15 @@ func NewAPIClient(t *testing.T, pool *pgxpool.Pool) (*apiclient.APIClient, strin
 	}
 
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM api_clients WHERE id = $1`, client.ID)
+		ctx := context.Background()
+		// Some tests create users via user.Service/auth.Service directly
+		// (not through NewUser, which registers its own cleanup) — delete
+		// any left referencing this client first, so that oversight doesn't
+		// make the DELETE below silently no-op behind the FK and leave both
+		// orphaned forever. refresh_tokens/trusted_devices cascade off
+		// users(id) on their own (see migrations 0001/0002).
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE api_client_id = $1`, client.ID)
+		_, _ = pool.Exec(ctx, `DELETE FROM api_clients WHERE id = $1`, client.ID)
 	})
 
 	return client, plaintextKey
