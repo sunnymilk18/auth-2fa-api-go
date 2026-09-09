@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -65,6 +68,7 @@ func (tm *TokenManager) newClaims(userID, apiClientID, email, tokenType string, 
 	return Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   userID,
+			ID:        newJTI(),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
@@ -72,6 +76,20 @@ func (tm *TokenManager) newClaims(userID, apiClientID, email, tokenType string, 
 		APIClientID: apiClientID,
 		TokenType:   tokenType,
 	}
+}
+
+// newJTI generates a random JWT ID. IssuedAt/ExpiresAt are only
+// second-precision, so two tokens for the same user issued within the same
+// second would otherwise be byte-for-byte identical (and collide on
+// refresh_tokens.token_hash, which is UNIQUE) without this.
+func newJTI() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand.Read on the standard reader only fails if the OS RNG
+		// itself is broken — nothing a caller could sensibly recover from.
+		panic(fmt.Sprintf("auth: reading random bytes for jti: %v", err))
+	}
+	return hex.EncodeToString(b)
 }
 
 func (tm *TokenManager) ParseAccessToken(tokenStr string) (*Claims, error) {
