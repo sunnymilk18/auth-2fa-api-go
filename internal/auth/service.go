@@ -22,6 +22,7 @@ type Service struct {
 	refresh          *RefreshRepository
 	devices          *device.Service
 	passwordReset    *PasswordResetStore
+	loginAttempts    *LoginAttemptLimiter
 	mailer           mailer.Mailer
 	otpTTL           time.Duration
 	refreshTTL       time.Duration
@@ -35,6 +36,7 @@ func NewService(
 	refresh *RefreshRepository,
 	devices *device.Service,
 	passwordReset *PasswordResetStore,
+	loginAttempts *LoginAttemptLimiter,
 	m mailer.Mailer,
 	otpTTL time.Duration,
 	refreshTTL time.Duration,
@@ -47,6 +49,7 @@ func NewService(
 		refresh:          refresh,
 		devices:          devices,
 		passwordReset:    passwordReset,
+		loginAttempts:    loginAttempts,
 		mailer:           m,
 		otpTTL:           otpTTL,
 		refreshTTL:       refreshTTL,
@@ -63,11 +66,34 @@ func (s *Service) Register(ctx context.Context, apiClientID, email, password str
 // success, generates and emails an OTP code. It returns a login token the
 // client must present in LoginStep2 along with the code — the code itself
 // is never returned here.
+//
+// Guards against password-guessing spread across many IPs against one
+// account (see LoginAttemptLimiter) — checked before, and recorded after,
+// VerifyPassword itself, so an account that doesn't exist is throttled
+// exactly the same way a real one would be (same as VerifyPassword's own
+// error not distinguishing the two) — this must not become a way to probe
+// which emails are registered.
 func (s *Service) LoginStep1(ctx context.Context, apiClientID, email, password string) (loginToken string, err error) {
-	u, err := s.users.VerifyPassword(ctx, apiClientID, email, password)
+	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, email)
 	if err != nil {
 		return "", err
 	}
+	if locked {
+		return "", ErrTooManyFailedLogins
+	}
+
+	u, err := s.users.VerifyPassword(ctx, apiClientID, email, password)
+	if err != nil {
+		if errors.Is(err, user.ErrInvalidCredentials) {
+			// Best-effort: a Redis hiccup here shouldn't turn a legitimate
+			// wrong-password response into a 500.
+			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, email)
+		}
+		return "", err
+	}
+	// Best-effort for the same reason — a stale counter after this just
+	// means a slightly stricter throttle later, not a security hole.
+	_ = s.loginAttempts.Reset(ctx, apiClientID, email)
 
 	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {

@@ -106,12 +106,15 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 
 	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Email, req.Password)
 	if err != nil {
-		if errors.Is(err, user.ErrInvalidCredentials) {
+		switch {
+		case errors.Is(err, user.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "correo o contraseña incorrectos")
-			return
+		case errors.Is(err, ErrTooManyFailedLogins):
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos fallidos para esta cuenta, intenta de nuevo más tarde")
+		default:
+			log.Printf("login error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo iniciar el proceso de login")
 		}
-		log.Printf("login error: %v", err)
-		writeError(w, http.StatusInternalServerError, "no se pudo iniciar el proceso de login")
 		return
 	}
 

@@ -41,9 +41,10 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false)
@@ -141,6 +142,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 	handlers := auth.NewHandlers(auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour,
 	))
 	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false)

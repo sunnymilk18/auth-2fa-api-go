@@ -28,9 +28,10 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer = testutil.NewFakeMailer()
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour)
 	return svc, tokens, mailer, client.ID
 }
 
@@ -92,6 +93,77 @@ func TestLoginStep1_WrongPassword(t *testing.T) {
 	}
 	if len(mailer.Sent()) != 0 {
 		t.Fatal("LoginStep1 with wrong password must not send an OTP email")
+	}
+}
+
+// Regression coverage for the per-account login throttle: repeated wrong
+// passwords against ONE account eventually lock it out even though each
+// individual attempt is well within the per-IP rate limiter's own budget
+// (that limiter isn't exercised here at all — this is purely
+// auth.Service/LoginAttemptLimiter) — the scenario that limiter alone can't
+// catch: someone spreading guesses across many source IPs.
+func TestLoginStep1_LocksOutAfterTooManyFailures(t *testing.T) {
+	svc, _, _, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+
+	// newTestService builds the limiter with maxFails=3.
+	for i := 1; i <= 2; i++ {
+		if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+			t.Fatalf("wrong password attempt %d: err = %v, want %v", i, err, user.ErrInvalidCredentials)
+		}
+	}
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+		t.Fatalf("wrong password attempt 3: err = %v, want %v", err, user.ErrInvalidCredentials)
+	}
+
+	// Locked out now — even the CORRECT password is rejected.
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrTooManyFailedLogins {
+		t.Fatalf("correct password after lockout: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
+	}
+}
+
+// The lockout must not become a way to enumerate which emails are
+// registered: an account that doesn't exist gets throttled exactly the same
+// way a real one would, since VerifyPassword already returns the same
+// error for both.
+func TestLoginStep1_LockoutAppliesEvenToUnknownAccounts(t *testing.T) {
+	svc, _, _, apiClientID := newTestService(t)
+	email := "nobody-" + testutil.UniqueSuffix(t) + "@example.com"
+
+	for i := 1; i <= 3; i++ {
+		if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); err != user.ErrInvalidCredentials {
+			t.Fatalf("attempt %d against unknown account: err = %v, want %v", i, err, user.ErrInvalidCredentials)
+		}
+	}
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); err != auth.ErrTooManyFailedLogins {
+		t.Fatalf("err = %v, want %v", err, auth.ErrTooManyFailedLogins)
+	}
+}
+
+// A successful login resets the counter, so past mistakes don't linger.
+func TestLoginStep1_SuccessResetsFailureCount(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+		t.Fatalf("wrong password attempt: err = %v, want %v", err, user.ErrInvalidCredentials)
+	}
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("correct password: unexpected error %v", err)
+	}
+	_, _ = mailer.Last() // drain, not asserted on here
+
+	// Two more wrong guesses shouldn't be attempt 2-and-3-of-3 against the
+	// pre-reset count — they're 1-and-2 of a fresh window.
+	for i := 1; i <= 2; i++ {
+		if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+			t.Fatalf("post-reset wrong attempt %d: err = %v, want %v", i, err, user.ErrInvalidCredentials)
+		}
+	}
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("correct password (should not be locked out yet): unexpected error %v", err)
 	}
 }
 

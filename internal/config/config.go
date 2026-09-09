@@ -39,6 +39,13 @@ type Config struct {
 	// bits of randomness is infeasible.
 	PasswordResetTTL time.Duration
 
+	// Per-account login throttle (on top of the per-IP rate limiter) —
+	// catches password guessing spread across many IPs against one
+	// account. A temporary throttle, not a permanent lockout — see
+	// LoginAttemptLimiter's doc comment for why.
+	LoginMaxFailedAttempts int
+	LoginLockoutWindow     time.Duration
+
 	// Trusted device + PIN shortcut around password+OTP.
 	DeviceTrustTTL    time.Duration
 	DevicePinMaxTries int
@@ -98,6 +105,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PasswordResetTTL, err = getEnvDuration("PASSWORD_RESET_TTL", time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.LoginMaxFailedAttempts, err = getEnvInt("LOGIN_MAX_FAILED_ATTEMPTS", 10); err != nil {
+		return nil, err
+	}
+	if cfg.LoginLockoutWindow, err = getEnvDuration("LOGIN_LOCKOUT_WINDOW", 15*time.Minute); err != nil {
 		return nil, err
 	}
 	if cfg.DeviceTrustTTL, err = getEnvDuration("DEVICE_TRUST_TTL", 30*24*time.Hour); err != nil {

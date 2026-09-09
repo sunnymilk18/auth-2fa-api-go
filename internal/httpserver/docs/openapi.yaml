@@ -135,7 +135,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "429":
-          description: Demasiados intentos desde esta IP, intenta más tarde
+          description: >
+            Demasiadas solicitudes — por IP (límite general de este
+            endpoint) o por cuenta (demasiadas contraseñas incorrectas
+            seguidas contra este email, incluso desde IPs distintas).
           content:
             application/json:
               schema:

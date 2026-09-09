@@ -61,6 +61,7 @@ func run() error {
 	tokenMgr := auth.NewTokenManager(privateKey, cfg.JWTKeyID, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	refreshRepo := auth.NewRefreshRepository(pgPool)
 	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, cfg.LoginMaxFailedAttempts, cfg.LoginLockoutWindow)
 
 	deviceRepo := device.NewRepository(pgPool)
 	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL, cfg.DevicePinMaxTries)
@@ -70,7 +71,7 @@ func run() error {
 
 	gmailMailer := mailer.NewGmailMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL)
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, loginAttempts, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders)

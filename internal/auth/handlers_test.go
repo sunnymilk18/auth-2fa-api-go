@@ -154,6 +154,32 @@ func TestHandler_Login_WrongPassword(t *testing.T) {
 	}
 }
 
+func TestHandler_Login_TooManyFailedAttempts(t *testing.T) {
+	h, svc, _, _, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+
+	doLogin := func(password string) *httptest.ResponseRecorder {
+		body := jsonBody(t, map[string]string{"email": email, "password": password})
+		req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
+		rec := httptest.NewRecorder()
+		h.Login(rec, req)
+		return rec
+	}
+
+	// newTestHandlers' underlying service was built with maxFails=3.
+	for i := 1; i <= 3; i++ {
+		if rec := doLogin("wrong"); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong password attempt %d: status = %d, want %d", i, rec.Code, http.StatusUnauthorized)
+		}
+	}
+
+	rec := doLogin("correcthorsebattery")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("locked out (even with the correct password): status = %d, want %d, body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+	}
+}
+
 func TestHandler_Login_Success(t *testing.T) {
 	h, svc, _, _, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
