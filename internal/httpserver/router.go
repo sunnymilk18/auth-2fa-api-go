@@ -46,6 +46,8 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute, trustProxyHeaders)
 	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute, trustProxyHeaders)
 	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders)
+	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour, trustProxyHeaders)
+	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -62,6 +64,9 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		// instead of password+OTP. A brand new device always fails here and
 		// must go through the flow above first.
 		r.With(deviceLoginLimiter.Middleware).Post("/devices/login", authHandlers.DeviceLogin)
+
+		r.With(passwordResetRequestLimiter.Middleware).Post("/password-reset/request", authHandlers.RequestPasswordReset)
+		r.With(passwordResetConfirmLimiter.Middleware).Post("/password-reset/confirm", authHandlers.ConfirmPasswordReset)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAuth(tokens))

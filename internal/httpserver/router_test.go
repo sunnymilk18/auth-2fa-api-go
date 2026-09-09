@@ -37,9 +37,10 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, tokens, users, rdb, apiClients, false)
@@ -125,6 +126,8 @@ func TestRouter_AuthRoutesRequireAPIKey(t *testing.T) {
 		{http.MethodPost, "/auth/devices/register", accessToken},
 		{http.MethodGet, "/auth/devices", accessToken},
 		{http.MethodDelete, "/auth/devices/some-id", accessToken},
+		{http.MethodPost, "/auth/password-reset/request", ""},
+		{http.MethodPost, "/auth/password-reset/confirm", ""},
 	}
 	for _, c := range cases {
 		rec := doRequest(r, c.method, c.path, "" /* no api key */, c.bearer, map[string]string{})
@@ -203,5 +206,32 @@ func TestRouter_Register_WithAPIKey_Succeeds(t *testing.T) {
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+}
+
+// Password reset needs no Bearer token — same reasoning as
+// /auth/devices/login: there's no session to present one from yet. The API
+// key alone must be enough to reach the handler (business-logic errors, not
+// "missing Authorization header", if anything goes wrong from there).
+func TestRouter_PasswordReset_NoBearerNeeded(t *testing.T) {
+	r, apiKey, _ := newTestRouter(t)
+
+	reqRec := doRequest(r, http.MethodPost, "/auth/password-reset/request", apiKey, "", map[string]string{
+		"email": "nobody@example.com",
+	})
+	if reqRec.Code != http.StatusOK {
+		t.Fatalf("POST /auth/password-reset/request with API key only: status = %d, want %d, body=%s", reqRec.Code, http.StatusOK, reqRec.Body.String())
+	}
+
+	confirmRec := doRequest(r, http.MethodPost, "/auth/password-reset/confirm", apiKey, "", map[string]string{
+		"reset_token": "does-not-exist", "new_password": "new-password-456",
+	})
+	if confirmRec.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /auth/password-reset/confirm with API key only: status = %d, want %d", confirmRec.Code, http.StatusUnauthorized)
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(confirmRec.Body.Bytes(), &resp)
+	if resp["error"] == "falta el header Authorization o tiene un formato inválido" {
+		t.Fatalf("/auth/password-reset/confirm incorrectly required a Bearer token: %v", resp)
 	}
 }

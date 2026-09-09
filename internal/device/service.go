@@ -109,6 +109,12 @@ func (s *Service) Revoke(ctx context.Context, userID, id string) error {
 	return s.repo.RevokeOwned(ctx, id, userID)
 }
 
+// RevokeAllForUser revokes every trusted device belonging to userID. See
+// Repository.RevokeAllForUser for why the password reset flow needs this.
+func (s *Service) RevokeAllForUser(ctx context.Context, userID string) error {
+	return s.repo.RevokeAllForUser(ctx, userID)
+}
+
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])

@@ -16,14 +16,16 @@ import (
 // JWT issuance into the full two-factor login flow, plus the trusted-device
 // + PIN shortcut that lets a recognized device skip password+OTP.
 type Service struct {
-	users      *user.Service
-	otp        *OTPStore
-	tokens     *TokenManager
-	refresh    *RefreshRepository
-	devices    *device.Service
-	mailer     mailer.Mailer
-	otpTTL     time.Duration
-	refreshTTL time.Duration
+	users            *user.Service
+	otp              *OTPStore
+	tokens           *TokenManager
+	refresh          *RefreshRepository
+	devices          *device.Service
+	passwordReset    *PasswordResetStore
+	mailer           mailer.Mailer
+	otpTTL           time.Duration
+	refreshTTL       time.Duration
+	passwordResetTTL time.Duration
 }
 
 func NewService(
@@ -32,19 +34,23 @@ func NewService(
 	tokens *TokenManager,
 	refresh *RefreshRepository,
 	devices *device.Service,
+	passwordReset *PasswordResetStore,
 	m mailer.Mailer,
 	otpTTL time.Duration,
 	refreshTTL time.Duration,
+	passwordResetTTL time.Duration,
 ) *Service {
 	return &Service{
-		users:      users,
-		otp:        otp,
-		tokens:     tokens,
-		refresh:    refresh,
-		devices:    devices,
-		mailer:     m,
-		otpTTL:     otpTTL,
-		refreshTTL: refreshTTL,
+		users:            users,
+		otp:              otp,
+		tokens:           tokens,
+		refresh:          refresh,
+		devices:          devices,
+		passwordReset:    passwordReset,
+		mailer:           m,
+		otpTTL:           otpTTL,
+		refreshTTL:       refreshTTL,
+		passwordResetTTL: passwordResetTTL,
 	}
 }
 
@@ -133,6 +139,56 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 // Logout revokes a refresh token so it can no longer be used.
 func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	return s.refresh.Revoke(ctx, refreshToken)
+}
+
+// RequestPasswordReset emails a reset token if apiClientID/email matches an
+// account. Always succeeds from the caller's point of view regardless of
+// whether the account exists — same reasoning as VerifyPassword returning
+// one error for both "no such user" and "wrong password": the response
+// must not leak which emails are registered.
+func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email string) error {
+	u, err := s.users.FindByEmail(ctx, apiClientID, email)
+	if err != nil {
+		if errors.Is(err, user.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+
+	token, err := s.passwordReset.StartReset(ctx, u.ID, u.APIClientID)
+	if err != nil {
+		return err
+	}
+
+	body := fmt.Sprintf(
+		"Usa este código para restablecer tu contraseña: %s\n\nExpira en %s. Si no solicitaste esto, ignora este correo.",
+		token, s.passwordResetTTL.String(),
+	)
+	if err := s.mailer.Send(ctx, u.Email, "Restablece tu contraseña", body); err != nil {
+		return fmt.Errorf("sending password reset email: %w", err)
+	}
+	return nil
+}
+
+// ResetPassword consumes a reset token and sets a new password. It also
+// revokes every refresh token and every trusted device (PIN unlock) the
+// user has — a password reset should force re-authentication everywhere:
+// the trusted-device shortcut bypasses password+OTP entirely, so leaving it
+// intact would let whoever set it up (possibly an attacker, during whatever
+// compromise prompted the reset) keep getting in regardless of the new
+// password.
+func (s *Service) ResetPassword(ctx context.Context, resetToken, newPassword string) error {
+	userID, _, err := s.passwordReset.ConsumeToken(ctx, resetToken)
+	if err != nil {
+		return err
+	}
+	if err := s.users.UpdatePassword(ctx, userID, newPassword); err != nil {
+		return err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.devices.RevokeAllForUser(ctx, userID)
 }
 
 // PublicKey exposes the access-token signing key's public half, for JWKS.

@@ -27,9 +27,10 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour)
 	mailer = testutil.NewFakeMailer()
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, mailer, 5*time.Minute, 7*24*time.Hour)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour)
 	return svc, tokens, mailer, client.ID
 }
 

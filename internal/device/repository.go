@@ -149,3 +149,17 @@ func (r *Repository) RevokeOwned(ctx context.Context, id, userID string) error {
 	}
 	return nil
 }
+
+// RevokeAllForUser revokes every trusted device userID has — used by the
+// password reset flow: the trusted-device+PIN shortcut bypasses
+// password+OTP entirely, so leaving it intact after a reset would let
+// whoever set it up (possibly an attacker, during whatever compromise
+// prompted the reset) keep getting in regardless of the new password.
+func (r *Repository) RevokeAllForUser(ctx context.Context, userID string) error {
+	const q = `UPDATE trusted_devices SET revoked = TRUE, updated_at = now() WHERE user_id = $1 AND revoked = FALSE`
+	_, err := r.pool.Exec(ctx, q, userID)
+	if err != nil {
+		return fmt.Errorf("revoking all trusted devices for user: %w", err)
+	}
+	return nil
+}

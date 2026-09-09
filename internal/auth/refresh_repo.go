@@ -65,6 +65,18 @@ func (r *RefreshRepository) Revoke(ctx context.Context, token string) error {
 	return nil
 }
 
+// RevokeAllForUser invalidates every refresh token userID currently holds —
+// used by the password reset flow to force re-authentication everywhere,
+// in case the reset was triggered by a compromised session.
+func (r *RefreshRepository) RevokeAllForUser(ctx context.Context, userID string) error {
+	const q = `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1 AND revoked = FALSE`
+	_, err := r.pool.Exec(ctx, q, userID)
+	if err != nil {
+		return fmt.Errorf("revoking all refresh tokens for user: %w", err)
+	}
+	return nil
+}
+
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])

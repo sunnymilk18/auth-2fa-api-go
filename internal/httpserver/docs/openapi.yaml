@@ -216,6 +216,59 @@ paths:
         "204":
           description: Token revocado
 
+  /auth/password-reset/request:
+    post:
+      tags: [auth]
+      summary: Solicita un correo con un código para restablecer la contraseña
+      description: >
+        Responde igual (200) exista o no una cuenta con ese correo, para no
+        filtrar qué correos están registrados. Si existe, se envía un correo
+        con un código de un solo uso.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetRequestRequest"
+      responses:
+        "200":
+          description: Solicitud procesada (independientemente de si el correo existe)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+
+  /auth/password-reset/confirm:
+    post:
+      tags: [auth]
+      summary: Consume el código de restablecimiento y establece una nueva contraseña
+      description: >
+        El código es de un solo uso. Al confirmarse, se revocan todas las
+        sesiones (refresh tokens) y todos los dispositivos de confianza
+        (PIN) del usuario, forzando a iniciar sesión de nuevo en todos lados.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordResetConfirmRequest"
+      responses:
+        "204":
+          description: Contraseña actualizada
+        "401":
+          description: Código inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /auth/devices/register:
     post:
       tags: [devices]
@@ -418,6 +471,25 @@ components:
       properties:
         refresh_token:
           type: string
+
+    PasswordResetRequestRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+
+    PasswordResetConfirmRequest:
+      type: object
+      required: [reset_token, new_password]
+      properties:
+        reset_token:
+          type: string
+        new_password:
+          type: string
+          format: password
+          minLength: 8
 
     TokenResponse:
       type: object

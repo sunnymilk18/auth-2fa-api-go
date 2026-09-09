@@ -80,6 +80,21 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*User, error) {
 	return u, nil
 }
 
+// UpdatePassword replaces id's stored password hash — used by the password
+// reset flow (the hash is already computed by the caller; this repository
+// never sees a plaintext password).
+func (r *Repository) UpdatePassword(ctx context.Context, id, passwordHash string) error {
+	const q = `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, passwordHash)
+	if err != nil {
+		return fmt.Errorf("updating password: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // isUniqueViolation checks for Postgres SQLSTATE 23505 without importing
 // pgconn directly in callers.
 func isUniqueViolation(err error) bool {

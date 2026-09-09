@@ -218,6 +218,104 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 	}
 }
 
+// --- Password reset ---
+
+func TestHandler_RequestPasswordReset_SameResponseRegardlessOfAccountExistence(t *testing.T) {
+	h, svc, _, _, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "old-password-123")
+
+	knownReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": email})), apiClientID)
+	knownRec := httptest.NewRecorder()
+	h.RequestPasswordReset(knownRec, knownReq)
+
+	unknownReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": "nobody@example.com"})), apiClientID)
+	unknownRec := httptest.NewRecorder()
+	h.RequestPasswordReset(unknownRec, unknownReq)
+
+	if knownRec.Code != http.StatusOK || unknownRec.Code != http.StatusOK {
+		t.Fatalf("status codes = %d (known), %d (unknown), want both %d", knownRec.Code, unknownRec.Code, http.StatusOK)
+	}
+	if knownRec.Body.String() != unknownRec.Body.String() {
+		t.Fatalf("response bodies differ (leaks account existence): known=%q unknown=%q", knownRec.Body.String(), unknownRec.Body.String())
+	}
+}
+
+func TestHandler_RequestPasswordReset_MissingAPIClientContext(t *testing.T) {
+	h, _, _, _, _ := newTestHandlers(t)
+	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": "a@example.com"})) // no withAPIClient
+	rec := httptest.NewRecorder()
+
+	h.RequestPasswordReset(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandler_ConfirmPasswordReset_ShortPassword(t *testing.T) {
+	h, _, _, _, _ := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"reset_token": "whatever", "new_password": "short"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body)
+	rec := httptest.NewRecorder()
+
+	h.ConfirmPasswordReset(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandler_ConfirmPasswordReset_InvalidToken(t *testing.T) {
+	h, _, _, _, _ := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"reset_token": "does-not-exist", "new_password": "new-password-456"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body)
+	rec := httptest.NewRecorder()
+
+	h.ConfirmPasswordReset(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandler_PasswordReset_FullFlow(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "old-password-123")
+
+	reqReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": email})), apiClientID)
+	reqRec := httptest.NewRecorder()
+	h.RequestPasswordReset(reqRec, reqReq)
+	if reqRec.Code != http.StatusOK {
+		t.Fatalf("RequestPasswordReset status = %d, want %d", reqRec.Code, http.StatusOK)
+	}
+
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("no password reset email was sent")
+	}
+	token := testutil.ExtractResetToken(sent.Body)
+	if token == "" {
+		t.Fatalf("could not find a reset token in email body: %q", sent.Body)
+	}
+
+	confirmReq := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", jsonBody(t, map[string]string{"reset_token": token, "new_password": "new-password-456"}))
+	confirmRec := httptest.NewRecorder()
+	h.ConfirmPasswordReset(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusNoContent {
+		t.Fatalf("ConfirmPasswordReset status = %d, want %d, body=%s", confirmRec.Code, http.StatusNoContent, confirmRec.Body.String())
+	}
+
+	// The new password now logs in; the old one doesn't.
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"email": email, "password": "new-password-456"})), apiClientID)
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("Login with new password status = %d, want %d, body=%s", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+}
+
 // --- Refresh / Logout ---
 
 func TestHandler_Refresh_InvalidToken(t *testing.T) {

@@ -62,6 +62,23 @@ func (s *Service) FindByID(ctx context.Context, id string) (*User, error) {
 	return s.repo.FindByID(ctx, id)
 }
 
+// FindByEmail looks up a user scoped to one api client (tenant) — used by
+// the password reset flow, which needs the account without also verifying
+// a password.
+func (s *Service) FindByEmail(ctx context.Context, apiClientID, email string) (*User, error) {
+	return s.repo.FindByEmail(ctx, apiClientID, normalizeEmail(email))
+}
+
+// UpdatePassword bcrypt-hashes newPassword and replaces userID's stored
+// hash.
+func (s *Service) UpdatePassword(ctx context.Context, userID, newPassword string) error {
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing password: %w", err)
+	}
+	return s.repo.UpdatePassword(ctx, userID, string(hash))
+}
+
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }

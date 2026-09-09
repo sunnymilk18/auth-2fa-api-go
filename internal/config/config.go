@@ -34,6 +34,11 @@ type Config struct {
 	OTPTTL      time.Duration
 	OTPMaxTries int
 
+	// Password reset: a single high-entropy emailed token, no attempt limit
+	// needed (unlike the short numeric OTP code) since brute-forcing 256
+	// bits of randomness is infeasible.
+	PasswordResetTTL time.Duration
+
 	// Trusted device + PIN shortcut around password+OTP.
 	DeviceTrustTTL    time.Duration
 	DevicePinMaxTries int
@@ -90,6 +95,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.OTPTTL, err = getEnvDuration("OTP_TTL", 5*time.Minute); err != nil {
+		return nil, err
+	}
+	if cfg.PasswordResetTTL, err = getEnvDuration("PASSWORD_RESET_TTL", time.Hour); err != nil {
 		return nil, err
 	}
 	if cfg.DeviceTrustTTL, err = getEnvDuration("DEVICE_TRUST_TTL", 30*24*time.Hour); err != nil {

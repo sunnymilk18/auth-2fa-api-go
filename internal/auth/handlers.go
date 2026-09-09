@@ -207,6 +207,73 @@ func (h *Handlers) Logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- Password reset ---
+
+type passwordResetRequestRequest struct {
+	Email string `json:"email"`
+}
+
+type passwordResetConfirmRequest struct {
+	ResetToken  string `json:"reset_token"`
+	NewPassword string `json:"new_password"`
+}
+
+// RequestPasswordReset emails a reset code if the address matches an
+// account. The response is identical either way — it must not reveal
+// whether a given email is registered.
+func (h *Handlers) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req passwordResetRequestRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, "el correo es obligatorio")
+		return
+	}
+
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
+		return
+	}
+
+	if err := h.svc.RequestPasswordReset(r.Context(), apiClientID, req.Email); err != nil {
+		log.Printf("request password reset error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo procesar la solicitud")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"message": "si el correo está registrado, se envió un código para restablecer la contraseña",
+	})
+}
+
+// ConfirmPasswordReset consumes a reset code and sets a new password.
+func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) {
+	var req passwordResetConfirmRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
+		return
+	}
+
+	if err := h.svc.ResetPassword(r.Context(), req.ResetToken, req.NewPassword); err != nil {
+		if errors.Is(err, ErrPasswordResetTokenInvalid) {
+			writeError(w, http.StatusUnauthorized, "el código de restablecimiento es inválido o expiró")
+			return
+		}
+		log.Printf("reset password error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo restablecer la contraseña")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- Trusted devices + PIN (shortcut around password+OTP on a known device) ---
 
 type registerDeviceRequest struct {
