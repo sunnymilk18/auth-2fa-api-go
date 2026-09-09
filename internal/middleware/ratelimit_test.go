@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"auth-2fa-api/internal/testutil"
 )
 
@@ -154,5 +156,43 @@ func TestRateLimiter_WindowResets(t *testing.T) {
 	allowed, err = rl.Allow(ctx, "key")
 	if err != nil || !allowed {
 		t.Fatalf("call after window reset: allowed=%v err=%v, want true, nil", allowed, err)
+	}
+}
+
+// If Redis itself is unreachable, Allow must report the error (callers that
+// care can decide what to do) but Middleware must fail OPEN — a Redis
+// outage taking down rate limiting is an acceptable tradeoff next to it
+// taking down the whole API (register/login/etc. would otherwise 500 for
+// everyone the moment Redis has a hiccup).
+func TestRateLimiter_FailsOpenWhenRedisIsDown(t *testing.T) {
+	_, mr := testutil.RedisClientAndServer(t)
+	addr := mr.Addr()
+	mr.Close() // simulate Redis being unreachable
+
+	// MaxRetries: -1 disables go-redis's own dial retries — irrelevant to
+	// what this test checks (Allow/Middleware's behavior on failure) and
+	// would otherwise make it take several seconds for no benefit.
+	rdb := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
+	t.Cleanup(func() { _ = rdb.Close() })
+	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
+
+	allowed, err := rl.Allow(t.Context(), "key")
+	if err == nil {
+		t.Fatal("Allow() with Redis down: want an error, got nil")
+	}
+	if allowed {
+		t.Fatal("Allow() with Redis down: want allowed=false alongside the error (Middleware, not Allow, decides to fail open)")
+	}
+
+	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = "203.0.113.5:12345"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Middleware with Redis down: status = %d, want %d (fail open)", rec.Code, http.StatusOK)
 	}
 }
