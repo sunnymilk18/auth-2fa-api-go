@@ -78,43 +78,69 @@ func (s *OTPStore) StartSession(ctx context.Context, userID, apiClientID, email 
 	return loginToken, code, nil
 }
 
+// verifyCodeScript does the whole read-compare-increment-write in one
+// atomic Redis operation. Doing this as separate GET/SET calls (as an
+// earlier version of this code did) is a lost-update race: concurrent wrong
+// guesses against the same login_token can all read the same stale Attempts
+// value before any of them writes back the increment, letting an attacker
+// who already knows the password (and so already has a login_token) exceed
+// maxTries by firing guesses in parallel instead of sequentially.
+var verifyCodeScript = redis.NewScript(`
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+	return {'not_found'}
+end
+local sess = cjson.decode(raw)
+if sess.code_hash == ARGV[1] then
+	redis.call('DEL', KEYS[1])
+	return {'ok', sess.user_id, sess.api_client_id, sess.email}
+end
+sess.attempts = sess.attempts + 1
+if sess.attempts >= tonumber(ARGV[2]) then
+	redis.call('DEL', KEYS[1])
+	return {'too_many'}
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl <= 0 then
+	ttl = tonumber(ARGV[3])
+end
+redis.call('SET', KEYS[1], cjson.encode(sess), 'PX', ttl)
+return {'invalid'}
+`)
+
 // VerifyCode checks the provided code against the stored session. On
 // success the session is deleted (one-time use). On a wrong code the
 // attempt counter is incremented; after maxTries the session is invalidated.
 func (s *OTPStore) VerifyCode(ctx context.Context, loginToken, code string) (userID, apiClientID, email string, err error) {
 	key := sessionKey(loginToken)
 
-	raw, err := s.rdb.Get(ctx, key).Bytes()
-	if errors.Is(err, redis.Nil) {
-		return "", "", "", ErrLoginSessionNotFound
-	}
+	res, err := verifyCodeScript.Run(ctx, s.rdb, []string{key}, hashCode(code), s.maxTries, s.ttl.Milliseconds()).Slice()
 	if err != nil {
-		return "", "", "", fmt.Errorf("fetching login session: %w", err)
+		return "", "", "", fmt.Errorf("running verify-code script: %w", err)
+	}
+	if len(res) == 0 {
+		return "", "", "", fmt.Errorf("verify-code script: empty response")
 	}
 
-	var sess loginSession
-	if err := json.Unmarshal(raw, &sess); err != nil {
-		return "", "", "", fmt.Errorf("unmarshaling login session: %w", err)
-	}
-
-	if sess.CodeHash != hashCode(code) {
-		sess.Attempts++
-		if sess.Attempts >= s.maxTries {
-			_ = s.rdb.Del(ctx, key).Err()
-			return "", "", "", ErrTooManyAttempts
-		}
-		updated, _ := json.Marshal(sess)
-		// Preserve remaining TTL instead of resetting it.
-		ttl := s.rdb.TTL(ctx, key).Val()
-		if ttl <= 0 {
-			ttl = s.ttl
-		}
-		_ = s.rdb.Set(ctx, key, updated, ttl).Err()
+	status, _ := res[0].(string)
+	switch status {
+	case "not_found":
+		return "", "", "", ErrLoginSessionNotFound
+	case "too_many":
+		return "", "", "", ErrTooManyAttempts
+	case "invalid":
 		return "", "", "", ErrInvalidCode
+	case "ok":
+		if len(res) != 4 {
+			return "", "", "", fmt.Errorf("verify-code script: malformed \"ok\" response %v", res)
+		}
+		userID, _ = res[1].(string)
+		apiClientID, _ = res[2].(string)
+		email, _ = res[3].(string)
+		return userID, apiClientID, email, nil
+	default:
+		return "", "", "", fmt.Errorf("verify-code script: unexpected status %q", status)
 	}
-
-	_ = s.rdb.Del(ctx, key).Err()
-	return sess.UserID, sess.APIClientID, sess.Email, nil
 }
 
 func sessionKey(loginToken string) string {
