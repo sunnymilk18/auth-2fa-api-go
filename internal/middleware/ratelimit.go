@@ -43,9 +43,7 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 	return count <= rl.limit, nil
 }
 
-// Middleware rate-limits by client IP. keyFn optionally derives an
-// additional identity to limit by (e.g. the email in the request body); pass
-// nil to limit by IP alone.
+// Middleware rate-limits by client IP.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r)
