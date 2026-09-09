@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -18,10 +19,17 @@ type RateLimiter struct {
 	prefix string
 	limit  int64
 	window time.Duration
+
+	// trustProxyHeaders enables reading X-Forwarded-For for the client IP.
+	// Only safe when the server sits behind a reverse proxy that overwrites
+	// (rather than appends to) that header — otherwise any caller can set
+	// it themselves and reset their own counter on every request, making
+	// the limit trivial to bypass.
+	trustProxyHeaders bool
 }
 
-func NewRateLimiter(rdb *redis.Client, prefix string, limit int64, window time.Duration) *RateLimiter {
-	return &RateLimiter{rdb: rdb, prefix: prefix, limit: limit, window: window}
+func NewRateLimiter(rdb *redis.Client, prefix string, limit int64, window time.Duration, trustProxyHeaders bool) *RateLimiter {
+	return &RateLimiter{rdb: rdb, prefix: prefix, limit: limit, window: window, trustProxyHeaders: trustProxyHeaders}
 }
 
 // Allow increments the counter for key and reports whether the caller is
@@ -46,7 +54,7 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string) (bool, error) {
 // Middleware rate-limits by client IP.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := clientIP(r)
+		ip := rl.clientIP(r)
 
 		allowed, err := rl.Allow(r.Context(), ip)
 		if err != nil {
@@ -64,11 +72,18 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-func clientIP(r *http.Request) string {
-	// Trusts X-Forwarded-For only if you're behind a reverse proxy you
-	// control; adjust if deploying behind something else.
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return fwd
+func (rl *RateLimiter) clientIP(r *http.Request) string {
+	// Only consulted when trustProxyHeaders is set — i.e. a reverse proxy
+	// we control sits in front and overwrites this header, so callers can't
+	// forge it to reset their own counter. Takes the first (client-facing)
+	// hop, since ELB/nginx/etc. append the real client IP at the front and
+	// any hop after that is ours.
+	if rl.trustProxyHeaders {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			if ip := strings.TrimSpace(strings.Split(fwd, ",")[0]); ip != "" {
+				return ip
+			}
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

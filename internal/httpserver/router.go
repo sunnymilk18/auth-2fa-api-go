@@ -18,7 +18,7 @@ import (
 // NewRouter wires all routes: public auth endpoints, API docs, and a sample
 // protected endpoint that any consuming system can imitate to guard its own
 // routes.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client, apiClients *apiclient.Service) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -42,10 +42,10 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 	// Rate limits blunt brute-force attempts against credentials, OTP codes
 	// and device PINs. Fixed windows, keyed by client IP, backed by Redis.
-	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour)
-	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute)
-	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute)
-	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute)
+	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour, trustProxyHeaders)
+	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute, trustProxyHeaders)
+	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute, trustProxyHeaders)
+	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
