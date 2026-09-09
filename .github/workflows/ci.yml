@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: auth2fa_test
+        ports:
+          - 5432:5432
+        # Wait for Postgres to actually accept connections before any step
+        # tries to use it — the container starts before it's ready to serve.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # No Redis service needed — Redis-backed tests spin up their own
+        # in-memory miniredis. Postgres-backed tests use this job's service
+        # container; anything that can't reach it skips itself rather than
+        # failing (see internal/testutil.PostgresPool), so this also covers
+        # contributors running the suite without Postgres available.
+        env:
+          TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/auth2fa_test?sslmode=disable
+        run: go test ./... -v -count=1
