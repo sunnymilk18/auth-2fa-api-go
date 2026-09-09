@@ -123,6 +123,19 @@ X-API-Key: sk_live_...
 
 Sin ese header (o con una key inválida/inactiva), la API responde `401`.
 
+### Gestionar clientes existentes
+
+`cmd/createclient` tiene subcomandos además de crear:
+
+```bash
+go run ./cmd/createclient list                     # lista todos los clientes (id, activo, creado, nombre)
+go run ./cmd/createclient deactivate -id <id>       # su key deja de funcionar de inmediato
+go run ./cmd/createclient activate -id <id>         # reactiva un cliente desactivado
+go run ./cmd/createclient rotate -id <id>           # emite una key nueva, invalida la anterior — misma identidad (id, nombre, usuarios)
+```
+
+`rotate` es la forma de recuperarse de una key filtrada sin tener que recrear el cliente ni migrar sus usuarios a otro. Todo esto sigue siendo por línea de comandos — no hay (todavía) un endpoint HTTP de administración; ver "Notas para producción" más abajo.
+
 ## Ejecutar
 
 ```bash
@@ -194,4 +207,4 @@ El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca d
 - **Gmail SMTP es solo para desarrollo.** Tiene límites de envío bajos y riesgo de bloqueo de cuenta. Migrar a un proveedor transaccional (SendGrid, SES, Mailgun, Resend) implementando `mailer.Mailer`.
 - **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
 - **Rate limiting por email además de por IP**: hoy el límite es solo por IP; se puede añadir un límite adicional por email para frenar ataques dirigidos a una cuenta específica desde múltiples IPs.
-- **Rotación/revocación de API keys**: hoy `cmd/createclient` solo crea; falta un comando o endpoint para rotar o desactivar una key existente sin recrear el cliente.
+- **Gestión de API keys por HTTP**: `cmd/createclient` ya cubre crear/listar/activar/desactivar/rotar (ver [Gestionar clientes existentes](#gestionar-clientes-existentes)), pero sigue siendo un CLI de línea de comandos — sin un endpoint de administración remoto, cada operación requiere acceso a la máquina/entorno donde corre este comando.

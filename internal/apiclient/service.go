@@ -52,6 +52,37 @@ func (s *Service) Create(ctx context.Context, name string) (client *APIClient, p
 	return client, plaintextKey, nil
 }
 
+// List returns every api client, oldest first.
+func (s *Service) List(ctx context.Context) ([]*APIClient, error) {
+	return s.repo.List(ctx)
+}
+
+// Deactivate makes a client's key stop authenticating immediately, without
+// deleting it (its users and their data stay put).
+func (s *Service) Deactivate(ctx context.Context, id string) error {
+	return s.repo.SetActive(ctx, id, false)
+}
+
+// Activate reverses a previous Deactivate.
+func (s *Service) Activate(ctx context.Context, id string) error {
+	return s.repo.SetActive(ctx, id, true)
+}
+
+// Rotate issues a fresh key for an existing client, invalidating the old
+// one immediately — the client's identity (id, name, and every user
+// scoped to it) is unchanged, only the credential is replaced. Like
+// Create, the plaintext key is returned exactly once.
+func (s *Service) Rotate(ctx context.Context, id string) (plaintextKey string, err error) {
+	plaintextKey, err = generateKey()
+	if err != nil {
+		return "", fmt.Errorf("generating api key: %w", err)
+	}
+	if err := s.repo.UpdateKeyHash(ctx, id, HashKey(plaintextKey)); err != nil {
+		return "", err
+	}
+	return plaintextKey, nil
+}
+
 // HashKey is a high-entropy-secret hash (like refresh/device tokens) —
 // not bcrypt, since API keys are random and long, not low-entropy
 // user-chosen secrets that need slow hashing.

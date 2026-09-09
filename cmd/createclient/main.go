@@ -1,6 +1,6 @@
-// Command createclient provisions a new API client (tenant) and prints its
-// plaintext API key exactly once — only its hash is ever stored, so if you
-// lose the printed key you must create a new client.
+// Command createclient manages api clients (tenants): create, list,
+// activate/deactivate, and rotate a key. Each api_client identifies one
+// consuming system — see README's "Multi-tenant" section.
 package main
 
 import (
@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"strings"
 
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/config"
@@ -15,35 +17,79 @@ import (
 )
 
 func main() {
-	name := flag.String("name", "", "descriptive name for the consuming system (e.g. auth-2fa-app-flutter)")
-	flag.Parse()
-
-	if *name == "" {
-		log.Fatal("fatal: -name is required")
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(1)
 	}
 
-	if err := run(*name); err != nil {
+	sub, args := os.Args[1], os.Args[2:]
+	// Backward compatible: `createclient -name X` with no subcommand still
+	// means "create", exactly like before this tool grew subcommands.
+	if strings.HasPrefix(sub, "-") {
+		sub, args = "create", os.Args[1:]
+	}
+
+	var err error
+	switch sub {
+	case "create":
+		err = runCreate(args)
+	case "list":
+		err = runList(args)
+	case "deactivate":
+		err = runSetActive(args, false)
+	case "activate":
+		err = runSetActive(args, true)
+	case "rotate":
+		err = runRotate(args)
+	default:
+		usage()
+		os.Exit(1)
+	}
+	if err != nil {
 		log.Fatalf("fatal: %v", err)
 	}
 }
 
-func run(name string) error {
+func usage() {
+	fmt.Println(`Usage:
+  createclient create -name <name>    Provision a new api client, printing its key once
+  createclient list                   List all api clients (id, active, created, name)
+  createclient deactivate -id <id>    Deactivate an api client — its key stops working immediately
+  createclient activate -id <id>      Reactivate a previously-deactivated api client
+  createclient rotate -id <id>        Issue a new key for an existing client, invalidating the old one`)
+}
+
+// newService connects to Postgres and returns a ready-to-use Service plus
+// a cleanup func the caller must defer.
+func newService() (*apiclient.Service, func(), error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 
-	ctx := context.Background()
-	pool, err := db.NewPostgres(ctx, cfg.PostgresDSN)
+	pool, err := db.NewPostgres(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return apiclient.NewService(apiclient.NewRepository(pool)), pool.Close, nil
+}
+
+func runCreate(args []string) error {
+	fs := flag.NewFlagSet("create", flag.ExitOnError)
+	name := fs.String("name", "", "descriptive name for the consuming system (e.g. auth-2fa-app-flutter)")
+	_ = fs.Parse(args)
+	if *name == "" {
+		return fmt.Errorf("-name is required")
+	}
+
+	svc, closeFn, err := newService()
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer closeFn()
 
-	repo := apiclient.NewRepository(pool)
-	svc := apiclient.NewService(repo)
-
-	client, key, err := svc.Create(ctx, name)
+	client, key, err := svc.Create(context.Background(), *name)
 	if err != nil {
 		return err
 	}
@@ -57,6 +103,93 @@ func run(name string) error {
 	fmt.Println()
 	fmt.Println("The consuming system must send this in every /auth/* request as:")
 	fmt.Println("  X-API-Key: <key>")
+	return nil
+}
 
+func runList(args []string) error {
+	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	_ = fs.Parse(args)
+
+	svc, closeFn, err := newService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	clients, err := svc.List(context.Background())
+	if err != nil {
+		return err
+	}
+	if len(clients) == 0 {
+		fmt.Println("no api clients found")
+		return nil
+	}
+
+	fmt.Printf("%-36s  %-6s  %-19s  %s\n", "ID", "ACTIVE", "CREATED", "NAME")
+	for _, c := range clients {
+		fmt.Printf("%-36s  %-6t  %-19s  %s\n", c.ID, c.Active, c.CreatedAt.Format("2006-01-02 15:04:05"), c.Name)
+	}
+	return nil
+}
+
+func runSetActive(args []string, active bool) error {
+	verb := "deactivate"
+	if active {
+		verb = "activate"
+	}
+	fs := flag.NewFlagSet(verb, flag.ExitOnError)
+	id := fs.String("id", "", "api client id (see `createclient list`)")
+	_ = fs.Parse(args)
+	if *id == "" {
+		return fmt.Errorf("-id is required")
+	}
+
+	svc, closeFn, err := newService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	var opErr error
+	if active {
+		opErr = svc.Activate(context.Background(), *id)
+	} else {
+		opErr = svc.Deactivate(context.Background(), *id)
+	}
+	if opErr != nil {
+		return opErr
+	}
+
+	effect := "stops working"
+	if active {
+		effect = "works again"
+	}
+	fmt.Printf("api client %s %sd — its key %s immediately.\n", *id, verb, effect)
+	return nil
+}
+
+func runRotate(args []string) error {
+	fs := flag.NewFlagSet("rotate", flag.ExitOnError)
+	id := fs.String("id", "", "api client id (see `createclient list`)")
+	_ = fs.Parse(args)
+	if *id == "" {
+		return fmt.Errorf("-id is required")
+	}
+
+	svc, closeFn, err := newService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	newKey, err := svc.Rotate(context.Background(), *id)
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("API key rotated — the old key stops working immediately.")
+	fmt.Println()
+	fmt.Println("New API key (shown once — copy it now, it cannot be retrieved later):")
+	fmt.Printf("  %s\n", newKey)
 	return nil
 }
