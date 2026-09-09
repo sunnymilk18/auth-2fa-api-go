@@ -67,13 +67,9 @@ services:
       - key: DEVICE_PIN_MAX_TRIES
         value: "5"
 
-      - key: SMTP_HOST
-        value: smtp.gmail.com
-      - key: SMTP_PORT
-        value: "587"
-      - key: SMTP_USER
+      # HTTP API, not SMTP — see config.go's doc comment on why this
+      # project moved off SMTP after hitting Render blocking that port.
+      - key: RESEND_API_KEY
         sync: false
-      - key: SMTP_PASSWORD
-        sync: false
-      - key: SMTP_FROM
-        sync: false
+      - key: RESEND_FROM
+        value: onboarding@resend.dev

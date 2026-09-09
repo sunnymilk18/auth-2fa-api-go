@@ -54,11 +54,14 @@ type Config struct {
 	DeviceTrustTTL    time.Duration
 	DevicePinMaxTries int
 
-	SMTPHost     string
-	SMTPPort     int
-	SMTPUser     string
-	SMTPPassword string
-	SMTPFrom     string
+	// Resend (https://resend.com) — HTTP API, not SMTP, so it isn't at
+	// risk of a host blocking/filtering an outbound SMTP port (this
+	// project hit exactly that on Render). ResendFrom defaults to
+	// Resend's own sandbox sender, which needs no domain verification but
+	// can only deliver to the email address on your Resend account —
+	// verify a real domain in the Resend dashboard to send to anyone else.
+	ResendAPIKey string
+	ResendFrom   string
 
 	// TrustProxyHeaders makes the rate limiter read the client IP from
 	// X-Forwarded-For instead of the raw connection. Only enable this when
@@ -84,16 +87,11 @@ func Load() (*Config, error) {
 		JWTKeyID:               getEnv("JWT_KEY_ID", "auth-2fa-api-1"),
 		JWTRefreshSecret:       getEnv("JWT_REFRESH_SECRET", ""),
 
-		SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
-		SMTPUser:     getEnv("SMTP_USER", ""),
-		SMTPPassword: getEnv("SMTP_PASSWORD", ""),
+		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
+		ResendFrom:   getEnv("RESEND_FROM", "onboarding@resend.dev"),
 	}
-	cfg.SMTPFrom = getEnv("SMTP_FROM", cfg.SMTPUser)
 
 	var err error
-	if cfg.SMTPPort, err = getEnvInt("SMTP_PORT", 587); err != nil {
-		return nil, err
-	}
 	if cfg.OTPLength, err = getEnvInt("OTP_LENGTH", 6); err != nil {
 		return nil, err
 	}

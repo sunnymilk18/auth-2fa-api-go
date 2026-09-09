@@ -72,9 +72,9 @@ func run() error {
 	apiClientRepo := apiclient.NewRepository(pgPool)
 	apiClientSvc := apiclient.NewService(apiClientRepo)
 
-	gmailMailer := mailer.NewGmailMailer(cfg.SMTPHost, cfg.SMTPPort, cfg.SMTPUser, cfg.SMTPPassword, cfg.SMTPFrom)
+	resendMailer := mailer.NewResendMailer(cfg.ResendAPIKey, cfg.ResendFrom)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, loginAttempts, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL)
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders)

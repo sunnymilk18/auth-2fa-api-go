@@ -13,7 +13,7 @@ API independiente en Go para autenticación con doble factor por correo (email +
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
-- **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa Gmail SMTP + App Password (solo desarrollo/pruebas). Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
+- **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa la API HTTP de [Resend](https://resend.com) (no SMTP, a propósito: varios proveedores cloud bloquean o filtran puertos SMTP salientes, algo que este proyecto sufrió literalmente al desplegar en Render). Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
 
 ## Flujo de autenticación
 
@@ -45,7 +45,7 @@ A diferencia del código OTP (6 dígitos), el token de reset no tiene límite de
 ## Requisitos previos
 
 - Go 1.25+
-- Una cuenta Gmail con verificación en 2 pasos activada y un **App Password** generado (Configuración de Google → Seguridad → Verificación en dos pasos → Contraseñas de aplicaciones)
+- Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP y de reset por correo
 - PostgreSQL y Redis — sin Docker instalado, la forma más rápida es usar capas gratuitas en la nube (no requiere instalar nada localmente):
 
 ### PostgreSQL con Neon (gratis)
@@ -66,7 +66,7 @@ A diferencia del código OTP (6 dígitos), el token de reset no tiene límite de
 
 ```bash
 cp .env.example .env
-# Edita .env: POSTGRES_DSN (Neon), REDIS_URL (Upstash), JWT_REFRESH_SECRET y SMTP_PASSWORD (App Password de Gmail)
+# Edita .env: POSTGRES_DSN (Neon), REDIS_URL (Upstash), JWT_REFRESH_SECRET y RESEND_API_KEY
 ```
 
 Genera un secreto fuerte para el refresh token:
@@ -151,8 +151,7 @@ El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta s
 
 1. En el dashboard de Render: **New +** → **Blueprint** → conectar este repo de GitHub.
 2. Render va a pedir el valor de cada variable marcada `sync: false` en `render.yaml`. Completar:
-   - `POSTGRES_DSN` y `REDIS_URL`: los mismos valores de tu `.env` local (Neon/Upstash).
-   - `JWT_REFRESH_SECRET`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`: los mismos de tu `.env` local.
+   - `POSTGRES_DSN`, `REDIS_URL`, `JWT_REFRESH_SECRET`, `RESEND_API_KEY`: los mismos valores de tu `.env` local. **Ojo**: si tu `.env` tiene el valor entre comillas (`REDIS_URL="rediss://..."`), pegá solo lo de adentro, sin las comillas — Render las toma como parte literal del valor.
    - `JWT_PRIVATE_KEY_PEM_BASE64`: el contenido de `keys/private.pem` en base64 (ver comando abajo) — Render no tiene filesystem persistente, así que la clave se pasa como variable de entorno en vez de archivo (`JWT_PRIVATE_KEY_PATH` no se usa ahí).
      ```bash
      # Linux/macOS/Git Bash:
@@ -164,6 +163,8 @@ El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta s
 4. Al terminar, Render da una URL propia con HTTPS (`https://auth-2fa-api-xxxx.onrender.com`). No hace falta correr `cmd/migrate` ni `cmd/createclient` de nuevo — la base ya tiene el schema y al menos un cliente con su API key, porque es la misma que ya usás en local.
 
 **Nota**: el plan free de Render duerme el servicio tras ~15 min sin tráfico; el primer request después de eso tarda unos 30-50s en responder mientras despierta. Normal, no es un error.
+
+**Nota sobre Resend en modo sandbox**: con `RESEND_FROM=onboarding@resend.dev` (el default, sin verificar dominio propio) solo se puede enviar correo a la dirección de tu propia cuenta de Resend — cualquier otro destinatario falla. Para que usuarios reales puedan registrarse, hay que verificar un dominio propio en el dashboard de Resend y usar una dirección de ese dominio como `RESEND_FROM`.
 
 ## Probar el flujo
 
@@ -224,6 +225,6 @@ El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca d
 
 ## Notas para producción (pendiente, no implementado aún)
 
-- **Gmail SMTP es solo para desarrollo.** Tiene límites de envío bajos y riesgo de bloqueo de cuenta. Migrar a un proveedor transaccional (SendGrid, SES, Mailgun, Resend) implementando `mailer.Mailer`.
+- **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse.
 - **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
 - **Gestión de API keys por HTTP**: `cmd/createclient` ya cubre crear/listar/activar/desactivar/rotar (ver [Gestionar clientes existentes](#gestionar-clientes-existentes)), pero sigue siendo un CLI de línea de comandos — sin un endpoint de administración remoto, cada operación requiere acceso a la máquina/entorno donde corre este comando.
