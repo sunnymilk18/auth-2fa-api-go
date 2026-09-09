@@ -73,7 +73,7 @@ func run() error {
 	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, gmailMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, rdb, apiClientSvc, cfg.TrustProxyHeaders)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

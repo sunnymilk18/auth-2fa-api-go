@@ -1,12 +1,14 @@
 package httpserver
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"auth-2fa-api/internal/apiclient"
@@ -18,7 +20,7 @@ import (
 // NewRouter wires all routes: public auth endpoints, API docs, and a sample
 // protected endpoint that any consuming system can imitate to guard its own
 // routes.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -27,9 +29,26 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(15 * time.Second))
 
+	// Actually checks both dependencies rather than always claiming "ok" —
+	// an orchestrator (k8s liveness/readiness, a load balancer's health
+	// check) relying on this to detect an outage needs it to be true.
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+
+		status := "ok"
+		code := http.StatusOK
+		if err := pgPool.Ping(ctx); err != nil {
+			status = "postgres unreachable"
+			code = http.StatusServiceUnavailable
+		} else if err := rdb.Ping(ctx).Err(); err != nil {
+			status = "redis unreachable"
+			code = http.StatusServiceUnavailable
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		w.WriteHeader(code)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
 	})
 
 	// Publishes the RS256 public key so any consuming system can verify
