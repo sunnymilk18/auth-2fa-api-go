@@ -137,15 +137,6 @@ func TestLoginStep2_UnknownLoginToken(t *testing.T) {
 // isolated — the same email can be a different account per tenant, and
 // credentials from one tenant must never authenticate against another.
 func TestMultiTenant_SameEmailDifferentClients(t *testing.T) {
-	// Known bug: migrations/0004_backfill_users_api_client.sql only drops
-	// the old global UNIQUE(email) constraint when an api_client named
-	// exactly "auth-2fa-app-flutter" already exists at migration time. On a
-	// fresh DB migrated in one pass (no such client yet), the backfill
-	// no-ops and users.email stays globally unique forever — silently
-	// breaking tenant isolation for any deployment that isn't that exact
-	// two-step sequence. Un-skip once that migration is fixed.
-	t.Skip("known bug: per-tenant email uniqueness isn't reliably established, see migrations/0004_backfill_users_api_client.sql")
-
 	svc, _, _, apiClientA := newTestService(t)
 	pool := testutil.PostgresPool(t)
 	clientB, _ := testutil.NewAPIClient(t, pool)

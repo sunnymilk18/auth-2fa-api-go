@@ -35,6 +35,14 @@ func dsn() string {
 	return "postgres://postgres:postgres@localhost:5432/auth2fa?sslmode=disable"
 }
 
+// migrationLockID is an arbitrary fixed key for pg_advisory_lock, used to
+// serialize migration application across concurrent test binaries — `go
+// test` runs different packages as separate processes in parallel by
+// default, and 0004's DDL (ALTER TABLE / DROP CONSTRAINT / CREATE INDEX)
+// deadlocks if two of them race to apply it against the same database at
+// once.
+const migrationLockID = 851972640
+
 // PostgresPool connects to a local Postgres (see dsn) and applies every
 // migration, exactly like cmd/migrate does. If no Postgres is reachable, the
 // test is skipped rather than failed — DB-backed tests are opt-in for
@@ -55,6 +63,33 @@ func PostgresPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 
+	applyMigrations(t, pool)
+
+	return pool
+}
+
+// applyMigrations runs every ./migrations/*.sql file against pool, exactly
+// like cmd/migrate does. Serialized across concurrent test binaries via a
+// Postgres advisory lock (see migrationLockID) — its own longer-lived
+// context, independent of the connectivity check above, since it may have
+// to wait behind another process's migration run.
+func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquiring connection for migrations: %v", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLockID); err != nil {
+		t.Fatalf("acquiring migration advisory lock: %v", err)
+	}
+	defer conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", migrationLockID)
+
 	files, err := filepath.Glob(filepath.Join(migrationsDir(), "*.sql"))
 	if err != nil || len(files) == 0 {
 		t.Fatalf("listing migrations: %v (found %d files)", err, len(files))
@@ -65,12 +100,10 @@ func PostgresPool(t *testing.T) *pgxpool.Pool {
 		if err != nil {
 			t.Fatalf("reading migration %s: %v", f, err)
 		}
-		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+		if _, err := conn.Exec(ctx, string(sqlBytes)); err != nil {
 			t.Fatalf("applying migration %s: %v", f, err)
 		}
 	}
-
-	return pool
 }
 
 // UniqueSuffix returns a short random hex string so tests can build
