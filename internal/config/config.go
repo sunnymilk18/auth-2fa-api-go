@@ -19,11 +19,15 @@ type Config struct {
 	// rediss://default:<password>@<host>:<port> as provided by Upstash.
 	RedisURL string
 
-	// Access tokens are signed with RS256 using this private key file; the
+	// Access tokens are signed with RS256 using this private key; the
 	// public key is published via /.well-known/jwks.json so other systems
-	// can verify tokens without calling back to this API.
-	JWTPrivateKeyPath string
-	JWTKeyID          string
+	// can verify tokens without calling back to this API. Loaded from
+	// JWTPrivateKeyPath normally; JWTPrivateKeyPEMBase64 (the .pem file's
+	// contents, base64-encoded) takes priority when set — for platforms
+	// with no persistent/writable filesystem to put a key file on.
+	JWTPrivateKeyPath      string
+	JWTPrivateKeyPEMBase64 string
+	JWTKeyID               string
 	// Refresh tokens stay HS256 (shared secret) — they're only ever
 	// presented back to this API's own /auth/refresh endpoint.
 	JWTRefreshSecret string
@@ -75,9 +79,10 @@ func Load() (*Config, error) {
 
 		RedisURL: getEnv("REDIS_URL", "redis://localhost:6379/0"),
 
-		JWTPrivateKeyPath: getEnv("JWT_PRIVATE_KEY_PATH", "keys/private.pem"),
-		JWTKeyID:          getEnv("JWT_KEY_ID", "auth-2fa-api-1"),
-		JWTRefreshSecret:  getEnv("JWT_REFRESH_SECRET", ""),
+		JWTPrivateKeyPath:      getEnv("JWT_PRIVATE_KEY_PATH", "keys/private.pem"),
+		JWTPrivateKeyPEMBase64: getEnv("JWT_PRIVATE_KEY_PEM_BASE64", ""),
+		JWTKeyID:               getEnv("JWT_KEY_ID", "auth-2fa-api-1"),
+		JWTRefreshSecret:       getEnv("JWT_REFRESH_SECRET", ""),
 
 		SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
 		SMTPUser:     getEnv("SMTP_USER", ""),

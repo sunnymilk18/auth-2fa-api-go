@@ -18,10 +18,21 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading private key file %s: %w", path, err)
 	}
+	key, err := ParsePrivateKeyPEM(data)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return key, nil
+}
 
+// ParsePrivateKeyPEM parses PEM-encoded RSA private key bytes (PKCS#1 or
+// PKCS#8) directly — the same format LoadPrivateKey reads from disk, usable
+// when the key instead comes from an env var (e.g. a platform like Render
+// with no persistent/writable filesystem to put a keys/private.pem on).
+func ParsePrivateKeyPEM(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
-		return nil, fmt.Errorf("no PEM block found in %s", path)
+		return nil, errors.New("no PEM block found")
 	}
 
 	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
@@ -30,7 +41,7 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 
 	keyAny, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("parsing private key in %s: %w", path, err)
+		return nil, fmt.Errorf("parsing private key: %w", err)
 	}
 	key, ok := keyAny.(*rsa.PrivateKey)
 	if !ok {

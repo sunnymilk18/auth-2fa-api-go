@@ -145,6 +145,26 @@ go run ./cmd/api
 
 El servidor arranca en `http://localhost:8080`.
 
+## Deploy a Render
+
+El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta solo al conectar el repo. Como Postgres (Neon) y Redis (Upstash) ya son de nube, no hace falta provisionar nada nuevo ahí: se reusan las mismas connection strings del `.env` local.
+
+1. En el dashboard de Render: **New +** → **Blueprint** → conectar este repo de GitHub.
+2. Render va a pedir el valor de cada variable marcada `sync: false` en `render.yaml`. Completar:
+   - `POSTGRES_DSN` y `REDIS_URL`: los mismos valores de tu `.env` local (Neon/Upstash).
+   - `JWT_REFRESH_SECRET`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM`: los mismos de tu `.env` local.
+   - `JWT_PRIVATE_KEY_PEM_BASE64`: el contenido de `keys/private.pem` en base64 (ver comando abajo) — Render no tiene filesystem persistente, así que la clave se pasa como variable de entorno en vez de archivo (`JWT_PRIVATE_KEY_PATH` no se usa ahí).
+     ```bash
+     # Linux/macOS/Git Bash:
+     base64 -w0 keys/private.pem
+     # PowerShell:
+     [Convert]::ToBase64String([IO.File]::ReadAllBytes("keys/private.pem"))
+     ```
+3. **Deploy**. Render construye (`go build -o app ./cmd/api`) y arranca (`./app`), y usa `/health` para saber si la instancia está sana — con el chequeo real de Postgres/Redis que ya tiene este endpoint.
+4. Al terminar, Render da una URL propia con HTTPS (`https://auth-2fa-api-xxxx.onrender.com`). No hace falta correr `cmd/migrate` ni `cmd/createclient` de nuevo — la base ya tiene el schema y al menos un cliente con su API key, porque es la misma que ya usás en local.
+
+**Nota**: el plan free de Render duerme el servicio tras ~15 min sin tráfico; el primer request después de eso tarda unos 30-50s en responder mientras despierta. Normal, no es un error.
+
 ## Probar el flujo
 
 ```bash

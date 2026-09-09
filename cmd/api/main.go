@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"encoding/base64"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -52,7 +55,7 @@ func run() error {
 	userRepo := user.NewRepository(pgPool)
 	userSvc := user.NewService(userRepo)
 
-	privateKey, err := auth.LoadPrivateKey(cfg.JWTPrivateKeyPath)
+	privateKey, err := loadPrivateKey(cfg)
 	if err != nil {
 		return err
 	}
@@ -97,4 +100,19 @@ func run() error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// loadPrivateKey prefers JWTPrivateKeyPEMBase64 (a platform env var) over
+// JWTPrivateKeyPath (a file on disk) when both are set — see Config's doc
+// comment on why a platform without a persistent/writable filesystem needs
+// the env-var form.
+func loadPrivateKey(cfg *config.Config) (*rsa.PrivateKey, error) {
+	if cfg.JWTPrivateKeyPEMBase64 != "" {
+		pemBytes, err := base64.StdEncoding.DecodeString(cfg.JWTPrivateKeyPEMBase64)
+		if err != nil {
+			return nil, fmt.Errorf("decoding JWT_PRIVATE_KEY_PEM_BASE64: %w", err)
+		}
+		return auth.ParsePrivateKeyPEM(pemBytes)
+	}
+	return auth.LoadPrivateKey(cfg.JWTPrivateKeyPath)
 }

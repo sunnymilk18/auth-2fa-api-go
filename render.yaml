@@ -1,0 +1,79 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Deploy: in the Render dashboard, New + -> Blueprint -> connect this repo.
+# Render finds this file automatically. Every envVar below with
+# `sync: false` needs its value filled in by hand in the dashboard (secrets
+# — never put real values in this file, it's committed to git); everything
+# else already has the same default this project's config.go itself uses.
+#
+# Postgres and Redis are NOT declared here as Render-managed services: this
+# project already runs against Neon (Postgres) and Upstash (Redis) — reuse
+# those same connection strings as POSTGRES_DSN/REDIS_URL below instead of
+# provisioning new databases.
+services:
+  - type: web
+    name: auth-2fa-api
+    runtime: go
+    plan: free
+    buildCommand: go build -o app ./cmd/api
+    startCommand: ./app
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: "8080"
+
+      # Render's own edge proxy sets X-Forwarded-For to the real client IP
+      # (it's not something a caller can reach past to spoof) — safe to
+      # trust here, unlike a bare deployment with no proxy in front.
+      - key: TRUST_PROXY_HEADERS
+        value: "true"
+
+      - key: POSTGRES_DSN
+        sync: false
+      - key: REDIS_URL
+        sync: false
+
+      # Base64 of keys/private.pem's contents — see README's Render section
+      # for the exact command. Takes priority over JWT_PRIVATE_KEY_PATH
+      # (irrelevant here — no file to point it at on Render).
+      - key: JWT_PRIVATE_KEY_PEM_BASE64
+        sync: false
+      - key: JWT_KEY_ID
+        value: auth-2fa-api-1
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: ACCESS_TOKEN_TTL
+        value: 15m
+      - key: REFRESH_TOKEN_TTL
+        value: 168h
+
+      - key: OTP_LENGTH
+        value: "6"
+      - key: OTP_TTL
+        value: 5m
+      - key: OTP_MAX_TRIES
+        value: "5"
+
+      - key: PASSWORD_RESET_TTL
+        value: 1h
+
+      - key: LOGIN_MAX_FAILED_ATTEMPTS
+        value: "10"
+      - key: LOGIN_LOCKOUT_WINDOW
+        value: 15m
+
+      - key: DEVICE_TRUST_TTL
+        value: 720h
+      - key: DEVICE_PIN_MAX_TRIES
+        value: "5"
+
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
