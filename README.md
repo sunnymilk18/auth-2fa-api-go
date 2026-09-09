@@ -99,7 +99,7 @@ go run ./cmd/migrate
 
 Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
 
-**Nota sobre la migración `0004`**: agrega el aislamiento por sistema (multi-tenant) a la tabla `users`. Se auto-protege: si todavía no existe ningún `api_client`, no hace nada (deja aviso en el log de Postgres) — hay que crearlo primero (ver la sección siguiente) y volver a correr `go run ./cmd/migrate` para que la aplique de verdad.
+**Nota sobre la migración `0004`**: agrega el aislamiento por sistema (multi-tenant) a la tabla `users`. En una base nueva se activa sola en este mismo paso, sin nada más que hacer. El único caso especial es una base que ya tenía usuarios *antes* de que existiera el aislamiento por tenant: ahí hay que crear primero un `api_client` (ver la sección siguiente) al que asignarles esos usuarios existentes, y volver a correr `go run ./cmd/migrate` para que los reasigne.
 
 ## Multi-tenant (API keys)
 
@@ -108,10 +108,10 @@ Cada sistema que va a consumir esta API (una app móvil, un sitio web, etc.) nec
 ### Crear el primer cliente
 
 ```bash
-go run ./cmd/createclient -name auth-2fa-app-flutter
+go run ./cmd/createclient -name nombre-de-tu-sistema
 ```
 
-Esto imprime la API key **una sola vez** — cópiala de inmediato, no se puede recuperar después (solo se guarda su hash). Con al menos un cliente creado, vuelve a correr `go run ./cmd/migrate` para que la migración `0004` complete el aislamiento por tenant sobre los usuarios ya existentes.
+`-name` es solo descriptivo — usá el que identifique al sistema que va a consumir la API (una app, un sitio, etc.), no hay un valor especial requerido. Esto imprime la API key **una sola vez** — cópiala de inmediato, no se puede recuperar después (solo se guarda su hash).
 
 ### Usarla
 
