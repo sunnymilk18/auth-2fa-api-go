@@ -54,7 +54,7 @@ A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocult
 ## Requisitos previos
 
 - Go 1.26+
-- Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP y de reset por correo
+- Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP, de verificación de correo y de reset de contraseña
 - PostgreSQL y Redis — sin Docker instalado, la forma más rápida es usar capas gratuitas en la nube (no requiere instalar nada localmente):
 
 ### PostgreSQL con Neon (gratis)
