@@ -32,7 +32,7 @@ tags:
   - name: auth
     description: Registro, login de dos factores y gestión de tokens
   - name: devices
-    description: Dispositivos de confianza + PIN (atajo alrededor de password+OTP)
+    description: Dispositivos de confianza + PIN — opcional, un atajo alrededor de password+OTP, no un paso requerido del flujo
   - name: user
     description: Datos del usuario autenticado
   - name: system
