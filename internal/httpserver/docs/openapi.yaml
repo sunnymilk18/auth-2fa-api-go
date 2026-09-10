@@ -3,7 +3,8 @@ info:
   title: auth-2fa-api
   description: |
     API independiente de autenticación con doble factor por correo (2FA).
-    Flujo: registro → login (password) → código OTP enviado por email →
+    Flujo: registro → verificación de correo (obligatoria, o /auth/login
+    responde 403) → login (password) → código OTP enviado por email →
     verificación del código → tokens JWT (access + refresh).
 
     Los access tokens se firman con RS256. Cualquier sistema que reciba un

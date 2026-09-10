@@ -1,15 +1,15 @@
 # auth-2fa-api-go
 
-API independiente en Go para autenticación con doble factor por correo (email + contraseña, luego código OTP enviado por email). Pensada para que cualquier otro sistema la consuma vía HTTP.
+API independiente en Go para autenticación con doble factor por correo (email + contraseña, luego código OTP enviado por email; el correo debe verificarse antes de poder loguear). Pensada para que cualquier otro sistema la consuma vía HTTP.
 
 ## Arquitectura
 
 - **PostgreSQL**: datos persistentes de usuarios (`users`) y tokens de refresco (`refresh_tokens`).
-- **Redis**: códigos OTP de corta duración (expiran solos vía TTL, no se guardan en Postgres) y contadores de rate limiting.
+- **Redis**: códigos de corta duración (OTP de login, verificación de correo, reset de contraseña — todos expiran solos vía TTL, no se guardan en Postgres) y contadores de rate limiting.
 - **JWT**:
   - Access token firmado con **RS256** (clave privada/pública) — cualquier sistema que reciba el token puede verificarlo por su cuenta usando la clave pública publicada en `/.well-known/jwks.json`, sin llamar de vuelta a esta API.
   - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
-- **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login` y `/auth/password-reset/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
+- **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login`, `/auth/password-reset/*` y `/auth/verify-email/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
