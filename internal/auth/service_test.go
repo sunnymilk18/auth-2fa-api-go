@@ -27,7 +27,7 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
-	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 8)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer = testutil.NewFakeMailer()
 

@@ -60,10 +60,9 @@ func ExtractOTPCode(body string) string {
 	return otpCodePattern.FindString(body)
 }
 
-var resetTokenPattern = regexp.MustCompile(`[0-9a-f]{32,}`)
-
-// ExtractResetToken pulls the hex password-reset token out of its email
-// body, the same way ExtractOTPCode does for login codes.
-func ExtractResetToken(body string) string {
-	return resetTokenPattern.FindString(body)
+// ExtractResetCode pulls the numeric password-reset code out of its email
+// body — same shape and same regex as ExtractOTPCode, since password reset
+// now uses a short numeric code too, not an opaque token.
+func ExtractResetCode(body string) string {
+	return otpCodePattern.FindString(body)
 }

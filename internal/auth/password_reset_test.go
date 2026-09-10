@@ -23,12 +23,12 @@ func TestPasswordReset_FullFlow(t *testing.T) {
 	if sent.To != email {
 		t.Fatalf("reset email sent to %q, want %q", sent.To, email)
 	}
-	token := testutil.ExtractResetToken(sent.Body)
-	if token == "" {
-		t.Fatalf("could not find a reset token in email body: %q", sent.Body)
+	code := testutil.ExtractResetCode(sent.Body)
+	if code == "" {
+		t.Fatalf("could not find a reset code in email body: %q", sent.Body)
 	}
 
-	if err := svc.ResetPassword(t.Context(), token, "new-password-456"); err != nil {
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "new-password-456"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
@@ -52,14 +52,14 @@ func TestPasswordReset_UnknownEmailDoesNotErrorOrEmail(t *testing.T) {
 	}
 }
 
-func TestPasswordReset_UnknownToken(t *testing.T) {
-	svc, _, _, _ := newTestService(t)
-	if err := svc.ResetPassword(t.Context(), "does-not-exist", "new-password-456"); err != auth.ErrPasswordResetTokenInvalid {
-		t.Fatalf("err = %v, want %v", err, auth.ErrPasswordResetTokenInvalid)
+func TestPasswordReset_UnknownCode(t *testing.T) {
+	svc, _, _, apiClientID := newTestService(t)
+	if err := svc.ResetPassword(t.Context(), apiClientID, "nobody@example.com", "12345678", "new-password-456"); err != auth.ErrPasswordResetNotFound {
+		t.Fatalf("err = %v, want %v", err, auth.ErrPasswordResetNotFound)
 	}
 }
 
-func TestPasswordReset_TokenIsSingleUse(t *testing.T) {
+func TestPasswordReset_WrongCode(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, apiClientID, email, "old-password-123")
@@ -68,13 +68,38 @@ func TestPasswordReset_TokenIsSingleUse(t *testing.T) {
 		t.Fatalf("RequestPasswordReset: %v", err)
 	}
 	sent, _ := mailer.Last()
-	token := testutil.ExtractResetToken(sent.Body)
+	code := testutil.ExtractResetCode(sent.Body)
+	wrongCode := "0"
+	if code == wrongCode {
+		wrongCode = "1"
+	}
+	// Pad to the same length so it's a plausible-but-wrong code, not just a
+	// different-length string.
+	for len(wrongCode) < len(code) {
+		wrongCode = "0" + wrongCode
+	}
 
-	if err := svc.ResetPassword(t.Context(), token, "new-password-456"); err != nil {
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, wrongCode, "new-password-456"); err != auth.ErrPasswordResetInvalidCode {
+		t.Fatalf("err = %v, want %v", err, auth.ErrPasswordResetInvalidCode)
+	}
+}
+
+func TestPasswordReset_CodeIsSingleUse(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "old-password-123")
+
+	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
+		t.Fatalf("RequestPasswordReset: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractResetCode(sent.Body)
+
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "new-password-456"); err != nil {
 		t.Fatalf("first ResetPassword: %v", err)
 	}
-	if err := svc.ResetPassword(t.Context(), token, "yet-another-789"); err != auth.ErrPasswordResetTokenInvalid {
-		t.Fatalf("second ResetPassword with the same token: err = %v, want %v", err, auth.ErrPasswordResetTokenInvalid)
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "yet-another-789"); err != auth.ErrPasswordResetNotFound {
+		t.Fatalf("second ResetPassword with the same code: err = %v, want %v", err, auth.ErrPasswordResetNotFound)
 	}
 }
 
@@ -88,8 +113,8 @@ func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	otpSent, _ := mailer.Last()
-	code := testutil.ExtractOTPCode(otpSent.Body)
-	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, code)
+	otpCode := testutil.ExtractOTPCode(otpSent.Body)
+	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, otpCode)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -98,8 +123,8 @@ func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 		t.Fatalf("RequestPasswordReset: %v", err)
 	}
 	resetSent, _ := mailer.Last()
-	resetToken := testutil.ExtractResetToken(resetSent.Body)
-	if err := svc.ResetPassword(t.Context(), resetToken, "new-password-456"); err != nil {
+	resetCode := testutil.ExtractResetCode(resetSent.Body)
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, resetCode, "new-password-456"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
@@ -119,8 +144,8 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	otpSent, _ := mailer.Last()
-	code := testutil.ExtractOTPCode(otpSent.Body)
-	access, _, err := svc.LoginStep2(t.Context(), loginToken, code)
+	otpCode := testutil.ExtractOTPCode(otpSent.Body)
+	access, _, err := svc.LoginStep2(t.Context(), loginToken, otpCode)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -139,8 +164,8 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 		t.Fatalf("RequestPasswordReset: %v", err)
 	}
 	resetSent, _ := mailer.Last()
-	resetToken := testutil.ExtractResetToken(resetSent.Body)
-	if err := svc.ResetPassword(t.Context(), resetToken, "new-password-456"); err != nil {
+	resetCode := testutil.ExtractResetCode(resetSent.Body)
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, resetCode, "new-password-456"); err != nil {
 		t.Fatalf("ResetPassword: %v", err)
 	}
 
@@ -149,5 +174,42 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 	// bypassing the new password entirely via the PIN shortcut.
 	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("DeviceLogin with a pre-reset device token: err = %v, want %v", err, device.ErrDeviceNotTrusted)
+	}
+}
+
+func TestPasswordReset_TooManyWrongCodesInvalidatesSession(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, apiClientID, email, "old-password-123")
+
+	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
+		t.Fatalf("RequestPasswordReset: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractResetCode(sent.Body)
+	wrongCode := "0"
+	if code == wrongCode {
+		wrongCode = "1"
+	}
+	for len(wrongCode) < len(code) {
+		wrongCode = "0" + wrongCode
+	}
+
+	// Default PASSWORD_RESET_MAX_TRIES in tests is whatever newTestService
+	// wires up — exhaust attempts with the wrong code.
+	var lastErr error
+	for i := 0; i < 10; i++ {
+		lastErr = svc.ResetPassword(t.Context(), apiClientID, email, wrongCode, "new-password-456")
+		if lastErr == auth.ErrPasswordResetTooManyTries {
+			break
+		}
+	}
+	if lastErr != auth.ErrPasswordResetTooManyTries {
+		t.Fatalf("after repeated wrong codes: last err = %v, want %v", lastErr, auth.ErrPasswordResetTooManyTries)
+	}
+
+	// Even the correct code no longer works — the session was invalidated.
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "new-password-456"); err != auth.ErrPasswordResetNotFound {
+		t.Fatalf("ResetPassword with the correct code after lockout: err = %v, want %v", err, auth.ErrPasswordResetNotFound)
 	}
 }

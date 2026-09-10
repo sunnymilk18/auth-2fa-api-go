@@ -181,14 +181,14 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 		return err
 	}
 
-	token, err := s.passwordReset.StartReset(ctx, u.ID, u.APIClientID)
+	code, err := s.passwordReset.StartReset(ctx, u.ID, u.APIClientID, email)
 	if err != nil {
 		return err
 	}
 
 	body := fmt.Sprintf(
 		"Usa este código para restablecer tu contraseña: %s\n\nExpira en %s. Si no solicitaste esto, ignora este correo.",
-		token, s.passwordResetTTL.String(),
+		code, s.passwordResetTTL.String(),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Restablece tu contraseña", body); err != nil {
 		return fmt.Errorf("sending password reset email: %w", err)
@@ -196,15 +196,15 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 	return nil
 }
 
-// ResetPassword consumes a reset token and sets a new password. It also
+// ResetPassword consumes a reset code and sets a new password. It also
 // revokes every refresh token and every trusted device (PIN unlock) the
 // user has — a password reset should force re-authentication everywhere:
 // the trusted-device shortcut bypasses password+OTP entirely, so leaving it
 // intact would let whoever set it up (possibly an attacker, during whatever
 // compromise prompted the reset) keep getting in regardless of the new
 // password.
-func (s *Service) ResetPassword(ctx context.Context, resetToken, newPassword string) error {
-	userID, _, err := s.passwordReset.ConsumeToken(ctx, resetToken)
+func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, newPassword string) error {
+	userID, err := s.passwordReset.ConsumeCode(ctx, apiClientID, email, code)
 	if err != nil {
 		return err
 	}

@@ -38,10 +38,14 @@ type Config struct {
 	OTPTTL      time.Duration
 	OTPMaxTries int
 
-	// Password reset: a single high-entropy emailed token, no attempt limit
-	// needed (unlike the short numeric OTP code) since brute-forcing 256
-	// bits of randomness is infeasible.
-	PasswordResetTTL time.Duration
+	// Password reset: a short numeric code, same shape as the login OTP —
+	// hashed + attempt-limited in Redis, not a token the user has to copy
+	// verbatim. Longer than the login OTP by default since, unlike it, this
+	// code isn't gated behind a correct password first: anyone who knows
+	// the account's email can attempt it.
+	PasswordResetTTL        time.Duration
+	PasswordResetCodeLength int
+	PasswordResetMaxTries   int
 
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
@@ -108,6 +112,12 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PasswordResetTTL, err = getEnvDuration("PASSWORD_RESET_TTL", time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.PasswordResetCodeLength, err = getEnvInt("PASSWORD_RESET_CODE_LENGTH", 8); err != nil {
+		return nil, err
+	}
+	if cfg.PasswordResetMaxTries, err = getEnvInt("PASSWORD_RESET_MAX_TRIES", 5); err != nil {
 		return nil, err
 	}
 	if cfg.LoginMaxFailedAttempts, err = getEnvInt("LOGIN_MAX_FAILED_ATTEMPTS", 10); err != nil {

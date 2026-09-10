@@ -217,7 +217,8 @@ type passwordResetRequestRequest struct {
 }
 
 type passwordResetConfirmRequest struct {
-	ResetToken  string `json:"reset_token"`
+	Email       string `json:"email"`
+	Code        string `json:"code"`
 	NewPassword string `json:"new_password"`
 }
 
@@ -259,18 +260,33 @@ func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
+	if req.Email == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "el correo y el código son obligatorios")
+		return
+	}
 	if len(req.NewPassword) < 8 {
 		writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
 		return
 	}
 
-	if err := h.svc.ResetPassword(r.Context(), req.ResetToken, req.NewPassword); err != nil {
-		if errors.Is(err, ErrPasswordResetTokenInvalid) {
-			writeError(w, http.StatusUnauthorized, "el código de restablecimiento es inválido o expiró")
-			return
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
+		return
+	}
+
+	if err := h.svc.ResetPassword(r.Context(), apiClientID, req.Email, req.Code, req.NewPassword); err != nil {
+		switch {
+		case errors.Is(err, ErrPasswordResetNotFound):
+			writeError(w, http.StatusUnauthorized, "no hay un restablecimiento pendiente para ese correo, o expiró")
+		case errors.Is(err, ErrPasswordResetInvalidCode):
+			writeError(w, http.StatusUnauthorized, "código inválido")
+		case errors.Is(err, ErrPasswordResetTooManyTries):
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos, solicita un código nuevo")
+		default:
+			log.Printf("reset password error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo restablecer la contraseña")
 		}
-		log.Printf("reset password error: %v", err)
-		writeError(w, http.StatusInternalServerError, "no se pudo restablecer la contraseña")
 		return
 	}
 

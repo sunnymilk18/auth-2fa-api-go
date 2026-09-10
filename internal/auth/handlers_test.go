@@ -280,9 +280,9 @@ func TestHandler_RequestPasswordReset_MissingAPIClientContext(t *testing.T) {
 }
 
 func TestHandler_ConfirmPasswordReset_ShortPassword(t *testing.T) {
-	h, _, _, _, _ := newTestHandlers(t)
-	body := jsonBody(t, map[string]string{"reset_token": "whatever", "new_password": "short"})
-	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body)
+	h, _, _, _, apiClientID := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"email": "a@example.com", "code": "whatever", "new_password": "short"})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body), apiClientID)
 	rec := httptest.NewRecorder()
 
 	h.ConfirmPasswordReset(rec, req)
@@ -292,10 +292,23 @@ func TestHandler_ConfirmPasswordReset_ShortPassword(t *testing.T) {
 	}
 }
 
-func TestHandler_ConfirmPasswordReset_InvalidToken(t *testing.T) {
+func TestHandler_ConfirmPasswordReset_MissingAPIClientContext(t *testing.T) {
 	h, _, _, _, _ := newTestHandlers(t)
-	body := jsonBody(t, map[string]string{"reset_token": "does-not-exist", "new_password": "new-password-456"})
-	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body)
+	body := jsonBody(t, map[string]string{"email": "a@example.com", "code": "12345678", "new_password": "new-password-456"})
+	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body) // no withAPIClient
+	rec := httptest.NewRecorder()
+
+	h.ConfirmPasswordReset(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandler_ConfirmPasswordReset_InvalidCode(t *testing.T) {
+	h, _, _, _, apiClientID := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"email": "does-not-exist@example.com", "code": "12345678", "new_password": "new-password-456"})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body), apiClientID)
 	rec := httptest.NewRecorder()
 
 	h.ConfirmPasswordReset(rec, req)
@@ -321,12 +334,12 @@ func TestHandler_PasswordReset_FullFlow(t *testing.T) {
 	if !ok {
 		t.Fatal("no password reset email was sent")
 	}
-	token := testutil.ExtractResetToken(sent.Body)
-	if token == "" {
-		t.Fatalf("could not find a reset token in email body: %q", sent.Body)
+	code := testutil.ExtractResetCode(sent.Body)
+	if code == "" {
+		t.Fatalf("could not find a reset code in email body: %q", sent.Body)
 	}
 
-	confirmReq := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", jsonBody(t, map[string]string{"reset_token": token, "new_password": "new-password-456"}))
+	confirmReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", jsonBody(t, map[string]string{"email": email, "code": code, "new_password": "new-password-456"})), apiClientID)
 	confirmRec := httptest.NewRecorder()
 	h.ConfirmPasswordReset(confirmRec, confirmReq)
 	if confirmRec.Code != http.StatusNoContent {

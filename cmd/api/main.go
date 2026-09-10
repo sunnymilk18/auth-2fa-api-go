@@ -63,7 +63,7 @@ func run() error {
 	otpStore := auth.NewOTPStore(rdb, cfg.OTPTTL, cfg.OTPMaxTries, cfg.OTPLength)
 	tokenMgr := auth.NewTokenManager(privateKey, cfg.JWTKeyID, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
 	refreshRepo := auth.NewRefreshRepository(pgPool)
-	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL)
+	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL, cfg.PasswordResetMaxTries, cfg.PasswordResetCodeLength)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, cfg.LoginMaxFailedAttempts, cfg.LoginLockoutWindow)
 
 	deviceRepo := device.NewRepository(pgPool)

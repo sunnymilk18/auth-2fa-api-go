@@ -272,7 +272,13 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "401":
-          description: Código inválido o expirado
+          description: Código inválido, o no hay un restablecimiento pendiente para ese correo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados intentos con códigos incorrectos — hay que solicitar uno nuevo
           content:
             application/json:
               schema:
@@ -491,10 +497,14 @@ components:
 
     PasswordResetConfirmRequest:
       type: object
-      required: [reset_token, new_password]
+      required: [email, code, new_password]
       properties:
-        reset_token:
+        email:
           type: string
+          format: email
+        code:
+          type: string
+          description: Código numérico recibido por correo (un solo uso, con límite de intentos)
         new_password:
           type: string
           format: password
