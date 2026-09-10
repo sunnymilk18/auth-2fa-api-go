@@ -167,7 +167,7 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 	return s.refresh.Revoke(ctx, refreshToken)
 }
 
-// RequestPasswordReset emails a reset token if apiClientID/email matches an
+// RequestPasswordReset emails a reset code if apiClientID/email matches an
 // account. Always succeeds from the caller's point of view regardless of
 // whether the account exists — same reasoning as VerifyPassword returning
 // one error for both "no such user" and "wrong password": the response

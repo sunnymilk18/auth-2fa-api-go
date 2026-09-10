@@ -40,8 +40,6 @@ La confianza dura 30 días desde el último uso (ventana deslizante, `DEVICE_TRU
 11. `POST /auth/password-reset/request` — recibe `email`. Si existe una cuenta con ese correo en el sistema (API key) que llama, genera un código numérico corto (como el OTP de login, `PASSWORD_RESET_CODE_LENGTH` dígitos), lo guarda hasheado en Redis (TTL configurable, `PASSWORD_RESET_TTL`) y lo envía por correo. **La respuesta es idéntica exista o no la cuenta** — no filtra qué correos están registrados, igual que `/auth/login`.
 12. `POST /auth/password-reset/confirm` — recibe `email` + `code` + `new_password`. El código es de un solo uso y tiene un límite de intentos (`PASSWORD_RESET_MAX_TRIES`, igual que el OTP de login) — a diferencia del OTP, este código no está protegido por una contraseña correcta de antemano (cualquiera que sepa el email puede intentarlo), por eso necesita ese mismo límite de intentos. Al confirmarse con éxito se **revocan todas las sesiones activas (refresh tokens) y todos los dispositivos de confianza (PIN)** del usuario — un reset de contraseña fuerza a volver a autenticarse en todos lados, ya que el dispositivo de confianza es un atajo que bypasea password+OTP por completo y no debería sobrevivir a un reset motivado por una posible cuenta comprometida.
 
-A diferencia del código OTP (6 dígitos), el token de reset no tiene límite de intentos — no hace falta, ya que sus 256 bits de entropía hacen inviable adivinarlo por fuerza bruta.
-
 ## Requisitos previos
 
 - Go 1.26+
