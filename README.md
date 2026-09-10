@@ -204,36 +204,42 @@ El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta s
 ```bash
 API_KEY="<tu api key de cmd/createclient>"
 
-# 1. Registro
+# 1. Registro (envía un código de verificación por correo)
 curl -X POST http://localhost:8080/auth/register \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
 
-# 2. Login (dispara el envío del código por email)
+# 2. Verificar el correo con el código recibido — sin esto, el login del
+# siguiente paso falla con 403 aunque la contraseña sea correcta.
+curl -X POST http://localhost:8080/auth/verify-email/confirm \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"email":"tucorreo@example.com","code":"<el del correo>"}'
+
+# 3. Login (dispara el envío del código OTP por email)
 curl -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
 # -> devuelve { "login_token": "...", "message": "..." }
 
-# 3. Verificar el código recibido por correo
+# 4. Verificar el código recibido por correo
 curl -X POST http://localhost:8080/auth/verify-otp \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"login_token":"<el del paso 2>","code":"<el del correo>"}'
+  -d '{"login_token":"<el del paso 3>","code":"<el del correo>"}'
 # -> devuelve { "access_token": "...", "refresh_token": "...", "token_type": "Bearer" }
 
-# 4. Consumir un endpoint protegido (no necesita X-API-Key, solo el JWT)
+# 5. Consumir un endpoint protegido (no necesita X-API-Key, solo el JWT)
 curl http://localhost:8080/me -H "Authorization: Bearer <access_token>"
 
-# 5. Marcar este dispositivo como de confianza (usando el access_token del paso 3)
+# 6. Marcar este dispositivo como de confianza (usando el access_token del paso 4)
 curl -X POST http://localhost:8080/auth/devices/register \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>" \
   -d '{"device_id":"un-uuid-generado-por-tu-app","device_name":"Mi teléfono","pin":"123456"}'
 # -> devuelve { "device_token": "..." } (guardar en almacenamiento seguro, se muestra una sola vez)
 
-# 6. Próximas veces: login solo con PIN, sin password ni OTP
+# 7. Próximas veces: login solo con PIN, sin password ni OTP
 curl -X POST http://localhost:8080/auth/devices/login \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 5>","pin":"123456"}'
+  -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 6>","pin":"123456"}'
 # -> devuelve access_token + refresh_token + un device_token rotado (reemplaza al anterior)
 ```
 
