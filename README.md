@@ -145,6 +145,30 @@ go run ./cmd/api
 
 El servidor arranca en `http://localhost:8080`.
 
+## Tests
+
+```bash
+go test ./...
+```
+
+Corre toda la suite. Los tests que necesitan Postgres (la mayoría) se **saltan** (no fallan) si no encuentran una base disponible — para que corran de verdad, apuntá `TEST_POSTGRES_DSN` a una base local descartable:
+
+```bash
+# Linux/macOS/Git Bash:
+TEST_POSTGRES_DSN="postgres://postgres:postgres@localhost:5432/auth2fa_test?sslmode=disable" go test ./...
+```
+```powershell
+# PowerShell:
+$env:TEST_POSTGRES_DSN = "postgres://postgres:postgres@localhost:5432/auth2fa_test?sslmode=disable"
+go test ./...
+```
+
+Aplica las migraciones a esa base automáticamente — no hace falta correr `cmd/migrate` a mano primero. Los tests que dependen de Redis no necesitan nada externo: usan un Redis en memoria (`miniredis`) que arranca solo.
+
+Flags útiles: `-v` (detalle de cada test, no solo el resumen), `-count=1` (ignora el caché de resultados), `-run <patrón>` (solo los tests cuyo nombre matchea), y limitar a un paquete con `go test ./internal/auth/...`.
+
+El CI (`.github/workflows/ci.yml`) corre exactamente esto en cada push, contra un Postgres efímero — no hace falta correrlo a mano antes de subir cambios, pero es lo primero a probar localmente si el CI falla.
+
 ## Deploy a Render
 
 El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta solo al conectar el repo. Como Postgres (Neon) y Redis (Upstash) ya son de nube, no hace falta provisionar nada nuevo ahí: se reusan las mismas connection strings del `.env` local.
