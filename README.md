@@ -44,7 +44,7 @@ A diferencia del código OTP (6 dígitos), el token de reset no tiene límite de
 
 ## Requisitos previos
 
-- Go 1.25+
+- Go 1.26+
 - Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP y de reset por correo
 - PostgreSQL y Redis — sin Docker instalado, la forma más rápida es usar capas gratuitas en la nube (no requiere instalar nada localmente):
 
