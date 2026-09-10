@@ -265,6 +265,12 @@ paths:
       responses:
         "204":
           description: Contraseña actualizada
+        "400":
+          description: Cuerpo de la solicitud inválido, o la nueva contraseña tiene menos de 8 caracteres
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           description: Código inválido o expirado
           content:
