@@ -74,9 +74,93 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":    u.ID,
-		"email": u.Email,
+		"id":      u.ID,
+		"email":   u.Email,
+		"message": "revisa tu correo para confirmar tu cuenta antes de iniciar sesión",
 	})
+}
+
+// --- Email verification ---
+
+type verifyEmailConfirmRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+// ConfirmEmailVerification consumes the code emailed at registration and
+// unblocks login for that account.
+func (h *Handlers) ConfirmEmailVerification(w http.ResponseWriter, r *http.Request) {
+	var req verifyEmailConfirmRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.Email == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "el correo y el código son obligatorios")
+		return
+	}
+
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
+		return
+	}
+
+	if err := h.svc.ConfirmEmailVerification(r.Context(), apiClientID, req.Email, req.Code); err != nil {
+		switch {
+		case errors.Is(err, ErrEmailVerificationNotFound):
+			writeError(w, http.StatusUnauthorized, "no hay una verificación pendiente para ese correo, o expiró")
+		case errors.Is(err, ErrEmailVerificationInvalidCode):
+			writeError(w, http.StatusUnauthorized, "código inválido")
+		case errors.Is(err, ErrEmailVerificationTooManyTries):
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos, solicita un código nuevo")
+		default:
+			log.Printf("confirm email verification error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo confirmar el correo")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type resendEmailVerificationRequest struct {
+	Email string `json:"email"`
+}
+
+// ResendEmailVerification re-sends the confirmation code — e.g. the first
+// email got lost or its code expired.
+func (h *Handlers) ResendEmailVerification(w http.ResponseWriter, r *http.Request) {
+	var req resendEmailVerificationRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, "el correo es obligatorio")
+		return
+	}
+
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
+		return
+	}
+
+	if err := h.svc.ResendEmailVerification(r.Context(), apiClientID, req.Email); err != nil {
+		switch {
+		case errors.Is(err, user.ErrNotFound):
+			writeError(w, http.StatusNotFound, "no existe una cuenta con ese correo")
+		case errors.Is(err, ErrEmailAlreadyVerified):
+			writeError(w, http.StatusConflict, "ese correo ya está verificado")
+		default:
+			log.Printf("resend email verification error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo reenviar el código")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "código de verificación reenviado"})
 }
 
 // --- Login step 1: password -> OTP sent by email ---
@@ -109,6 +193,8 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "correo o contraseña incorrectos")
+		case errors.Is(err, ErrEmailNotVerified):
+			writeError(w, http.StatusForbidden, "confirma tu correo antes de iniciar sesión")
 		case errors.Is(err, ErrTooManyFailedLogins):
 			writeError(w, http.StatusTooManyRequests, "demasiados intentos fallidos para esta cuenta, intenta de nuevo más tarde")
 		default:

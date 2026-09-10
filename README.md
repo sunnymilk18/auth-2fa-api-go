@@ -19,8 +19,8 @@ API independiente en Go para autenticación con doble factor por correo (email +
 
 Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#multi-tenant-api-keys) más abajo).
 
-1. `POST /auth/register` — crea el usuario (email + password, hasheado con bcrypt), dentro del sistema identificado por la API key.
-2. `POST /auth/login` — valida email/password. Si son correctos, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
+1. `POST /auth/register` — crea el usuario (email + password, hasheado con bcrypt), dentro del sistema identificado por la API key, y envía un código de verificación por correo (ver [Verificación de correo](#verificación-de-correo) más abajo). La cuenta existe desde ya, pero no puede loguear hasta confirmarlo.
+2. `POST /auth/login` — valida email/password. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué. Si todo está en orden, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
 3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
@@ -39,6 +39,17 @@ La confianza dura 30 días desde el último uso (ventana deslizante, `DEVICE_TRU
 
 11. `POST /auth/password-reset/request` — recibe `email`. Si existe una cuenta con ese correo en el sistema (API key) que llama, genera un código numérico corto (como el OTP de login, `PASSWORD_RESET_CODE_LENGTH` dígitos), lo guarda hasheado en Redis (TTL configurable, `PASSWORD_RESET_TTL`) y lo envía por correo. **La respuesta es idéntica exista o no la cuenta** — no filtra qué correos están registrados, igual que `/auth/login`.
 12. `POST /auth/password-reset/confirm` — recibe `email` + `code` + `new_password`. El código es de un solo uso y tiene un límite de intentos (`PASSWORD_RESET_MAX_TRIES`, igual que el OTP de login) — a diferencia del OTP, este código no está protegido por una contraseña correcta de antemano (cualquiera que sepa el email puede intentarlo), por eso necesita ese mismo límite de intentos. Al confirmarse con éxito se **revocan todas las sesiones activas (refresh tokens) y todos los dispositivos de confianza (PIN)** del usuario — un reset de contraseña fuerza a volver a autenticarse en todos lados, ya que el dispositivo de confianza es un atajo que bypasea password+OTP por completo y no debería sobrevivir a un reset motivado por una posible cuenta comprometida.
+
+### Verificación de correo
+
+`POST /auth/register` no deja la cuenta lista para usar de inmediato: manda un código numérico (mismo mecanismo que el OTP de login — hasheado, con límite de intentos, `EMAIL_VERIFICATION_CODE_LENGTH`/`EMAIL_VERIFICATION_MAX_TRIES`) y `/auth/login` **rechaza el login con 403** hasta que se confirme, incluso con la contraseña correcta. Esto no es solo una formalidad: sin esto, cualquiera podría registrar una cuenta usando el correo real de otra persona (sin su consentimiento) y usarla de inmediato — cada intento de login futuro le mandaría a esa persona un código OTP que nunca pidió recibir. Bloquear el login hasta confirmar el correo hace que quien registró la cuenta necesite, de entrada, poder leer ese correo.
+
+13. `POST /auth/verify-email/confirm` — recibe `email` + `code`. Consume el código (un solo uso, con límite de intentos) y marca la cuenta como verificada, desbloqueando `/auth/login`.
+14. `POST /auth/verify-email/resend` — recibe `email`. Reenvía un código nuevo (invalida cualquiera pendiente) para una cuenta que todavía no se verificó — por si el primer correo se perdió o el código expiró (`EMAIL_VERIFICATION_TTL`, por default 24h, bastante más laxo que el OTP de login ya que confirmar una cuenta nueva es menos urgente que un login en curso).
+
+A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocultar si la cuenta existe — `/auth/register` ya revela eso mismo con su propio error de "correo ya registrado".
+
+**Registrarse de nuevo con un correo que todavía no se verificó reclama esa cuenta en vez de rechazarla** (contraseña nueva, estado sin verificar de nuevo) — una cuenta nunca confirmada no probó que su dueño realmente controla ese correo, así que no hay nada legítimo que proteger rechazando el intento nuevo. Sin esto, un solo error de tipeo al registrarse dejaría ese correo ocupado para siempre por una cuenta zombi que nadie puede confirmar, bloqueando a su dueño real de registrarse alguna vez (el email es único por sistema, y nada más libera una cuenta sin verificar abandonada). Solo una cuenta ya **verificada** sigue bloqueando el registro duplicado con `409`.
 
 ## Requisitos previos
 

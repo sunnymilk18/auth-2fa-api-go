@@ -75,6 +75,14 @@ paths:
     post:
       tags: [auth]
       summary: Registrar un nuevo usuario
+      description: >
+        La cuenta se crea de inmediato, pero no puede loguear todavía: este
+        endpoint también envía un código de verificación por correo, que hay
+        que confirmar en /auth/verify-email/confirm antes de que
+        /auth/login funcione. Registrarse de nuevo con un correo que
+        todavía no se verificó reclama esa cuenta (contraseña nueva) en
+        vez de fallar con 409 — solo una cuenta ya verificada bloquea el
+        duplicado.
       security:
         - apiKeyAuth: []
       requestBody:
@@ -130,6 +138,14 @@ paths:
                 $ref: "#/components/schemas/LoginResponse"
         "401":
           description: Email o contraseña incorrectos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: >
+            Contraseña correcta, pero el correo todavía no fue verificado —
+            confirmarlo en /auth/verify-email/confirm antes de loguear.
           content:
             application/json:
               schema:
@@ -279,6 +295,87 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429":
           description: Demasiados intentos con códigos incorrectos — hay que solicitar uno nuevo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/verify-email/confirm:
+    post:
+      tags: [auth]
+      summary: Confirma el código de verificación enviado al registrarse
+      description: >
+        El código es de un solo uso, con límite de intentos. Al confirmarse,
+        desbloquea /auth/login para esa cuenta.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyEmailConfirmRequest"
+      responses:
+        "204":
+          description: Correo verificado
+        "400":
+          description: Cuerpo de la solicitud inválido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Código inválido, o no hay una verificación pendiente para ese correo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Demasiados intentos con códigos incorrectos — hay que solicitar uno nuevo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/verify-email/resend:
+    post:
+      tags: [auth]
+      summary: Reenvía el código de verificación
+      description: >
+        Genera y envía un código nuevo, invalidando cualquiera pendiente —
+        para cuando el primer correo se perdió o el código expiró.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResendEmailVerificationRequest"
+      responses:
+        "200":
+          description: Código reenviado
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        "400":
+          description: Cuerpo de la solicitud inválido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: No existe una cuenta con ese correo
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Ese correo ya está verificado
           content:
             application/json:
               schema:
@@ -509,6 +606,25 @@ components:
           type: string
           format: password
           minLength: 8
+
+    VerifyEmailConfirmRequest:
+      type: object
+      required: [email, code]
+      properties:
+        email:
+          type: string
+          format: email
+        code:
+          type: string
+          description: Código numérico recibido por correo al registrarse (un solo uso, con límite de intentos)
+
+    ResendEmailVerificationRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
 
     TokenResponse:
       type: object

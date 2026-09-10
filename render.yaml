@@ -61,6 +61,13 @@ services:
       - key: PASSWORD_RESET_MAX_TRIES
         value: "5"
 
+      - key: EMAIL_VERIFICATION_TTL
+        value: 24h
+      - key: EMAIL_VERIFICATION_CODE_LENGTH
+        value: "6"
+      - key: EMAIL_VERIFICATION_MAX_TRIES
+        value: "5"
+
       - key: LOGIN_MAX_FAILED_ATTEMPTS
         value: "10"
       - key: LOGIN_LOCKOUT_WINDOW

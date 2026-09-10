@@ -13,8 +13,8 @@ import (
 // newTestService wires a full auth.Service against a real (local) Postgres
 // and an in-memory Redis, with a fake mailer so no real email is ever sent.
 // Returns the service, its token manager (to parse access tokens in tests),
-// the fake mailer (to read OTP codes off "sent" emails), and the api client
-// every user in the test belongs to.
+// the fake mailer (to read OTP/verification/reset codes off "sent" emails),
+// and the api client every user in the test belongs to.
 func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID string) {
 	t.Helper()
 
@@ -28,24 +28,42 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer = testutil.NewFakeMailer()
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
 	return svc, tokens, mailer, client.ID
 }
 
-func mustRegister(t *testing.T, svc *auth.Service, apiClientID, email, password string) {
+// mustRegister creates a verified, ready-to-login user. Registering alone
+// isn't enough anymore — Register now requires confirming the emailed
+// verification code before the account can log in — so this immediately
+// consumes that code off the fake mailer, mirroring what a real client does
+// right after registering, for every test that just needs a working account
+// rather than testing the verification flow itself.
+func mustRegister(t *testing.T, svc *auth.Service, mailer *testutil.FakeMailer, apiClientID, email, password string) {
 	t.Helper()
 	if _, err := svc.Register(t.Context(), apiClientID, email, password); err != nil {
 		t.Fatalf("Register(%q): %v", email, err)
+	}
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatalf("Register(%q): no verification email was sent", email)
+	}
+	code := testutil.ExtractVerificationCode(sent.Body)
+	if code == "" {
+		t.Fatalf("Register(%q): could not find a verification code in email body: %q", email, sent.Body)
+	}
+	if err := svc.ConfirmEmailVerification(t.Context(), apiClientID, email, code); err != nil {
+		t.Fatalf("ConfirmEmailVerification(%q): %v", email, err)
 	}
 }
 
 func TestLoginFlow_PasswordPlusOTP(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
@@ -85,13 +103,14 @@ func TestLoginFlow_PasswordPlusOTP(t *testing.T) {
 func TestLoginStep1_WrongPassword(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	sentBeforeLogin := len(mailer.Sent()) // mustRegister itself already sent a verification email
 
 	_, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong-password")
 	if err != user.ErrInvalidCredentials {
 		t.Fatalf("LoginStep1 with wrong password: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
-	if len(mailer.Sent()) != 0 {
+	if len(mailer.Sent()) != sentBeforeLogin {
 		t.Fatal("LoginStep1 with wrong password must not send an OTP email")
 	}
 }
@@ -103,9 +122,9 @@ func TestLoginStep1_WrongPassword(t *testing.T) {
 // auth.Service/LoginAttemptLimiter) — the scenario that limiter alone can't
 // catch: someone spreading guesses across many source IPs.
 func TestLoginStep1_LocksOutAfterTooManyFailures(t *testing.T) {
-	svc, _, _, apiClientID := newTestService(t)
+	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	// newTestService builds the limiter with maxFails=3.
 	for i := 1; i <= 2; i++ {
@@ -145,7 +164,7 @@ func TestLoginStep1_LockoutAppliesEvenToUnknownAccounts(t *testing.T) {
 func TestLoginStep1_SuccessResetsFailureCount(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
 		t.Fatalf("wrong password attempt: err = %v, want %v", err, user.ErrInvalidCredentials)
@@ -170,7 +189,7 @@ func TestLoginStep1_SuccessResetsFailureCount(t *testing.T) {
 func TestLoginStep2_WrongCodeExhaustsAttempts(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
@@ -210,13 +229,13 @@ func TestLoginStep2_UnknownLoginToken(t *testing.T) {
 // isolated — the same email can be a different account per tenant, and
 // credentials from one tenant must never authenticate against another.
 func TestMultiTenant_SameEmailDifferentClients(t *testing.T) {
-	svc, _, _, apiClientA := newTestService(t)
+	svc, _, mailer, apiClientA := newTestService(t)
 	pool := testutil.PostgresPool(t)
 	clientB, _ := testutil.NewAPIClient(t, pool)
 
 	email := "shared-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientA, email, "passwordA123")
-	mustRegister(t, svc, clientB.ID, email, "passwordB456")
+	mustRegister(t, svc, mailer, apiClientA, email, "passwordA123")
+	mustRegister(t, svc, mailer, clientB.ID, email, "passwordB456")
 
 	if _, err := svc.LoginStep1(t.Context(), apiClientA, email, "passwordB456"); err != user.ErrInvalidCredentials {
 		t.Fatalf("tenant A login with tenant B's password: err = %v, want %v", err, user.ErrInvalidCredentials)
@@ -229,7 +248,7 @@ func TestMultiTenant_SameEmailDifferentClients(t *testing.T) {
 func TestRefreshAndLogout(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
@@ -266,7 +285,7 @@ func TestRefreshAndLogout(t *testing.T) {
 func TestDeviceLoginFlow(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	// Full password+OTP login first, as the real flow requires.
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
@@ -320,7 +339,7 @@ func TestDeviceLoginFlow(t *testing.T) {
 func TestDeviceLogin_TooManyFailedPinsRevokesTrust(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {

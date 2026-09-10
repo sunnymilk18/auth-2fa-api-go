@@ -67,6 +67,8 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders)
 	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour, trustProxyHeaders)
 	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders)
+	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders)
+	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -86,6 +88,9 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 		r.With(passwordResetRequestLimiter.Middleware).Post("/password-reset/request", authHandlers.RequestPasswordReset)
 		r.With(passwordResetConfirmLimiter.Middleware).Post("/password-reset/confirm", authHandlers.ConfirmPasswordReset)
+
+		r.With(verifyEmailConfirmLimiter.Middleware).Post("/verify-email/confirm", authHandlers.ConfirmEmailVerification)
+		r.With(verifyEmailResendLimiter.Middleware).Post("/verify-email/resend", authHandlers.ResendEmailVerification)
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAuth(tokens))

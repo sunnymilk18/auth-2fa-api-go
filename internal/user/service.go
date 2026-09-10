@@ -79,6 +79,12 @@ func (s *Service) UpdatePassword(ctx context.Context, userID, newPassword string
 	return s.repo.UpdatePassword(ctx, userID, string(hash))
 }
 
+// MarkEmailVerified flips userID's email_verified to true — see
+// auth.Service.ConfirmEmailVerification.
+func (s *Service) MarkEmailVerified(ctx context.Context, userID string) error {
+	return s.repo.MarkEmailVerified(ctx, userID)
+}
+
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }

@@ -41,10 +41,11 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false)
@@ -142,8 +143,9 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 	handlers := auth.NewHandlers(auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour,
 	))
 	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false)
 }
@@ -187,6 +189,8 @@ func TestRouter_AuthRoutesRequireAPIKey(t *testing.T) {
 		{http.MethodDelete, "/auth/devices/some-id", accessToken},
 		{http.MethodPost, "/auth/password-reset/request", ""},
 		{http.MethodPost, "/auth/password-reset/confirm", ""},
+		{http.MethodPost, "/auth/verify-email/resend", ""},
+		{http.MethodPost, "/auth/verify-email/confirm", ""},
 	}
 	for _, c := range cases {
 		rec := doRequest(r, c.method, c.path, "" /* no api key */, c.bearer, map[string]string{})
@@ -292,5 +296,31 @@ func TestRouter_PasswordReset_NoBearerNeeded(t *testing.T) {
 	_ = json.Unmarshal(confirmRec.Body.Bytes(), &resp)
 	if resp["error"] == "falta el header Authorization o tiene un formato inválido" {
 		t.Fatalf("/auth/password-reset/confirm incorrectly required a Bearer token: %v", resp)
+	}
+}
+
+// Email verification, same reasoning as password reset: no session exists
+// yet at registration time, so the API key alone must be enough to reach
+// both endpoints.
+func TestRouter_EmailVerification_NoBearerNeeded(t *testing.T) {
+	r, apiKey, _ := newTestRouter(t)
+
+	resendRec := doRequest(r, http.MethodPost, "/auth/verify-email/resend", apiKey, "", map[string]string{
+		"email": "nobody@example.com",
+	})
+	if resendRec.Code != http.StatusNotFound {
+		t.Fatalf("POST /auth/verify-email/resend with API key only: status = %d, want %d, body=%s", resendRec.Code, http.StatusNotFound, resendRec.Body.String())
+	}
+
+	confirmRec := doRequest(r, http.MethodPost, "/auth/verify-email/confirm", apiKey, "", map[string]string{
+		"email": "nobody@example.com", "code": "does-not-exist",
+	})
+	if confirmRec.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /auth/verify-email/confirm with API key only: status = %d, want %d", confirmRec.Code, http.StatusUnauthorized)
+	}
+	var resp map[string]string
+	_ = json.Unmarshal(confirmRec.Body.Bytes(), &resp)
+	if resp["error"] == "falta el header Authorization o tiene un formato inválido" {
+		t.Fatalf("/auth/verify-email/confirm incorrectly required a Bearer token: %v", resp)
 	}
 }

@@ -7,11 +7,12 @@ import "time"
 // not globally — the same email can be a different account under a
 // different consuming system.
 type User struct {
-	ID           string
-	APIClientID  string
-	Email        string
-	PasswordHash string
-	IsActive     bool
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID            string
+	APIClientID   string
+	Email         string
+	PasswordHash  string
+	IsActive      bool
+	EmailVerified bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }

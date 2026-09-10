@@ -50,6 +50,16 @@ type Config struct {
 	PasswordResetCodeLength int
 	PasswordResetMaxTries   int
 
+	// Email verification: same short-numeric-code shape as password reset,
+	// required before LoginStep1 will issue an OTP — see auth.Service's
+	// Register/LoginStep1 doc comments for why. TTL defaults much longer
+	// than OTP/password-reset (a day, not minutes) since confirming a new
+	// account is lower urgency than a login or reset in progress — no harm
+	// in a user getting to it later that same day.
+	EmailVerificationTTL        time.Duration
+	EmailVerificationCodeLength int
+	EmailVerificationMaxTries   int
+
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
 	// account. A temporary throttle, not a permanent lockout — see
@@ -121,6 +131,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PasswordResetMaxTries, err = getEnvInt("PASSWORD_RESET_MAX_TRIES", 5); err != nil {
+		return nil, err
+	}
+	if cfg.EmailVerificationTTL, err = getEnvDuration("EMAIL_VERIFICATION_TTL", 24*time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.EmailVerificationCodeLength, err = getEnvInt("EMAIL_VERIFICATION_CODE_LENGTH", 6); err != nil {
+		return nil, err
+	}
+	if cfg.EmailVerificationMaxTries, err = getEnvInt("EMAIL_VERIFICATION_MAX_TRIES", 5); err != nil {
 		return nil, err
 	}
 	if cfg.LoginMaxFailedAttempts, err = getEnvInt("LOGIN_MAX_FAILED_ATTEMPTS", 10); err != nil {

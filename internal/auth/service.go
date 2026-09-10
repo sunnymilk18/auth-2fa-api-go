@@ -16,17 +16,19 @@ import (
 // JWT issuance into the full two-factor login flow, plus the trusted-device
 // + PIN shortcut that lets a recognized device skip password+OTP.
 type Service struct {
-	users            *user.Service
-	otp              *OTPStore
-	tokens           *TokenManager
-	refresh          *RefreshRepository
-	devices          *device.Service
-	passwordReset    *PasswordResetStore
-	loginAttempts    *LoginAttemptLimiter
-	mailer           mailer.Mailer
-	otpTTL           time.Duration
-	refreshTTL       time.Duration
-	passwordResetTTL time.Duration
+	users                *user.Service
+	otp                  *OTPStore
+	tokens               *TokenManager
+	refresh              *RefreshRepository
+	devices              *device.Service
+	passwordReset        *PasswordResetStore
+	emailVerification    *EmailVerificationStore
+	loginAttempts        *LoginAttemptLimiter
+	mailer               mailer.Mailer
+	otpTTL               time.Duration
+	refreshTTL           time.Duration
+	passwordResetTTL     time.Duration
+	emailVerificationTTL time.Duration
 }
 
 func NewService(
@@ -36,30 +38,100 @@ func NewService(
 	refresh *RefreshRepository,
 	devices *device.Service,
 	passwordReset *PasswordResetStore,
+	emailVerification *EmailVerificationStore,
 	loginAttempts *LoginAttemptLimiter,
 	m mailer.Mailer,
 	otpTTL time.Duration,
 	refreshTTL time.Duration,
 	passwordResetTTL time.Duration,
+	emailVerificationTTL time.Duration,
 ) *Service {
 	return &Service{
-		users:            users,
-		otp:              otp,
-		tokens:           tokens,
-		refresh:          refresh,
-		devices:          devices,
-		passwordReset:    passwordReset,
-		loginAttempts:    loginAttempts,
-		mailer:           m,
-		otpTTL:           otpTTL,
-		refreshTTL:       refreshTTL,
-		passwordResetTTL: passwordResetTTL,
+		users:                users,
+		otp:                  otp,
+		tokens:               tokens,
+		refresh:              refresh,
+		devices:              devices,
+		passwordReset:        passwordReset,
+		emailVerification:    emailVerification,
+		loginAttempts:        loginAttempts,
+		mailer:               m,
+		otpTTL:               otpTTL,
+		refreshTTL:           refreshTTL,
+		passwordResetTTL:     passwordResetTTL,
+		emailVerificationTTL: emailVerificationTTL,
 	}
 }
 
-// Register creates a new user account, scoped to the calling api client.
+// ErrEmailAlreadyVerified is returned by ResendEmailVerification when the
+// account has already confirmed its email — nothing to resend.
+var ErrEmailAlreadyVerified = errors.New("email already verified")
+
+// ErrEmailNotVerified is returned by LoginStep1 when the password was
+// correct but the account hasn't confirmed its email yet — see LoginStep1's
+// doc comment for why this blocks login entirely rather than just warning.
+var ErrEmailNotVerified = errors.New("email not verified")
+
+// Register creates a new user account, scoped to the calling api client,
+// and emails a verification code. The account exists in the database right
+// away, but LoginStep1 refuses to log it in until that code is confirmed
+// (see ConfirmEmailVerification) — otherwise anyone could register using a
+// stranger's real email without their consent, and every login attempt
+// against that account would keep emailing OTP codes to an inbox that
+// person never agreed to receive them in.
 func (s *Service) Register(ctx context.Context, apiClientID, email, password string) (*user.User, error) {
-	return s.users.Register(ctx, apiClientID, email, password)
+	u, err := s.users.Register(ctx, apiClientID, email, password)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.sendVerificationEmail(ctx, u); err != nil {
+		return nil, err
+	}
+
+	return u, nil
+}
+
+func (s *Service) sendVerificationEmail(ctx context.Context, u *user.User) error {
+	code, err := s.emailVerification.StartVerification(ctx, u.ID, u.APIClientID, u.Email)
+	if err != nil {
+		return err
+	}
+
+	body := fmt.Sprintf(
+		"Confirma tu correo con este código: %s\n\nExpira en %s.",
+		code, s.emailVerificationTTL.String(),
+	)
+	if err := s.mailer.Send(ctx, u.Email, "Confirma tu correo electrónico", body); err != nil {
+		return fmt.Errorf("sending email verification: %w", err)
+	}
+	return nil
+}
+
+// ConfirmEmailVerification consumes a verification code and marks the
+// account as verified, unblocking LoginStep1.
+func (s *Service) ConfirmEmailVerification(ctx context.Context, apiClientID, email, code string) error {
+	userID, err := s.emailVerification.ConsumeCode(ctx, apiClientID, email, code)
+	if err != nil {
+		return err
+	}
+	return s.users.MarkEmailVerified(ctx, userID)
+}
+
+// ResendEmailVerification re-sends the confirmation code for an existing,
+// not-yet-verified account — e.g. the first email got lost or its code
+// expired. Unlike RequestPasswordReset, this doesn't need to hide whether
+// the account exists: registration itself already reveals that (a
+// duplicate email fails with a clear "already registered" error).
+func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, email string) error {
+	u, err := s.users.FindByEmail(ctx, apiClientID, email)
+	if err != nil {
+		return err
+	}
+	if u.EmailVerified {
+		return ErrEmailAlreadyVerified
+	}
+	return s.sendVerificationEmail(ctx, u)
 }
 
 // LoginStep1 verifies email+password within one api client (tenant) and, on
@@ -94,6 +166,18 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, email, password s
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
 	_ = s.loginAttempts.Reset(ctx, apiClientID, email)
+
+	// Checked only after a correct password, never before: doing it earlier
+	// would let an unauthenticated caller learn whether an email is
+	// registered-but-unverified vs. not registered at all, the same
+	// enumeration VerifyPassword's shared error already guards against.
+	// Blocking here (not just warning) is the actual point of verification
+	// — an account registered with a stranger's email but never confirmed
+	// otherwise logs in exactly as normal, emailing that real owner an OTP
+	// code on every attempt they never asked for.
+	if !u.EmailVerified {
+		return "", ErrEmailNotVerified
+	}
 
 	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {

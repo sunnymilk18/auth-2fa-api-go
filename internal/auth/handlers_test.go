@@ -121,15 +121,140 @@ func TestHandler_Register_Success(t *testing.T) {
 	}
 }
 
+// Only a VERIFIED account blocks a duplicate registration — mustRegister
+// verifies the first one, so this exercises that case specifically.
 func TestHandler_Register_DuplicateEmail(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	rec := httptest.NewRecorder()
+	h.Register(rec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body), apiClientID))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+// Registering again with the same email BEFORE verifying reclaims the
+// existing (unverified) account instead of being blocked — see
+// user.Repository.Create's doc comment for why.
+func TestHandler_Register_ReclaimsUnverifiedDuplicate(t *testing.T) {
 	h, _, _, _, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	body := func() *bytes.Buffer { return jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"}) }
+	body := func() *bytes.Buffer {
+		return jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	}
 
-	h.Register(httptest.NewRecorder(), withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body()), apiClientID))
+	firstRec := httptest.NewRecorder()
+	h.Register(firstRec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body()), apiClientID))
+	if firstRec.Code != http.StatusCreated {
+		t.Fatalf("first Register status = %d, want %d, body=%s", firstRec.Code, http.StatusCreated, firstRec.Body.String())
+	}
 
+	secondRec := httptest.NewRecorder()
+	h.Register(secondRec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body()), apiClientID))
+	if secondRec.Code != http.StatusCreated {
+		t.Fatalf("second Register (reclaiming) status = %d, want %d, body=%s", secondRec.Code, http.StatusCreated, secondRec.Body.String())
+	}
+
+	firstID, _ := decodeJSON(t, firstRec)["id"].(string)
+	secondID, _ := decodeJSON(t, secondRec)["id"].(string)
+	if firstID == "" || secondID != firstID {
+		t.Fatalf("expected the same user id reclaimed: first=%q second=%q", firstID, secondID)
+	}
+}
+
+// --- Email verification ---
+
+func TestHandler_Login_BlockedUntilEmailVerified(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	// Register only — not mustRegister, which also confirms the email.
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	_, _ = mailer.Last() // drain the verification email, not asserted on here
+
+	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
 	rec := httptest.NewRecorder()
-	h.Register(rec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body()), apiClientID))
+
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+}
+
+func TestHandler_ConfirmEmailVerification_FullFlow(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("no verification email was sent")
+	}
+	code := testutil.ExtractVerificationCode(sent.Body)
+	if code == "" {
+		t.Fatalf("could not find a verification code in email body: %q", sent.Body)
+	}
+
+	confirmReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/verify-email/confirm", jsonBody(t, map[string]string{"email": email, "code": code})), apiClientID)
+	confirmRec := httptest.NewRecorder()
+	h.ConfirmEmailVerification(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusNoContent {
+		t.Fatalf("ConfirmEmailVerification status = %d, want %d, body=%s", confirmRec.Code, http.StatusNoContent, confirmRec.Body.String())
+	}
+
+	// Login now succeeds.
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})), apiClientID)
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("Login after verifying status = %d, want %d, body=%s", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+}
+
+func TestHandler_ConfirmEmailVerification_InvalidCode(t *testing.T) {
+	h, _, _, _, apiClientID := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"email": "nobody@example.com", "code": "123456"})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/verify-email/confirm", body), apiClientID)
+	rec := httptest.NewRecorder()
+
+	h.ConfirmEmailVerification(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHandler_ResendEmailVerification_UnknownAccount(t *testing.T) {
+	h, _, _, _, apiClientID := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"email": "nobody@example.com"})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/verify-email/resend", body), apiClientID)
+	rec := httptest.NewRecorder()
+
+	h.ResendEmailVerification(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+func TestHandler_ResendEmailVerification_AlreadyVerified(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	body := jsonBody(t, map[string]string{"email": email})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/verify-email/resend", body), apiClientID)
+	rec := httptest.NewRecorder()
+
+	h.ResendEmailVerification(rec, req)
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
@@ -139,9 +264,9 @@ func TestHandler_Register_DuplicateEmail(t *testing.T) {
 // --- Login (step 1) ---
 
 func TestHandler_Login_WrongPassword(t *testing.T) {
-	h, svc, _, _, apiClientID := newTestHandlers(t)
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	body := jsonBody(t, map[string]string{"email": email, "password": "wrong"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
@@ -155,9 +280,9 @@ func TestHandler_Login_WrongPassword(t *testing.T) {
 }
 
 func TestHandler_Login_TooManyFailedAttempts(t *testing.T) {
-	h, svc, _, _, apiClientID := newTestHandlers(t)
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	doLogin := func(password string) *httptest.ResponseRecorder {
 		body := jsonBody(t, map[string]string{"email": email, "password": password})
@@ -181,9 +306,9 @@ func TestHandler_Login_TooManyFailedAttempts(t *testing.T) {
 }
 
 func TestHandler_Login_Success(t *testing.T) {
-	h, svc, _, _, apiClientID := newTestHandlers(t)
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
@@ -218,7 +343,7 @@ func TestHandler_VerifyOTP_UnknownLoginToken(t *testing.T) {
 func TestHandler_VerifyOTP_Success(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
@@ -247,9 +372,9 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 // --- Password reset ---
 
 func TestHandler_RequestPasswordReset_SameResponseRegardlessOfAccountExistence(t *testing.T) {
-	h, svc, _, _, apiClientID := newTestHandlers(t)
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	knownReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": email})), apiClientID)
 	knownRec := httptest.NewRecorder()
@@ -321,7 +446,7 @@ func TestHandler_ConfirmPasswordReset_InvalidCode(t *testing.T) {
 func TestHandler_PasswordReset_FullFlow(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	reqReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", jsonBody(t, map[string]string{"email": email})), apiClientID)
 	reqRec := httptest.NewRecorder()
@@ -402,9 +527,9 @@ func TestHandler_RegisterDevice_MissingUserContext(t *testing.T) {
 }
 
 func TestHandler_RegisterDevice_InvalidPinFormat(t *testing.T) {
-	h, svc, _, _, apiClientID := newTestHandlers(t)
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	// A bogus userID is fine: invalid pin format is rejected before the
 	// handler ever touches the database.
@@ -422,7 +547,7 @@ func TestHandler_RegisterDevice_InvalidPinFormat(t *testing.T) {
 func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "correcthorsebattery")
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {

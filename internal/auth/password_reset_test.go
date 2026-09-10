@@ -11,7 +11,7 @@ import (
 func TestPasswordReset_FullFlow(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
 		t.Fatalf("RequestPasswordReset: %v", err)
@@ -62,7 +62,7 @@ func TestPasswordReset_UnknownCode(t *testing.T) {
 func TestPasswordReset_WrongCode(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
 		t.Fatalf("RequestPasswordReset: %v", err)
@@ -87,7 +87,7 @@ func TestPasswordReset_WrongCode(t *testing.T) {
 func TestPasswordReset_CodeIsSingleUse(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
 		t.Fatalf("RequestPasswordReset: %v", err)
@@ -106,7 +106,7 @@ func TestPasswordReset_CodeIsSingleUse(t *testing.T) {
 func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
 	if err != nil {
@@ -137,7 +137,7 @@ func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
 	if err != nil {
@@ -180,7 +180,7 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 func TestPasswordReset_TooManyWrongCodesInvalidatesSession(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	mustRegister(t, svc, apiClientID, email, "old-password-123")
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
 	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
 		t.Fatalf("RequestPasswordReset: %v", err)
