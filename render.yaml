@@ -56,6 +56,10 @@ services:
 
       - key: PASSWORD_RESET_TTL
         value: 1h
+      - key: PASSWORD_RESET_CODE_LENGTH
+        value: "6"
+      - key: PASSWORD_RESET_MAX_TRIES
+        value: "5"
 
       - key: LOGIN_MAX_FAILED_ATTEMPTS
         value: "10"

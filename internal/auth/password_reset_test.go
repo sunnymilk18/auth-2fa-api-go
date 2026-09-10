@@ -54,7 +54,7 @@ func TestPasswordReset_UnknownEmailDoesNotErrorOrEmail(t *testing.T) {
 
 func TestPasswordReset_UnknownCode(t *testing.T) {
 	svc, _, _, apiClientID := newTestService(t)
-	if err := svc.ResetPassword(t.Context(), apiClientID, "nobody@example.com", "12345678", "new-password-456"); err != auth.ErrPasswordResetNotFound {
+	if err := svc.ResetPassword(t.Context(), apiClientID, "nobody@example.com", "123456", "new-password-456"); err != auth.ErrPasswordResetNotFound {
 		t.Fatalf("err = %v, want %v", err, auth.ErrPasswordResetNotFound)
 	}
 }

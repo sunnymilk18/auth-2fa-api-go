@@ -294,7 +294,7 @@ func TestHandler_ConfirmPasswordReset_ShortPassword(t *testing.T) {
 
 func TestHandler_ConfirmPasswordReset_MissingAPIClientContext(t *testing.T) {
 	h, _, _, _, _ := newTestHandlers(t)
-	body := jsonBody(t, map[string]string{"email": "a@example.com", "code": "12345678", "new_password": "new-password-456"})
+	body := jsonBody(t, map[string]string{"email": "a@example.com", "code": "123456", "new_password": "new-password-456"})
 	req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body) // no withAPIClient
 	rec := httptest.NewRecorder()
 
@@ -307,7 +307,7 @@ func TestHandler_ConfirmPasswordReset_MissingAPIClientContext(t *testing.T) {
 
 func TestHandler_ConfirmPasswordReset_InvalidCode(t *testing.T) {
 	h, _, _, _, apiClientID := newTestHandlers(t)
-	body := jsonBody(t, map[string]string{"email": "does-not-exist@example.com", "code": "12345678", "new_password": "new-password-456"})
+	body := jsonBody(t, map[string]string{"email": "does-not-exist@example.com", "code": "123456", "new_password": "new-password-456"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/password-reset/confirm", body), apiClientID)
 	rec := httptest.NewRecorder()
 

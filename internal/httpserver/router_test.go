@@ -40,7 +40,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
 	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
-	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 8)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 
@@ -141,7 +141,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 	handlers := auth.NewHandlers(auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
-		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 8),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour,
 	))
