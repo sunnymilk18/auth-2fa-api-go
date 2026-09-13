@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/metric/noop"
 
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
@@ -48,7 +49,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
 	handlers := auth.NewHandlers(svc)
 
-	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false)
+	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"))
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery")
@@ -147,7 +148,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour,
 	))
-	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false)
+	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"))
 }
 
 func TestRouter_JWKSShape(t *testing.T) {

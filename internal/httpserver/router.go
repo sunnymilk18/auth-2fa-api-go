@@ -10,6 +10,7 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"go.opentelemetry.io/otel/metric"
 
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
@@ -19,8 +20,9 @@ import (
 
 // NewRouter wires all routes: public auth endpoints, API docs, and a sample
 // protected endpoint that any consuming system can imitate to guard its own
-// routes.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool) http.Handler {
+// routes. meter is a no-op if telemetry.Setup was never called (or ran
+// with no OTLP endpoint configured) — callers never need to check.
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -28,6 +30,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Use(chimw.Logger)
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(15 * time.Second))
+	r.Use(middleware.Metrics(meter))
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health

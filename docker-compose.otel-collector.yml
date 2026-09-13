@@ -1,0 +1,56 @@
+# Standalone compose — solo el OTel Collector, para pegar tal cual en
+# Dokploy como su propio proyecto Compose (sin repo de por medio). El
+# contenido de otel-collector-config.yaml va EMBEBIDO acá abajo, en el
+# bloque `configs:` con `content:` inline — Docker Compose crea el archivo
+# él solo dentro del contenedor, no hace falta ningún archivo externo ni
+# bind mount. (Requiere Docker Compose v2.23+ / Compose Spec reciente —
+# lo normal en cualquier Dokploy actualizado.)
+#
+# Expone:
+#   4318 -> receptor OTLP/HTTP — la API apunta su OTEL_EXPORTER_OTLP_ENDPOINT
+#           acá (mismo proyecto: "otel-collector:4318" por nombre de
+#           servicio; proyecto separado: la dirección/dominio que Dokploy
+#           le asigne a este servicio).
+#   8889 -> exportador Prometheus — lo que Prometheus scrapea
+#           (<este-servicio>:8889 como target).
+#
+# En producción, si API y este collector terminan en el MISMO proyecto de
+# Dokploy, sacá los `ports:` — se resuelven por nombre de servicio en la
+# red interna sin necesidad de publicarlos al host/internet.
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    configs:
+      - source: otel_collector_config
+        target: /etc/otel-collector-config.yaml
+    ports:
+      - "4318:4318"
+      - "8889:8889"
+    restart: unless-stopped
+
+configs:
+  otel_collector_config:
+    content: |
+      receivers:
+        otlp:
+          protocols:
+            http:
+              endpoint: 0.0.0.0:4318
+            grpc:
+              endpoint: 0.0.0.0:4317
+
+      processors:
+        batch: {}
+
+      exporters:
+        prometheus:
+          endpoint: 0.0.0.0:8889
+
+      service:
+        pipelines:
+          metrics:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [prometheus]

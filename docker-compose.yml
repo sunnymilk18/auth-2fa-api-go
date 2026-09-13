@@ -1,6 +1,6 @@
 # Local dev stack for auth-2fa-api: the API plus everything it needs to run
-# fully offline (Postgres, Redis). Mirrors what's already deployed for real
-# (Render + Neon + Upstash) but self-contained on your machine.
+# fully offline (Postgres, Redis), plus a metrics pipeline (OTel Collector
+# -> Prometheus -> Grafana) so you can watch it while you use it.
 #
 # No mail server here on purpose: Resend is an HTTP API to Resend's own
 # cloud (https://resend.com), not something you self-host — there's no
@@ -12,17 +12,29 @@
 # same from inside a container as from your host) and codes really arrive
 # by email, same as running the API without Docker.
 #
+# Metrics-only for now, no traces/logs — see internal/telemetry and
+# internal/middleware/metrics.go for what the API actually sends.
+#
 # Prerequisites (see README):
-#   1. keys/private.pem + keys/public.pem generated (openssl genrsa ...)
+#   1. keys/private.pem + keys/public.pem generated (openssl genrsa ...),
+#      readable by the container's non-root user (chmod 644 if needed).
 #   2. A .env file in this directory with at least JWT_REFRESH_SECRET,
 #      RESEND_API_KEY (and RESEND_FROM if you verified a domain) — compose
 #      reads .env automatically for the ${VAR} substitutions below.
 #
 # Usage:
-#   docker compose up --build        # postgres + redis + migrate + api
+#   docker compose up --build
 #   docker compose logs -f api
-#   docker compose run --rm --entrypoint ./createclient api create -name "my-app"
-#   docker compose down               # add -v to also wipe postgres/redis data
+#   docker compose run --rm api ./createclient create -name "my-app"
+#   docker compose down               # add -v to also wipe all data volumes
+#
+# Once it's up:
+#   API:        http://localhost:8080
+#   Prometheus: http://localhost:9090
+#   Grafana:    http://localhost:3000  (admin/admin — anonymous viewer access
+#               is also enabled, so opening it needs no login at all; the
+#               Prometheus datasource is pre-provisioned, nothing to click
+#               through to wire up)
 
 services:
   postgres:
@@ -113,6 +125,12 @@ services:
 
       RESEND_API_KEY: ${RESEND_API_KEY}
       RESEND_FROM: ${RESEND_FROM:-onboarding@resend.dev}
+
+      # Standard OTel SDK env var — internal/telemetry.Setup reads it
+      # directly via os.Getenv, no config.go plumbing. host:port, no
+      # scheme/path: otlpmetrichttp appends /v1/metrics itself, matching
+      # the collector's OTLP/HTTP receiver below.
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
     volumes:
       - ./keys:/app/keys:ro
     depends_on:
@@ -123,5 +141,46 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Receives metrics over OTLP from `api` and re-exposes them in
+  # Prometheus's scrape format — the API never talks to Prometheus
+  # directly, and doesn't need to know it exists.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP — only exposed on the host for manual poking; api reaches it over the compose network regardless.
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Convenience for local dev only — lets you open the dashboards
+      # without logging in at all; admin/admin still works for editing.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
   postgres_data:
   redis_data:
+  prometheus_data:
+  grafana_data:

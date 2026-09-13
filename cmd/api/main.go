@@ -19,6 +19,7 @@ import (
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/mailer"
+	"auth-2fa-api/internal/telemetry"
 	"auth-2fa-api/internal/user"
 )
 
@@ -78,7 +79,21 @@ func run() error {
 	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders)
+	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> Setup returns a no-op shutdown
+	// and the meter stays a no-op too; metrics are an optional extra, not
+	// something that should block startup or need its own on/off flag.
+	shutdownTelemetry, err := telemetry.Setup(ctx, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "auth-2fa-api")
+	if err != nil {
+		return fmt.Errorf("setting up telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
+	meter := telemetry.Meter("auth-2fa-api")
+
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
