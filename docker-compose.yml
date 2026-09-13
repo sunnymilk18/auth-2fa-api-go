@@ -123,6 +123,5 @@ services:
       migrate:
         condition: service_completed_successfully
 
-volumes:
   postgres_data:
   redis_data:

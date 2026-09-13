@@ -15,6 +15,9 @@ import (
 // Supports both redis:// (plain) and rediss:// (TLS) schemes — the latter
 // is what hosted providers like Upstash require.
 func NewRedis(ctx context.Context, redisURL string) (*redis.Client, error) {
+
+	fmt.Println("URL", redisURL)
+
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {
 		return nil, fmt.Errorf("parsing redis url: %w", err)
