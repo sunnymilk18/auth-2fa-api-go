@@ -60,6 +60,11 @@ services:
     command: ["./migrate"]
     environment:
       POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/auth2fa?sslmode=disable
+      # cmd/migrate calls the same config.Load() as cmd/api, which requires
+      # JWT_REFRESH_SECRET to be set even though migrate itself never uses
+      # it (it only applies .sql files) — has to be here or config.Load()
+      # fails before migrate ever touches Postgres.
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
