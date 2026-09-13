@@ -126,11 +126,16 @@ services:
       RESEND_API_KEY: ${RESEND_API_KEY}
       RESEND_FROM: ${RESEND_FROM:-onboarding@resend.dev}
 
-      # Standard OTel SDK env var — internal/telemetry.Setup reads it
-      # directly via os.Getenv, no config.go plumbing. host:port, no
-      # scheme/path: otlpmetrichttp appends /v1/metrics itself, matching
-      # the collector's OTLP/HTTP receiver below.
-      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4318
+      # Standard OTel SDK env var — internal/telemetry.Setup reads it via
+      # os.Getenv only to decide whether to enable export at all; the SDK
+      # itself (otlpmetrichttp.New) reads this same variable again
+      # internally to build the request. Per the OTel spec it MUST include
+      # the scheme (http:// here — that alone is what tells the SDK to
+      # skip TLS) — a bare "host:port" makes the SDK's own env parsing
+      # treat the whole value as a path instead of a host, corrupting the
+      # final request URL. See telemetry.Setup's doc comment for the
+      # actual failure mode this caused.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
     volumes:
       - ./keys:/app/keys:ro
     depends_on:

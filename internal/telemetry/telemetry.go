@@ -17,29 +17,35 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// Setup wires the global MeterProvider to export via OTLP/HTTP to endpoint
-// (host:port — no scheme, matches otlpmetrichttp.WithEndpoint), tagged with
-// serviceName so Grafana can tell this service's metrics apart from
-// others sharing the same collector.
+// Setup wires the global MeterProvider to export via OTLP/HTTP, tagged with
+// serviceName so Grafana can tell this service's metrics apart from others
+// sharing the same collector.
 //
-// endpoint == "" (OTEL_EXPORTER_OTLP_ENDPOINT unset) disables export
-// entirely rather than failing startup — metrics are an optional extra,
-// not something that should be able to take the API down if the collector
-// isn't reachable. Call the returned shutdown func during graceful
-// shutdown to flush any metrics still buffered.
+// endpoint is only used as an on/off switch here — pass
+// os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), and leave it unset to disable
+// export entirely rather than failing startup (metrics are an optional
+// extra, not something that should be able to take the API down if the
+// collector isn't reachable).
+//
+// The actual exporter (otlpmetrichttp.New below) deliberately takes no
+// WithEndpoint/WithInsecure options — it reads OTEL_EXPORTER_OTLP_ENDPOINT
+// itself, and per the OTel spec that variable is a full URL *with* scheme
+// (e.g. "http://otel-collector:4318", not a bare "otel-collector:4318").
+// Passing the same bare value again via WithEndpoint on top of that
+// doubles it up: the SDK's own env parsing, finding no "://", treats the
+// whole value as a path rather than a host, and it ends up appended into
+// the request path alongside whatever WithEndpoint sets as the host —
+// producing a mangled URL like ".../otel-collector:4318/v1/metrics"
+// instead of ".../v1/metrics". The scheme also drives TLS on/off by
+// itself (http:// -> insecure, https:// -> TLS) — one more reason not to
+// set WithInsecure() explicitly here too.
 func Setup(ctx context.Context, endpoint, serviceName string) (shutdown func(context.Context) error, err error) {
 	noop := func(context.Context) error { return nil }
 	if endpoint == "" {
 		return noop, nil
 	}
 
-	exporter, err := otlpmetrichttp.New(ctx,
-		otlpmetrichttp.WithEndpoint(endpoint),
-		// The collector in docker-compose.yml has no TLS in front of it —
-		// this is traffic between containers on the same private network,
-		// not going out to the internet.
-		otlpmetrichttp.WithInsecure(),
-	)
+	exporter, err := otlpmetrichttp.New(ctx)
 	if err != nil {
 		return noop, fmt.Errorf("creating OTLP metric exporter: %w", err)
 	}
