@@ -46,7 +46,9 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD wget -qO- http://localhost:8080/health || exit 1
 
-# docker-compose overrides this for the `migrate` and `createclient`
-# one-off services (`command: ["./migrate"]`, etc.) — this default is what
-# runs when the image is used as-is, i.e. the API server.
-ENTRYPOINT ["./api"]
+# CMD (not ENTRYPOINT): docker-compose's `command: ["./migrate"]` needs to
+# fully replace this, not get appended as an argument to it — which is
+# exactly what happens with an exec-form ENTRYPOINT here instead. This
+# default (no override) is what runs when the image is used as-is, i.e.
+# the API server.
+CMD ["./api"]
