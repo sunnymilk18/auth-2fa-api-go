@@ -1,0 +1,123 @@
+# Local dev stack for auth-2fa-api: the API plus everything it needs to run
+# fully offline (Postgres, Redis). Mirrors what's already deployed for real
+# (Render + Neon + Upstash) but self-contained on your machine.
+#
+# No mail server here on purpose: Resend is an HTTP API to Resend's own
+# cloud (https://resend.com), not something you self-host — there's no
+# "run Resend locally" container, and internal/mailer/resend.go always
+# talks to the real api.resend.com. A fake local SMTP/catch-all server
+# (Mailpit, MailHog, etc.) wouldn't actually be exercised by this code
+# without changing it. So: just supply a real RESEND_API_KEY below (the
+# free sandbox key from .env already works — it's an outbound HTTPS call,
+# same from inside a container as from your host) and codes really arrive
+# by email, same as running the API without Docker.
+#
+# Prerequisites (see README):
+#   1. keys/private.pem + keys/public.pem generated (openssl genrsa ...)
+#   2. A .env file in this directory with at least JWT_REFRESH_SECRET,
+#      RESEND_API_KEY (and RESEND_FROM if you verified a domain) — compose
+#      reads .env automatically for the ${VAR} substitutions below.
+#
+# Usage:
+#   docker compose up --build        # postgres + redis + migrate + api
+#   docker compose logs -f api
+#   docker compose run --rm --entrypoint ./createclient api create -name "my-app"
+#   docker compose down               # add -v to also wipe postgres/redis data
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: auth2fa
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: applies every migrations/*.sql against `postgres`, then exits.
+  # `api` waits for this to finish successfully before it starts.
+  migrate:
+    build: .
+    command: ["./migrate"]
+    environment:
+      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/auth2fa?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      # No reverse proxy in front in this local setup — don't trust
+      # X-Forwarded-For here (same reasoning as .env.example).
+      TRUST_PROXY_HEADERS: "false"
+
+      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/auth2fa?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+
+      # keys/ is bind-mounted below (it's gitignored, generated locally
+      # per the README) rather than baked into the image. Alternative for
+      # a filesystem-less setup: set JWT_PRIVATE_KEY_PEM_BASE64 instead —
+      # same variable this project uses on Render.
+      JWT_PRIVATE_KEY_PATH: /app/keys/private.pem
+      JWT_KEY_ID: auth-2fa-api-1
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      ACCESS_TOKEN_TTL: 15m
+      REFRESH_TOKEN_TTL: 168h
+
+      OTP_LENGTH: "6"
+      OTP_TTL: 5m
+      OTP_MAX_TRIES: "5"
+
+      PASSWORD_RESET_TTL: 1h
+      PASSWORD_RESET_CODE_LENGTH: "6"
+      PASSWORD_RESET_MAX_TRIES: "5"
+
+      EMAIL_VERIFICATION_TTL: 24h
+      EMAIL_VERIFICATION_CODE_LENGTH: "6"
+      EMAIL_VERIFICATION_MAX_TRIES: "5"
+
+      LOGIN_MAX_FAILED_ATTEMPTS: "10"
+      LOGIN_LOCKOUT_WINDOW: 15m
+
+      DEVICE_TRUST_TTL: 720h
+      DEVICE_PIN_MAX_TRIES: "5"
+
+      RESEND_API_KEY: ${RESEND_API_KEY}
+      RESEND_FROM: ${RESEND_FROM:-onboarding@resend.dev}
+    volumes:
+      - ./keys:/app/keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
+  redis_data:

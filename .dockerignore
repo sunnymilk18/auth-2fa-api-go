@@ -1,0 +1,21 @@
+# Keep the build context lean and never let secrets ride along in a layer,
+# even though the Dockerfile doesn't COPY these on purpose already.
+.git/
+.env
+.env.*
+!.env.example
+/keys/
+
+/bin/
+/dist/
+*.exe
+*.exe~
+*.test
+*.out
+
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
+
+README.md
