@@ -18,7 +18,7 @@ func NewRedis(ctx context.Context, redisURL string) (*redis.Client, error) {
 
 	fmt.Println("URL", redisURL)
 
-	opts, err := redis.ParseURL(redisURL)
+	opts, err := redis.ParseURL("redis://default:fdajguoezmttsf1o@auth2faapi-redis-iatzfm:6379")
 	if err != nil {
 		return nil, fmt.Errorf("parsing redis url: %w", err)
 	}
