@@ -532,7 +532,16 @@ components:
       name: X-API-Key
       description: >
         Identifica al sistema consumidor (tenant). Se genera con
-        `cmd/createclient` y se envía en todo request a `/auth/*`.
+        `cmd/createclient` o `POST /admin/clients` y se envía en todo
+        request a `/auth/*`.
+
+
+        **No la incluyas en código que corre en el dispositivo del
+        usuario final** (JavaScript de navegador, una app móvil) — es un
+        secreto de servidor, no algo que deba ser públicamente
+        extraíble. El patrón correcto: tu propio backend llama a esta
+        API con la key; tu frontend/app le habla a tu backend, nunca
+        directo acá.
 
   schemas:
     RegisterRequest:

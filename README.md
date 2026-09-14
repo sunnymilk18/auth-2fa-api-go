@@ -132,9 +132,19 @@ X-API-Key: sk_live_...
 
 Sin ese header (o con una key inválida/inactiva), la API responde `401`.
 
+**Importante para quien vaya a consumir la API — dónde NO poner esta key:** `X-API-Key` identifica a tu sistema, no a un usuario individual — es un secreto de servidor, no algo que deba viajar dentro de código que corre en el dispositivo del usuario final (JavaScript de navegador, una app móvil). Cualquiera puede extraerla abriendo las devtools del sitio o descompilando el APK. El patrón correcto es que **tu propio backend** sea el que llame a esta API con la key — tu frontend/app le habla a tu backend, nunca directo a `auth-2fa-api` con la key embebida. Si tu key se filtra igual (pasa), `rotate` (ver abajo) la reemplaza sin tener que recrear el cliente.
+
 ### Gestionar clientes existentes
 
-`cmd/createclient` tiene subcomandos además de crear:
+Por HTTP, con el header `X-Admin-Token` (ver `ADMIN_API_TOKEN` en `.env.example` — deshabilitado si no está seteada):
+
+```bash
+curl -X POST https://tu-api/admin/clients/ \
+  -H "X-Admin-Token: $ADMIN_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name":"nombre-de-tu-sistema"}'
+```
+
+O por línea de comandos, `cmd/createclient` tiene los mismos subcomandos:
 
 ```bash
 go run ./cmd/createclient list                     # lista todos los clientes (id, activo, creado, nombre)
@@ -143,7 +153,7 @@ go run ./cmd/createclient activate -id <id>         # reactiva un cliente desact
 go run ./cmd/createclient rotate -id <id>           # emite una key nueva, invalida la anterior — misma identidad (id, nombre, usuarios)
 ```
 
-`rotate` es la forma de recuperarse de una key filtrada sin tener que recrear el cliente ni migrar sus usuarios a otro. Todo esto sigue siendo por línea de comandos — no hay (todavía) un endpoint HTTP de administración; ver "Notas para producción" más abajo.
+`rotate` es la forma de recuperarse de una key filtrada sin tener que recrear el cliente ni migrar sus usuarios a otro.
 
 ## Ejecutar
 
@@ -266,4 +276,3 @@ El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca d
 
 - **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse.
 - **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
-- **Gestión de API keys por HTTP**: `cmd/createclient` ya cubre crear/listar/activar/desactivar/rotar (ver [Gestionar clientes existentes](#gestionar-clientes-existentes)), pero sigue siendo un CLI de línea de comandos — sin un endpoint de administración remoto, cada operación requiere acceso a la máquina/entorno donde corre este comando.
