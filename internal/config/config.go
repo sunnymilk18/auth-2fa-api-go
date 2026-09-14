@@ -85,6 +85,17 @@ type Config struct {
 	// a reverse proxy you control sits in front and overwrites that header
 	// — otherwise any client can forge it to dodge the rate limit.
 	TrustProxyHeaders bool
+
+	// AdminAPIToken gates /admin/* (provisioning api_clients over HTTP —
+	// the same operations as cmd/createclient, for when running the CLI
+	// over SSH is more friction than it's worth). Checked against the
+	// X-Admin-Token header via RequireAdminToken.
+	//
+	// Empty (the default) disables /admin/* entirely rather than falling
+	// back to some default token — an admin endpoint reachable with no
+	// secret configured would be a much worse mistake than requiring an
+	// explicit opt-in.
+	AdminAPIToken string
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -106,6 +117,8 @@ func Load() (*Config, error) {
 
 		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
 		ResendFrom:   getEnv("RESEND_FROM", "onboarding@resend.dev"),
+
+		AdminAPIToken: getEnv("ADMIN_API_TOKEN", ""),
 	}
 
 	var err error

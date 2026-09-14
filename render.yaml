@@ -84,3 +84,10 @@ services:
         sync: false
       - key: RESEND_FROM
         value: onboarding@resend.dev
+
+      # Optional — leave unset (the Render default for sync:false with no
+      # value filled in) to leave /admin/* unregistered entirely. Fill in
+      # only if you actually want to provision api_clients over HTTP
+      # instead of `go run ./cmd/createclient` over SSH.
+      - key: ADMIN_API_TOKEN
+        sync: false

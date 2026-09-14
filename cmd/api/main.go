@@ -93,7 +93,7 @@ func run() error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

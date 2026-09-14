@@ -136,6 +136,11 @@ services:
       # final request URL. See telemetry.Setup's doc comment for the
       # actual failure mode this caused.
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+
+      # Optional — leaves /admin/* unregistered entirely if unset in your
+      # .env. Set it there to provision api_clients over HTTP instead of
+      # `docker compose run --rm api ./createclient ...`.
+      ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
     volumes:
       - ./keys:/app/keys:ro
     depends_on:

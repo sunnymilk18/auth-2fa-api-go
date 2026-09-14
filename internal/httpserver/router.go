@@ -22,7 +22,9 @@ import (
 // protected endpoint that any consuming system can imitate to guard its own
 // routes. meter is a no-op if telemetry.Setup was never called (or ran
 // with no OTLP endpoint configured) — callers never need to check.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter) http.Handler {
+// adminToken == "" leaves /admin/* unregistered entirely (404, not "open
+// with no auth") — see middleware.RequireAdminToken.
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
@@ -102,6 +104,19 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
 		})
 	})
+
+	if adminToken != "" {
+		adminHandlers := apiclient.NewHandlers(apiClients)
+		r.Route("/admin/clients", func(r chi.Router) {
+			r.Use(middleware.RequireAdminToken(adminToken))
+
+			r.Post("/", adminHandlers.Create)
+			r.Get("/", adminHandlers.List)
+			r.Post("/{id}/deactivate", adminHandlers.Deactivate)
+			r.Post("/{id}/activate", adminHandlers.Activate)
+			r.Post("/{id}/rotate", adminHandlers.Rotate)
+		})
+	}
 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(tokens))
