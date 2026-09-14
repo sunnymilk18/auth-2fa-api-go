@@ -5,6 +5,9 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    # Fixed on purpose (not auto-generated) — the provisioned dashboard in
+    # ./dashboards references this UID directly.
+    uid: prometheus-ds
     access: proxy
     url: http://prometheus:9090
     isDefault: true
