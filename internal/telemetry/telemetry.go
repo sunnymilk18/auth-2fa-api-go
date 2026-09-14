@@ -1,8 +1,9 @@
-// Package telemetry wires up OpenTelemetry metrics: a MeterProvider that
-// exports over OTLP/HTTP to a collector (see docker-compose.yml's
-// otel-collector service), which in turn feeds Prometheus for Grafana to
-// chart. Deliberately metrics-only for now — no traces/logs — see
-// internal/middleware's Metrics for what actually gets recorded.
+// Package telemetry wires up OpenTelemetry metrics and logs: a
+// MeterProvider and a LoggerProvider that both export over OTLP/HTTP to a
+// collector (see docker-compose.yml's otel-collector service), which in
+// turn feeds Prometheus (metrics) and Loki (logs) for Grafana to show.
+// No traces yet — see internal/middleware's Metrics for what metrics
+// actually get recorded, and SetupLogging below for logs.
 package telemetry
 
 import (
@@ -17,9 +18,9 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
 )
 
-// Setup wires the global MeterProvider to export via OTLP/HTTP, tagged with
-// serviceName so Grafana can tell this service's metrics apart from others
-// sharing the same collector.
+// SetupMetrics wires the global MeterProvider to export via OTLP/HTTP,
+// tagged with serviceName so Grafana can tell this service's metrics
+// apart from others sharing the same collector.
 //
 // endpoint is only used as an on/off switch here — pass
 // os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), and leave it unset to disable
@@ -38,8 +39,9 @@ import (
 // producing a mangled URL like ".../otel-collector:4318/v1/metrics"
 // instead of ".../v1/metrics". The scheme also drives TLS on/off by
 // itself (http:// -> insecure, https:// -> TLS) — one more reason not to
-// set WithInsecure() explicitly here too.
-func Setup(ctx context.Context, endpoint, serviceName string) (shutdown func(context.Context) error, err error) {
+// set WithInsecure() explicitly here too. SetupLogging below hits the
+// exact same exporter shape and follows the same rule.
+func SetupMetrics(ctx context.Context, endpoint, serviceName string) (shutdown func(context.Context) error, err error) {
 	noop := func(context.Context) error { return nil }
 	if endpoint == "" {
 		return noop, nil
@@ -50,11 +52,9 @@ func Setup(ctx context.Context, endpoint, serviceName string) (shutdown func(con
 		return noop, fmt.Errorf("creating OTLP metric exporter: %w", err)
 	}
 
-	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName(serviceName)),
-	)
+	res, err := newResource(ctx, serviceName)
 	if err != nil {
-		return noop, fmt.Errorf("building OTel resource: %w", err)
+		return noop, err
 	}
 
 	provider := sdkmetric.NewMeterProvider(
@@ -67,8 +67,17 @@ func Setup(ctx context.Context, endpoint, serviceName string) (shutdown func(con
 }
 
 // Meter returns a named Meter off the global MeterProvider — a no-op one
-// if Setup was never called or ran with no endpoint, so callers never need
-// to check whether telemetry is actually enabled before using it.
+// if SetupMetrics was never called or ran with no endpoint, so callers
+// never need to check whether telemetry is actually enabled before using
+// it.
 func Meter(name string) metric.Meter {
 	return otel.Meter(name)
+}
+
+func newResource(ctx context.Context, serviceName string) (*resource.Resource, error) {
+	res, err := resource.New(ctx, resource.WithAttributes(semconv.ServiceName(serviceName)))
+	if err != nil {
+		return nil, fmt.Errorf("building OTel resource: %w", err)
+	}
+	return res, nil
 }

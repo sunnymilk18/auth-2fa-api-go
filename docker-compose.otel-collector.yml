@@ -14,9 +14,17 @@
 #   8889 -> exportador Prometheus — lo que Prometheus scrapea
 #           (<este-servicio>:8889 como target).
 #
-# En producción, si API y este collector terminan en el MISMO proyecto de
-# Dokploy, sacá los `ports:` — se resuelven por nombre de servicio en la
-# red interna sin necesidad de publicarlos al host/internet.
+# IMPORTANTE — reemplazá LOKI_URL_AQUI más abajo (dos veces: una en el
+# exporter, otra en el comentario) por la URL real de tu Loki en Dokploy,
+# una vez que lo tengas desplegado (ver docker-compose.loki.yml). Al
+# revés que con Prometheus (que scrapea AL collector), acá es el collector
+# el que empuja hacia Loki — necesita saber su dirección de antemano.
+#
+# En producción, si API/Loki y este collector terminan en el MISMO
+# proyecto de Dokploy, usá los nombres de servicio directo (api,
+# otel-collector, loki) en vez de dominios, y sacá los `ports:` de abajo
+# — se resuelven por nombre de servicio en la red interna sin necesidad
+# de publicarlos al host/internet.
 
 services:
   otel-collector:
@@ -48,9 +56,21 @@ configs:
         prometheus:
           endpoint: 0.0.0.0:8889
 
+        # https:// + la URL de dominio de tu Loki en Dokploy (sin :puerto
+        # — Traefik ya resuelve el puerto interno correcto a través del
+        # dominio, igual que con Prometheus/otel-collector). Si Loki
+        # queda en este mismo proyecto, usá "http://loki:3100/otlp" en
+        # cambio.
+        otlphttp/loki:
+          endpoint: https://LOKI_URL_AQUI
+
       service:
         pipelines:
           metrics:
             receivers: [otlp]
             processors: [batch]
             exporters: [prometheus]
+          logs:
+            receivers: [otlp]
+            processors: [batch]
+            exporters: [otlphttp/loki]

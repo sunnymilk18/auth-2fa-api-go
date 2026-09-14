@@ -5,7 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,12 +24,31 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
-		log.Fatalf("fatal: %v", err)
+	// Set up structured logging before anything else — every log line
+	// from here on (including run()'s own fatal error, if any) goes
+	// through this, so it's JSON on stdout (Dokploy/`docker logs` keep
+	// working exactly as before) and, when configured, also shipped via
+	// OTLP to the collector for Loki. See SetupLogging's doc comment.
+	logger, shutdownLogging, err := telemetry.SetupLogging(context.Background(), os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "auth-2fa-api")
+	if err != nil {
+		// SetupLogging still returns a usable stdout-only *slog.Logger even
+		// when the OTLP half fails to set up — log the failure through it
+		// and keep going; logging is not worth failing startup over.
+		logger.Error("telemetry logging setup failed, continuing with stdout-only logging", "error", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownLogging(shutdownCtx)
+	}()
+
+	if err := run(logger); err != nil {
+		logger.Error("fatal", "error", err)
+		os.Exit(1)
 	}
 }
 
-func run() error {
+func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -43,14 +62,14 @@ func run() error {
 		return err
 	}
 	defer pgPool.Close()
-	log.Println("connected to postgres")
+	logger.Info("connected to postgres")
 
 	rdb, err := db.NewRedis(ctx, cfg.RedisURL)
 	if err != nil {
 		return err
 	}
 	defer rdb.Close()
-	log.Println("connected to redis")
+	logger.Info("connected to redis")
 
 	// Wiring: repositories -> services -> handlers.
 	userRepo := user.NewRepository(pgPool)
@@ -79,17 +98,18 @@ func run() error {
 	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL)
 	authHandlers := auth.NewHandlers(authSvc)
 
-	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> Setup returns a no-op shutdown
-	// and the meter stays a no-op too; metrics are an optional extra, not
-	// something that should block startup or need its own on/off flag.
-	shutdownTelemetry, err := telemetry.Setup(ctx, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "auth-2fa-api")
+	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
+	// shutdown and the meter stays a no-op too; metrics are an optional
+	// extra, not something that should block startup or need its own
+	// on/off flag.
+	shutdownMetrics, err := telemetry.SetupMetrics(ctx, os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"), "auth-2fa-api")
 	if err != nil {
 		return fmt.Errorf("setting up telemetry: %w", err)
 	}
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = shutdownTelemetry(shutdownCtx)
+		_ = shutdownMetrics(shutdownCtx)
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
@@ -104,14 +124,15 @@ func run() error {
 	}
 
 	go func() {
-		log.Printf("listening on :%s", cfg.Port)
+		logger.Info("listening", "port", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			logger.Error("server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("shutting down...")
+	logger.Info("shutting down...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -1,0 +1,10 @@
+# Auto-provisions the Loki datasource on Grafana startup — same idea as
+# datasources/prometheus.yaml, one file per datasource.
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true

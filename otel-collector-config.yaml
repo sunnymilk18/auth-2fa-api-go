@@ -1,7 +1,8 @@
-# OpenTelemetry Collector config — receives metrics over OTLP from the API
-# (internal/telemetry.Setup), re-exposes them in Prometheus's scrape
-# format. Nothing else: no traces/logs pipeline, matching the API's
-# metrics-only instrumentation for now.
+# OpenTelemetry Collector config — receives metrics AND logs over OTLP
+# from the API (internal/telemetry.SetupMetrics / SetupLogging).
+# Metrics: re-exposed in Prometheus's scrape format (pull-based).
+# Logs: pushed onward to Loki's native OTLP ingestion endpoint.
+# No traces yet.
 
 receivers:
   otlp:
@@ -20,9 +21,21 @@ exporters:
   prometheus:
     endpoint: 0.0.0.0:8889
 
+  # Push-based, unlike metrics: Loki 3.x accepts OTLP logs natively at
+  # /otlp/v1/logs, so this is just the standard OTLP/HTTP exporter aimed
+  # at Loki — no separate "loki"-specific exporter needed.
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
 service:
   pipelines:
     metrics:
       receivers: [otlp]
       processors: [batch]
       exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]

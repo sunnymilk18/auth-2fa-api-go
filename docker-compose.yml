@@ -1,6 +1,6 @@
 # Local dev stack for auth-2fa-api: the API plus everything it needs to run
-# fully offline (Postgres, Redis), plus a metrics pipeline (OTel Collector
-# -> Prometheus -> Grafana) so you can watch it while you use it.
+# fully offline (Postgres, Redis), plus metrics + logs (OTel Collector ->
+# Prometheus / Loki -> Grafana) so you can watch it while you use it.
 #
 # No mail server here on purpose: Resend is an HTTP API to Resend's own
 # cloud (https://resend.com), not something you self-host — there's no
@@ -12,8 +12,11 @@
 # same from inside a container as from your host) and codes really arrive
 # by email, same as running the API without Docker.
 #
-# Metrics-only for now, no traces/logs — see internal/telemetry and
-# internal/middleware/metrics.go for what the API actually sends.
+# Metrics + logs for now, no traces yet — see internal/telemetry (both
+# SetupMetrics and SetupLogging) and internal/middleware/metrics.go for
+# what the API actually sends. Logs always still go to stdout too
+# (unconditionally) — this is additive, not a replacement for
+# `docker compose logs`.
 #
 # Prerequisites (see README):
 #   1. keys/private.pem + keys/public.pem generated (openssl genrsa ...),
@@ -31,10 +34,11 @@
 # Once it's up:
 #   API:        http://localhost:8080
 #   Prometheus: http://localhost:9090
+#   Loki:       http://localhost:3100  (no UI of its own — query it through Grafana)
 #   Grafana:    http://localhost:3000  (admin/admin — anonymous viewer access
-#               is also enabled, so opening it needs no login at all; the
-#               Prometheus datasource is pre-provisioned, nothing to click
-#               through to wire up)
+#               is also enabled, so opening it needs no login at all; both
+#               the Prometheus and Loki datasources are pre-provisioned,
+#               nothing to click through to wire up)
 
 services:
   postgres:
@@ -172,6 +176,18 @@ services:
     depends_on:
       - otel-collector
 
+  # Receives logs over OTLP from the collector (native OTLP ingestion,
+  # Loki 3.x+ — no Promtail/agent needed, the API pushes logs itself the
+  # same way it pushes metrics).
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - ./loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100" # only for manual poking; otel-collector reaches it over the compose network regardless.
+
   grafana:
     image: grafana/grafana:11.2.0
     ports:
@@ -188,9 +204,11 @@ services:
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
+      - loki
 
 volumes:
   postgres_data:
   redis_data:
   prometheus_data:
   grafana_data:
+  loki_data:
