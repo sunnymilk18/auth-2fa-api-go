@@ -12,8 +12,10 @@ API independiente en Go para autenticación con doble factor por correo (email +
 - **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login`, `/auth/password-reset/*` y `/auth/verify-email/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas bajo dos API keys diferentes.
+- **CORS**: habilitado para cualquier origen (`*`), sin credenciales — la API se autentica por headers (`X-API-Key`, `Authorization`), no por cookies de sesión, así que no hay nada que filtrar abriendo el origen a todos. Cada sistema consumidor puede llamar desde su propio frontend sin que haga falta mantener una lista de dominios permitidos.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
-- **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa la API HTTP de [Resend](https://resend.com) (no SMTP, a propósito: varios proveedores cloud bloquean o filtran puertos SMTP salientes, algo que este proyecto sufrió literalmente al desplegar en Render). Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
+- **Observabilidad**: métricas (Prometheus) y logs estructurados (Loki) vía OpenTelemetry — ver [Observabilidad](#observabilidad) más abajo.
+- **Envío de correo**: interfaz `mailer.Mailer` — implementación actual usa la API HTTP de [Resend](https://resend.com), no SMTP a propósito: varios proveedores cloud (PaaS) bloquean o filtran puertos SMTP salientes, algo que este proyecto sufrió literalmente en un despliegue real. Cambiar de proveedor implica solo escribir una nueva implementación de esa interfaz.
 
 ## Flujo de autenticación
 
@@ -55,7 +57,9 @@ A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocult
 
 - Go 1.26+
 - Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP, de verificación de correo y de reset de contraseña
-- PostgreSQL y Redis — sin Docker instalado, la forma más rápida es usar capas gratuitas en la nube (no requiere instalar nada localmente):
+- PostgreSQL y Redis — dos formas, elegí una:
+  - **Con Docker** (más simple si ya lo tenés instalado): `docker-compose.yml` levanta Postgres y Redis por vos — ver [Ejecutar con Docker Compose](#ejecutar-con-docker-compose) más abajo. No hace falta nada de lo que sigue en esta sección.
+  - **Sin Docker**, con capas gratuitas en la nube (no requiere instalar nada localmente):
 
 ### PostgreSQL con Neon (gratis)
 
@@ -68,8 +72,6 @@ A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocult
 1. Crea una cuenta en https://upstash.com
 2. Crea una base Redis → en el dashboard copia la URL que empieza con `rediss://` (con TLS)
 3. Copia esa URL a `REDIS_URL` en tu `.env`
-
-(Si en algún momento instalas Postgres/Redis localmente o con Docker, `POSTGRES_DSN` y `REDIS_URL` aceptan igual las cadenas locales — ver los comentarios en `.env.example`.)
 
 ## Configuración
 
@@ -95,6 +97,11 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ```
 
 `JWT_PRIVATE_KEY_PATH` en `.env` ya apunta a `keys/private.pem` por defecto. **La carpeta `keys/` está en `.gitignore` — nunca se sube al repo.** Cada entorno (dev, staging, prod) debería generar su propio par de claves; la clave pública se distribuye vía el endpoint `/.well-known/jwks.json`, no hace falta compartirla manualmente.
+
+### Variables opcionales
+
+- **`ADMIN_API_TOKEN`**: habilita `/admin/clients/*` (gestionar API keys por HTTP en vez de solo por CLI — ver [Gestionar clientes existentes](#gestionar-clientes-existentes)). Sin setear, esas rutas ni siquiera existen (404, no "abiertas sin auth"). Generá un secreto fuerte igual que el del refresh token (`openssl rand -base64 48`) si la vas a usar.
+- **`OTEL_EXPORTER_OTLP_ENDPOINT`**: habilita el envío de métricas y logs a un collector de OpenTelemetry — ver [Observabilidad](#observabilidad) más abajo. Sin setear, la API funciona igual, solo sin exportar telemetría (los logs siempre se ven por stdout de todas formas).
 
 ## Base de datos
 
@@ -164,6 +171,30 @@ go run ./cmd/api
 
 El servidor arranca en `http://localhost:8080`.
 
+## Ejecutar con Docker Compose
+
+Alternativa a lo de arriba: `docker-compose.yml` levanta todo junto — Postgres, Redis, migraciones aplicadas automáticamente, la API, y el stack completo de observabilidad (ver [Observabilidad](#observabilidad)).
+
+**Antes de arrancar:**
+1. Par de claves RS256 generado (`keys/private.pem` + `keys/public.pem` — ver [Claves RS256](#claves-rs256-para-el-access-token) más arriba), legible por el usuario no-root del contenedor (`chmod 644 keys/*.pem` si hace falta).
+2. Un `.env` en la raíz con al menos `JWT_REFRESH_SECRET` y `RESEND_API_KEY` — Compose lo lee solo para las sustituciones `${VAR}` del archivo.
+
+```bash
+docker compose up --build
+```
+
+- API: `http://localhost:8080`
+- Prometheus: `http://localhost:9090`
+- Loki: `http://localhost:3100` (sin UI propia, se consulta desde Grafana)
+- Grafana: `http://localhost:3000` (`admin`/`admin`, acceso anónimo de solo lectura también habilitado) — con Prometheus, Loki y un dashboard de la API ya provisionados, nada que configurar a mano.
+
+Para crear un cliente (API key) sin salir del compose:
+```bash
+docker compose run --rm api ./createclient create -name "mi-app"
+```
+
+No incluye un servidor de correo local a propósito: Resend es una API HTTP hacia la nube de Resend, no algo autoalojable — simplemente usá tu `RESEND_API_KEY` real (la de sandbox alcanza), es una llamada saliente igual desde un contenedor que desde tu máquina.
+
 ## Tests
 
 ```bash
@@ -188,24 +219,16 @@ Flags útiles: `-v` (detalle de cada test, no solo el resumen), `-count=1` (igno
 
 El CI (`.github/workflows/ci.yml`) corre exactamente esto en cada push, contra un Postgres efímero — no hace falta correrlo a mano antes de subir cambios, pero es lo primero a probar localmente si el CI falla.
 
-## Deploy a Render
+## Deploy en producción
 
-El repo incluye [`render.yaml`](render.yaml) (Blueprint) — Render lo detecta solo al conectar el repo. Como Postgres (Neon) y Redis (Upstash) ya son de nube, no hace falta provisionar nada nuevo ahí: se reusan las mismas connection strings del `.env` local.
+Corre en un VPS propio, gestionado con [Dokploy](https://dokploy.com) (PaaS autoalojado — build desde `Dockerfile`, deploy desde `docker-compose.yml`, proxy/dominios vía Traefik). No depende de ningún proveedor de PaaS externo — el mismo `Dockerfile`/`docker-compose.yml` de este repo sirve para desplegar en cualquier Docker Compose, gestionado por Dokploy o no.
 
-1. En el dashboard de Render: **New +** → **Blueprint** → conectar este repo de GitHub.
-2. Render va a pedir el valor de cada variable marcada `sync: false` en `render.yaml`. Completar:
-   - `POSTGRES_DSN`, `REDIS_URL`, `JWT_REFRESH_SECRET`, `RESEND_API_KEY`: los mismos valores de tu `.env` local. **Ojo**: si tu `.env` tiene el valor entre comillas (`REDIS_URL="rediss://..."`), pegá solo lo de adentro, sin las comillas — Render las toma como parte literal del valor.
-   - `JWT_PRIVATE_KEY_PEM_BASE64`: el contenido de `keys/private.pem` en base64 (ver comando abajo) — Render no tiene filesystem persistente, así que la clave se pasa como variable de entorno en vez de archivo (`JWT_PRIVATE_KEY_PATH` no se usa ahí).
-     ```bash
-     # Linux/macOS/Git Bash:
-     base64 -w0 keys/private.pem
-     # PowerShell:
-     [Convert]::ToBase64String([IO.File]::ReadAllBytes("keys/private.pem"))
-     ```
-3. **Deploy**. Render construye (`go build -o app ./cmd/api`) y arranca (`./app`), y usa `/health` para saber si la instancia está sana — con el chequeo real de Postgres/Redis que ya tiene este endpoint.
-4. Al terminar, Render da una URL propia con HTTPS (`https://auth-2fa-api-xxxx.onrender.com`). No hace falta correr `cmd/migrate` ni `cmd/createclient` de nuevo — la base ya tiene el schema y al menos un cliente con su API key, porque es la misma que ya usás en local.
-
-**Nota**: el plan free de Render duerme el servicio tras ~15 min sin tráfico; el primer request después de eso tarda unos 30-50s en responder mientras despierta. Normal, no es un error.
+1. **Conectá el repo a Dokploy** como proyecto tipo *Compose* (o pegá el contenido de `docker-compose.yml` directo si preferís no linkear un repo).
+2. **Variables de entorno**: las mismas que en `.env` local (`JWT_REFRESH_SECRET`, `RESEND_API_KEY`, `ADMIN_API_TOKEN` si la vas a usar, etc.) — se cargan en el panel de Environment Variables del proyecto, no en un `.env` en disco.
+3. **Claves RS256**: `keys/private.pem`/`public.pem` se montan como volumen (ver `docker-compose.yml`) — no van en el repo (`.gitignore`), hay que dejarlas en el filesystem del servidor antes del primer deploy.
+4. **Deploy**. `migrate` corre una vez, aplica el schema, y `api` recién arranca después de que termine bien — no hace falta correr nada a mano.
+5. **Dominio + HTTPS**: agregale un dominio al servicio `api` desde el panel de Domains — Dokploy/Traefik gestiona el certificado. **Importante antes de darle esta URL a un tercero real**: sin dominio+HTTPS, las credenciales viajan sin cifrar.
+6. **Firewall, dos capas**: si tu VPS tiene firewall a nivel de nube además del propio del SO (ej. Security Groups/NSG en AWS/OCI + `iptables`/`ufw` en la instancia), **las dos** necesitan permitir el tráfico — abrir una sola capa no alcanza. Típicamente: puerto 80/443 si accedés por dominio (Traefik), o el puerto específico si publicás uno directo.
 
 **Nota sobre Resend en modo sandbox**: con `RESEND_FROM=onboarding@resend.dev` (el default, sin verificar dominio propio) solo se puede enviar correo a la dirección de tu propia cuenta de Resend — cualquier otro destinatario falla. Para que usuarios reales puedan registrarse, hay que verificar un dominio propio en el dashboard de Resend y usar una dirección de ese dominio como `RESEND_FROM`.
 
@@ -271,6 +294,29 @@ El access token es un JWT RS256. Cualquier sistema (aunque no tenga acceso a est
 3. Confiar en los claims `sub` (id de usuario), `email` y `exp` (expiración) una vez la firma es válida.
 
 El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca debe ser verificado ni aceptado por otro sistema.
+
+## Observabilidad
+
+Métricas y logs, vía [OpenTelemetry](https://opentelemetry.io) — ver `internal/telemetry` (`SetupMetrics`/`SetupLogging`) y `internal/middleware` (`Metrics`, `RequestLogger`). Opcional: sin `OTEL_EXPORTER_OTLP_ENDPOINT`, la API funciona idéntico, solo sin exportar nada (los logs siguen viéndose por stdout igual).
+
+**Arquitectura**: `api` → OTel Collector (OTLP) → Prometheus (métricas) / Loki (logs) → Grafana.
+
+- **Métricas**: `http_server_request_count_total` (contador) y `http_server_request_duration_seconds` (histograma), con labels `http_method`, `http_route` (el patrón de chi, no el path crudo — evita una serie nueva por cada id de recurso) y `http_status_code`.
+- **Logs**: JSON estructurado (`log/slog`) — siempre a stdout, y además por OTLP si está configurado. Incluye tanto los logs de arranque de `cmd/api` como uno por cada request (`internal/middleware/logging.go`).
+
+**`OTEL_EXPORTER_OTLP_ENDPOINT`** tiene que ser una URL completa **con esquema** (`http://otel-collector:4318`, no `otel-collector:4318` a secas) — el SDK de OTel la lee dos veces (una vez por su cuenta, otra por las opciones explícitas del código) y sin el esquema arma una URL final corrupta.
+
+### Local (Docker Compose)
+
+Automático — `docker-compose.yml` ya incluye `otel-collector`, `prometheus`, `loki` y `grafana`, con Prometheus/Loki pre-conectados como datasources y un dashboard (`grafana/provisioning/dashboards/auth-2fa-api.json`) pre-cargado. Ver [Ejecutar con Docker Compose](#ejecutar-con-docker-compose).
+
+### Producción (Dokploy)
+
+Cada pieza (otel-collector, Prometheus, Loki, Grafana) se despliega como su propio proyecto Compose — no comparten red entre sí en Dokploy, así que se conectan por dominio/URL pública, no por nombre de servicio:
+
+- `docker-compose.otel-collector.yml` y `docker-compose.loki.yml`: versiones standalone con la config embebida (`configs:` con `content:` inline) para pegar directo en Dokploy sin depender de un repo.
+- El dashboard de Grafana (`grafana/provisioning/dashboards/auth-2fa-api.json`) se importa manualmente ahí (Dashboards → New → Import) — Dokploy no provisiona archivos de dashboard automáticamente como sí hace con los datasources.
+- Los datasources de Grafana necesitan un `uid` fijo (`prometheus-ds`, `loki-ds`) para que el dashboard los encuentre sin preguntar nada al importar — ver los comentarios en `grafana/provisioning/datasources/*.yaml`.
 
 ## Notas para producción (pendiente, no implementado aún)
 

@@ -102,7 +102,8 @@ services:
       # keys/ is bind-mounted below (it's gitignored, generated locally
       # per the README) rather than baked into the image. Alternative for
       # a filesystem-less setup: set JWT_PRIVATE_KEY_PEM_BASE64 instead —
-      # same variable this project uses on Render.
+      # same variable this project's own config.go supports for exactly
+      # that case.
       JWT_PRIVATE_KEY_PATH: /app/keys/private.pem
       JWT_KEY_ID: auth-2fa-api-1
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}

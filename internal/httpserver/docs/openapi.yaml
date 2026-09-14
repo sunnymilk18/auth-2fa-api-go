@@ -28,6 +28,8 @@ info:
 servers:
   - url: http://localhost:8080
     description: Desarrollo local
+  - url: https://tu-dominio-de-produccion.example.com
+    description: Producción — reemplazar por la URL real del despliegue
 
 tags:
   - name: auth
