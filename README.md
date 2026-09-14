@@ -312,9 +312,9 @@ Automático — `docker-compose.yml` ya incluye `otel-collector`, `prometheus`, 
 
 ### Producción (Dokploy)
 
-Cada pieza (otel-collector, Prometheus, Loki, Grafana) se despliega como su propio proyecto Compose — no comparten red entre sí en Dokploy, así que se conectan por dominio/URL pública, no por nombre de servicio:
+Todo corre en un mismo proyecto Compose en Dokploy — `api`, `postgres`, `redis`, `otel-collector`, `prometheus`, `loki` y `grafana` comparten la misma red interna y se resuelven por nombre de servicio, igual que en local (ver [Ejecutar con Docker Compose](#ejecutar-con-docker-compose)).
 
-- `docker-compose.otel-collector.yml` y `docker-compose.loki.yml`: versiones standalone con la config embebida (`configs:` con `content:` inline) para pegar directo en Dokploy sin depender de un repo.
+- `docker-compose.otel-collector.yml` y `docker-compose.loki.yml`: versiones standalone alternativas, con la config embebida (`configs:` con `content:` inline), por si en algún momento se despliega alguna de esas dos piezas como proyecto Compose separado (pegando el contenido directo en Dokploy, sin depender de un repo) — en ese caso sí hay que conectarlas por dominio/URL pública en vez de por nombre de servicio, porque proyectos distintos de Dokploy no comparten red entre sí.
 - El dashboard de Grafana (`grafana/provisioning/dashboards/auth-2fa-api.json`) se importa manualmente ahí (Dashboards → New → Import) — Dokploy no provisiona archivos de dashboard automáticamente como sí hace con los datasources.
 - Los datasources de Grafana necesitan un `uid` fijo (`prometheus-ds`, `loki-ds`) para que el dashboard los encuentre sin preguntar nada al importar — ver los comentarios en `grafana/provisioning/datasources/*.yaml`.
 
