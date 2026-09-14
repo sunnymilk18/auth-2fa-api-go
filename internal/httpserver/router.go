@@ -33,6 +33,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(15 * time.Second))
 	r.Use(middleware.Metrics(meter))
+	r.Use(middleware.CORS())
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health
