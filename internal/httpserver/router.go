@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
@@ -27,6 +28,18 @@ import (
 // with no auth") — see middleware.RequireAdminToken.
 func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
+
+	// Any origin, no credentials: this is a header/token API (X-API-Key,
+	// Bearer), never cookies — so there's no session to leak by allowing
+	// "*", and each consuming system's own frontend can live at whatever
+	// domain it wants without us maintaining an allowlist per tenant.
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "X-Admin-Token"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
 
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)

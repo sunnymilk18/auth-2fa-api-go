@@ -92,6 +92,31 @@ func doRequest(r http.Handler, method, path, apiKey, bearer string, body any) *h
 	return rec
 }
 
+// A browser preflights any cross-origin request that isn't a "simple"
+// GET/POST with plain headers — every real consuming system's frontend
+// sending X-API-Key hits this. Without CORS wired up, the browser never
+// even sends the real request, it just fails the preflight silently.
+func TestRouter_CORSPreflightAllowsCrossOriginAPIKeyRequests(t *testing.T) {
+	r, _, _ := newTestRouter(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/auth/register", nil)
+	req.Header.Set("Origin", "https://example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "X-API-Key,Content-Type")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK && rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want 200/204", rec.Code)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, "*")
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("Access-Control-Allow-Methods missing from preflight response")
+	}
+}
+
 func TestRouter_PublicRoutesNeedNoAuth(t *testing.T) {
 	r, _, _ := newTestRouter(t)
 
