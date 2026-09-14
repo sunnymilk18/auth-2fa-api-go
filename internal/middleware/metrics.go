@@ -29,6 +29,19 @@ func Metrics(meter metric.Meter) func(http.Handler) http.Handler {
 		"http.server.request_duration_seconds",
 		metric.WithDescription("HTTP request duration"),
 		metric.WithUnit("s"),
+		// Without this, the OTel SDK's default bucket boundaries
+		// (0, 5, 10, 25 ... 10000, tuned for millisecond-scale durations)
+		// leave nothing between 0 and 5 — and our values are in *seconds*
+		// (a sub-millisecond health check is ~0.0004), so virtually every
+		// request lands in that one 0-5 bucket. histogram_quantile then
+		// has to linearly interpolate p95/p99 across that whole 5-second
+		// span with no finer-grained buckets to anchor on, producing
+		// nonsense like "p95 = 4.75s" for requests that actually took
+		// under a millisecond. These are the standard Prometheus client
+		// library buckets for second-scale durations instead.
+		metric.WithExplicitBucketBoundaries(
+			.005, .01, .025, .05, .075, .1, .25, .5, .75, 1, 2.5, 5, 7.5, 10,
+		),
 	)
 
 	return func(next http.Handler) http.Handler {
