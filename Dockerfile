@@ -38,7 +38,8 @@ COPY --from=builder /out/api /out/migrate /out/createclient ./
 COPY migrations ./migrations
 
 # Not copied: keys/ (gitignored, holds the RSA keypair — mount it as a
-# volume, or set JWT_PRIVATE_KEY_PEM_BASE64 instead, same as Render).
+# volume, or set JWT_PRIVATE_KEY_PEM_BASE64 instead for a platform with no
+# persistent/writable filesystem to mount it on.
 
 USER appuser
 EXPOSE 8080

@@ -27,8 +27,8 @@ func LoadPrivateKey(path string) (*rsa.PrivateKey, error) {
 
 // ParsePrivateKeyPEM parses PEM-encoded RSA private key bytes (PKCS#1 or
 // PKCS#8) directly — the same format LoadPrivateKey reads from disk, usable
-// when the key instead comes from an env var (e.g. a platform like Render
-// with no persistent/writable filesystem to put a keys/private.pem on).
+// when the key instead comes from an env var (e.g. a platform with no
+// persistent/writable filesystem to put a keys/private.pem on).
 func ParsePrivateKeyPEM(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {

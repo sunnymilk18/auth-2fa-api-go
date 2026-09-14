@@ -20,7 +20,7 @@
     {
       "id": 1,
       "type": "stat",
-      "title": "Requests (5m)",
+      "title": "Requests",
       "gridPos": {
         "x": 0,
         "y": 0,
@@ -33,7 +33,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(http_server_request_count_total[5m]))",
+          "expr": "sum(increase(http_server_request_count_total[$__range]))",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -91,7 +91,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_request_count_total[5m]))",
+          "expr": "sum(rate(http_server_request_count_total[$__range]))",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -136,7 +136,7 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "Error rate (5xx, 5m)",
+      "title": "Error rate (5xx)",
       "gridPos": {
         "x": 12,
         "y": 0,
@@ -149,7 +149,7 @@
       },
       "targets": [
         {
-          "expr": "100 * sum(rate(http_server_request_count_total{http_status_code=~\"5..\"}[5m])) / sum(rate(http_server_request_count_total[5m]))",
+          "expr": "100 * sum(rate(http_server_request_count_total{http_status_code=~\"5..\"}[$__range])) / sum(rate(http_server_request_count_total[$__range]))",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -217,7 +217,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[$__range])) by (le))",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -283,7 +283,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(http_server_request_count_total[5m])) by (http_route)",
+          "expr": "sum(rate(http_server_request_count_total[$__rate_interval])) by (http_route)",
           "legendFormat": "{{http_route}}",
           "refId": "A",
           "datasource": {
@@ -336,7 +336,7 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(http_server_request_duration_seconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p50",
           "refId": "A",
           "datasource": {
@@ -345,7 +345,7 @@
           }
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_server_request_duration_seconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p95",
           "refId": "B",
           "datasource": {
@@ -354,7 +354,7 @@
           }
         },
         {
-          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(http_server_request_duration_seconds_bucket[$__rate_interval])) by (le))",
           "legendFormat": "p99",
           "refId": "C",
           "datasource": {
@@ -390,7 +390,7 @@
     {
       "id": 7,
       "type": "piechart",
-      "title": "Status code distribution (1h)",
+      "title": "Status code distribution",
       "gridPos": {
         "x": 0,
         "y": 12,
@@ -403,7 +403,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (http_status_code) (increase(http_server_request_count_total[1h]))",
+          "expr": "sum by (http_status_code) (increase(http_server_request_count_total[$__range]))",
           "legendFormat": "{{http_status_code}}",
           "refId": "A",
           "datasource": {
@@ -441,8 +441,8 @@
     },
     {
       "id": 8,
-      "type": "bargauge",
-      "title": "Top routes (1h)",
+      "type": "table",
+      "title": "Routes — method, requests, p95, p99",
       "gridPos": {
         "x": 8,
         "y": 12,
@@ -455,35 +455,130 @@
       },
       "targets": [
         {
-          "expr": "topk(10, sum by (http_route) (increase(http_server_request_count_total[1h])))",
-          "legendFormat": "{{http_route}}",
+          "expr": "sum by (http_method, http_route) (increase(http_server_request_count_total[$__range]))",
+          "format": "table",
+          "instant": true,
           "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-ds"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (http_method, http_route, le) (rate(http_server_request_duration_seconds_bucket[$__range])))",
+          "format": "table",
+          "instant": true,
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus-ds"
+          }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (http_method, http_route, le) (rate(http_server_request_duration_seconds_bucket[$__range])))",
+          "format": "table",
+          "instant": true,
+          "refId": "C",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus-ds"
           }
         }
       ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "http_method": "Method",
+              "http_route": "Route",
+              "Value #A": "Requests",
+              "Value #B": "p95",
+              "Value #C": "p99"
+            }
+          }
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": {
-            "mode": "continuous-BlPu"
-          },
-          "min": 0
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Requests"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p99"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
+              }
+            ]
+          }
+        ]
       },
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "values": false
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
         },
-        "orientation": "horizontal",
-        "displayMode": "gradient",
-        "showUnfilled": true
+        "sortBy": [
+          {
+            "displayName": "Requests",
+            "desc": true
+          }
+        ]
       }
     },
     {
