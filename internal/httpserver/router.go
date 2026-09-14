@@ -3,6 +3,7 @@ package httpserver
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -20,16 +21,16 @@ import (
 
 // NewRouter wires all routes: public auth endpoints, API docs, and a sample
 // protected endpoint that any consuming system can imitate to guard its own
-// routes. meter is a no-op if telemetry.Setup was never called (or ran
-// with no OTLP endpoint configured) — callers never need to check.
+// routes. meter is a no-op if telemetry.SetupMetrics was never called (or
+// ran with no OTLP endpoint configured) — callers never need to check.
 // adminToken == "" leaves /admin/* unregistered entirely (404, not "open
 // with no auth") — see middleware.RequireAdminToken.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(chimw.RequestID)
 	r.Use(chimw.RealIP)
-	r.Use(chimw.Logger)
+	r.Use(middleware.RequestLogger(logger))
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(15 * time.Second))
 	r.Use(middleware.Metrics(meter))

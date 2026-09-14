@@ -41,7 +41,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour,
 	))
 
-	return httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken)
+	return httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {

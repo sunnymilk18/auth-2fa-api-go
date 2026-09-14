@@ -8,6 +8,8 @@ package httpserver_test
 import (
 	"bytes"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -24,6 +26,12 @@ import (
 	"auth-2fa-api/internal/testutil"
 	"auth-2fa-api/internal/user"
 )
+
+// testLogger discards output — these tests assert on HTTP behavior, not
+// on what gets logged; a real logger would just be test noise.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // newTestRouter wires a full router exactly like cmd/api does, against a
 // real (local) Postgres and an in-memory Redis. Returns the router, a
@@ -49,7 +57,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
 	handlers := auth.NewHandlers(svc)
 
-	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "")
+	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery")
@@ -148,7 +156,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour,
 	))
-	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "")
+	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", testLogger())
 }
 
 func TestRouter_JWKSShape(t *testing.T) {
