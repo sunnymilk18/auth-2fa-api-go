@@ -1,0 +1,69 @@
+# Standalone compose — solo Loki, para pegar tal cual en Dokploy como su
+# propio proyecto Compose. Mismo truco que otel-collector/prometheus: el
+# config va embebido en `configs:` con `content:` inline, nada de archivos
+# externos.
+#
+# Expone:
+#   3100 -> API HTTP de Loki. El otel-collector le empuja logs acá
+#           (endpoint OTLP nativo: /otlp/v1/logs), y Grafana lo consulta
+#           como datasource. No tiene UI propia — todo se ve a través de
+#           Grafana.
+#
+# En producción, si Loki termina en el MISMO proyecto de Dokploy que el
+# otel-collector y Grafana, usá el nombre de servicio "loki" directo en
+# vez de un dominio, y sacá el `ports:` de abajo.
+
+services:
+  loki:
+    image: grafana/loki:3.1.1
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    configs:
+      - source: loki_config
+        target: /etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+volumes:
+  loki-data: {}
+
+configs:
+  loki_config:
+    content: |
+      auth_enabled: false
+
+      server:
+        http_listen_port: 3100
+        grpc_listen_port: 9096
+
+      common:
+        path_prefix: /loki
+        storage:
+          filesystem:
+            chunks_directory: /loki/chunks
+            rules_directory: /loki/rules
+        replication_factor: 1
+        ring:
+          instance_addr: 127.0.0.1
+          kvstore:
+            store: inmemory
+
+      schema_config:
+        configs:
+          - from: 2024-01-01
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index:
+              prefix: index_
+              period: 24h
+
+      limits_config:
+        retention_period: 336h
+
+      compactor:
+        working_directory: /loki/compactor
+        retention_enabled: true
+        delete_request_store: filesystem
