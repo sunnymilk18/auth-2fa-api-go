@@ -23,8 +23,8 @@ info:
     **Multi-tenant**: cada sistema consumidor (app móvil, web, etc.) tiene su
     propia API key, obtenida con `cmd/createclient`, y debe enviarla en el
     header `X-API-Key` en cada llamada a `/auth/*`. Los usuarios quedan
-    aislados por sistema — el mismo email puede existir como cuentas
-    distintas bajo dos API keys diferentes.
+    aislados por sistema — el mismo email, username o rut puede existir como
+    cuentas distintas bajo dos API keys diferentes.
   version: "1.0.0"
 
 servers:
