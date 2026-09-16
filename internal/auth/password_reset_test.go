@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"strings"
 	"testing"
 
 	"auth-2fa-api/internal/auth"
@@ -64,6 +65,31 @@ func TestPasswordReset_InvalidNewPassword_DoesNotConsumeCode(t *testing.T) {
 	// The SAME code still works — it was never consumed by the failed attempt.
 	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "new-password-456"); err != nil {
 		t.Fatalf("ResetPassword with the same code and a valid password: unexpected error %v", err)
+	}
+}
+
+// Requesting a reset with one casing of the email and confirming with a
+// different one must still find the pending code — both sides key off the
+// normalized email, not whatever casing was typed each time.
+func TestPasswordReset_WorksAcrossDifferentEmailCasing(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	lower := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, lower, "old-password-123")
+
+	mixedCase := strings.ToUpper(lower[:1]) + lower[1:]
+	if err := svc.RequestPasswordReset(t.Context(), apiClientID, mixedCase); err != nil {
+		t.Fatalf("RequestPasswordReset(%q): %v", mixedCase, err)
+	}
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("no password reset email was sent")
+	}
+	code := testutil.ExtractResetCode(sent.Body)
+
+	// Confirm with the original lowercase form — different casing than the
+	// request used.
+	if err := svc.ResetPassword(t.Context(), apiClientID, lower, code, "new-password-456"); err != nil {
+		t.Fatalf("ResetPassword with different casing than the request: unexpected error %v", err)
 	}
 }
 

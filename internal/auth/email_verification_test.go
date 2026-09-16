@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"strings"
 	"testing"
 
 	"auth-2fa-api/internal/auth"
@@ -39,6 +40,26 @@ func TestEmailVerification_BlocksLoginUntilConfirmed(t *testing.T) {
 	// Now it works.
 	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
 		t.Fatalf("LoginStep1 after verifying: unexpected error %v", err)
+	}
+}
+
+// Confirming with a differently-cased email than the one Register stored
+// (Register normalizes to lowercase internally) must still find the
+// pending session — the confirm request has to key off the same
+// normalized email the code was actually stored under.
+func TestEmailVerification_ConfirmWorksWithDifferentCasing(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	lower := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+
+	if _, err := svc.Register(t.Context(), apiClientID, lower, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractVerificationCode(sent.Body)
+
+	mixedCase := strings.ToUpper(lower[:1]) + lower[1:]
+	if err := svc.ConfirmEmailVerification(t.Context(), apiClientID, mixedCase, code); err != nil {
+		t.Fatalf("ConfirmEmailVerification with different casing than Register: unexpected error %v", err)
 	}
 }
 

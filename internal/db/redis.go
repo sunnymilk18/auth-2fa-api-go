@@ -9,11 +9,11 @@ import (
 )
 
 // NewRedis opens a client from a connection URL and verifies connectivity,
-// retrying with backoff for up to 30s — a cold-started free-tier instance
-// (Upstash and similar suspend after being idle) can take a few seconds to
-// answer the very first connection after a while.
+// retrying with backoff for up to 30s — smooths over Redis still starting
+// up (a fresh docker-compose up, a container restart) instead of failing
+// the whole service on one unlucky first ping.
 // Supports both redis:// (plain) and rediss:// (TLS) schemes — the latter
-// is what hosted providers like Upstash require.
+// for any hosted provider that requires TLS, if one is ever used again.
 func NewRedis(ctx context.Context, redisURL string) (*redis.Client, error) {
 	opts, err := redis.ParseURL(redisURL)
 	if err != nil {

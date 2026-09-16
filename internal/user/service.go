@@ -78,7 +78,7 @@ func (e *UsernameTakenError) Is(target error) bool { return target == ErrUsernam
 // ErrRUTTaken, and username conflicts return a *UsernameTakenError carrying
 // a ready-to-suggest alternative (see suggestUsername).
 func (s *Service) Register(ctx context.Context, apiClientID, email, password, username, rut string) (*User, error) {
-	email = normalizeEmail(email)
+	email = NormalizeEmail(email)
 	username = NormalizeUsername(username)
 	rut = NormalizeRUT(rut)
 
@@ -195,7 +195,7 @@ func (s *Service) FindByIdentifier(ctx context.Context, apiClientID, identifier 
 // top of that, not the only thing preventing it.
 func (s *Service) findByIdentifier(ctx context.Context, apiClientID, identifier string) (*User, error) {
 	return s.repo.FindByIdentifier(ctx, apiClientID,
-		normalizeEmail(identifier), NormalizeUsername(identifier), NormalizeRUT(identifier),
+		NormalizeEmail(identifier), NormalizeUsername(identifier), NormalizeRUT(identifier),
 	)
 }
 
@@ -207,7 +207,7 @@ func (s *Service) FindByID(ctx context.Context, id string) (*User, error) {
 // the password reset flow, which needs the account without also verifying
 // a password.
 func (s *Service) FindByEmail(ctx context.Context, apiClientID, email string) (*User, error) {
-	return s.repo.FindByEmail(ctx, apiClientID, normalizeEmail(email))
+	return s.repo.FindByEmail(ctx, apiClientID, NormalizeEmail(email))
 }
 
 // UpdatePassword bcrypt-hashes newPassword and replaces userID's stored
@@ -235,6 +235,11 @@ func (s *Service) MarkEmailVerified(ctx context.Context, userID string) error {
 	return s.repo.MarkEmailVerified(ctx, userID)
 }
 
-func normalizeEmail(email string) string {
+// NormalizeEmail trims and lowercases — the only form ever stored or
+// looked up, same reasoning as NormalizeUsername/NormalizeRUT. Exported so
+// auth.Service can apply the same rule where it builds Redis keys directly
+// from a raw email input instead of an already-normalized *User (see
+// ResetPassword/ConfirmEmailVerification).
+func NormalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
 }

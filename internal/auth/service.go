@@ -110,7 +110,16 @@ func (s *Service) sendVerificationEmail(ctx context.Context, u *user.User) error
 
 // ConfirmEmailVerification consumes a verification code and marks the
 // account as verified, unblocking LoginStep1.
+//
+// email is normalized here before it's used to build the Redis lookup key
+// — StartVerification (called from Register/ResendEmailVerification) keys
+// it off u.Email, which is already normalized, so a caller typing a
+// differently-cased email here (very plausible: two separate form
+// submissions, an autocapitalizing keyboard) would otherwise never find
+// the pending session at all, "no hay una verificación pendiente" despite
+// having the exact right code.
 func (s *Service) ConfirmEmailVerification(ctx context.Context, apiClientID, email, code string) error {
+	email = user.NormalizeEmail(email)
 	userID, err := s.emailVerification.ConsumeCode(ctx, apiClientID, email, code)
 	if err != nil {
 		return err
@@ -284,7 +293,11 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 		return err
 	}
 
-	code, err := s.passwordReset.StartReset(ctx, u.ID, u.APIClientID, email)
+	// u.Email, not the raw email param — same reason as
+	// ConfirmEmailVerification's own fix: this key has to be found again
+	// later by ResetPassword using whatever casing the person retypes, and
+	// the only casing guaranteed to match every time is the normalized one.
+	code, err := s.passwordReset.StartReset(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
 		return err
 	}
@@ -317,6 +330,11 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 		return user.ErrInvalidPassword
 	}
 
+	// Same normalization RequestPasswordReset now stores the code under
+	// (u.Email) — without this, a person who typed a differently-cased
+	// email here than they did when requesting the code would never find
+	// their own pending reset, even with the exact right code.
+	email = user.NormalizeEmail(email)
 	userID, err := s.passwordReset.ConsumeCode(ctx, apiClientID, email, code)
 	if err != nil {
 		return err
