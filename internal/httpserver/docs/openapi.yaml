@@ -63,11 +63,15 @@ paths:
   /.well-known/jwks.json:
     get:
       tags: [system]
-      summary: Clave pública para verificar access tokens (JWKS)
+      summary: Claves públicas para verificar access tokens (JWKS)
       description: >
         Cualquier sistema puede consultar este endpoint (idealmente cacheando
-        el resultado) para verificar la firma RS256 de un access token sin
-        llamar de vuelta a esta API.
+        el resultado, pero refrescándolo cada tanto — no solo una vez) para
+        verificar la firma RS256 de un access token sin llamar de vuelta a
+        esta API. Normalmente devuelve una sola clave, pero durante una
+        rotación de claves puede devolver dos a la vez — elegí la que
+        corresponda al `kid` del header del JWT que estás verificando, nunca
+        asumas que hay una sola ni tomes la primera del array.
       responses:
         "200":
           description: Conjunto de claves públicas en formato JWKS
@@ -727,6 +731,11 @@ components:
                 example: sig
               kid:
                 type: string
+                description: >
+                  Identifica esta clave puntual — matchealo contra el `kid`
+                  del header del JWT que estás verificando. Normalmente hay
+                  un solo elemento en `keys`, pero durante una rotación de
+                  claves puede haber dos.
               alg:
                 type: string
                 example: RS256

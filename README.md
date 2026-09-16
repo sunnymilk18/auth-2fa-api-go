@@ -295,9 +295,11 @@ Cualquier equipo que vaya a consumir esta API puede usar `/openapi.yaml` para ge
 
 El access token es un JWT RS256. Cualquier sistema (aunque no tenga acceso a esta base de datos ni a estos secretos) puede:
 
-1. Obtener la clave pública desde `GET /.well-known/jwks.json` (cachearla; solo cambia si se rota la clave).
-2. Verificar la firma del JWT con esa clave pública, usando cualquier librería estándar de JWT en su lenguaje (no requiere llamar de vuelta a esta API en cada request).
+1. Obtener el conjunto de claves públicas desde `GET /.well-known/jwks.json` (cachearlo). **Normalmente trae una sola clave, pero durante una rotación (ver [Rotación de claves JWT](#rotación-de-claves-jwt)) puede traer dos a la vez** — no asumas que siempre hay una sola ni tomes "la primera" del array.
+2. Mirar el campo `kid` del header del JWT, y usar la clave del JWKS cuyo `kid` coincida (así es como esta misma API verifica sus propios tokens — ver `internal/auth/jwt.go`). Con esa clave, verificar la firma usando cualquier librería estándar de JWT en su lenguaje (no requiere llamar de vuelta a esta API en cada request).
 3. Confiar en los claims `sub` (id de usuario), `email` y `exp` (expiración) una vez la firma es válida.
+
+Cachear el JWKS está bien, pero no para siempre: si tu caché no vuelve a pedirlo nunca, no te vas a enterar cuando aparezca una clave nueva durante una rotación — refrescalo cada tanto (por hora, por ejemplo), no solo una vez al arrancar.
 
 El refresh token, en cambio, es de uso exclusivo de esta API (HS256) — nunca debe ser verificado ni aceptado por otro sistema.
 
