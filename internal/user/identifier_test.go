@@ -41,6 +41,8 @@ func TestValidateUsername(t *testing.T) {
 		"",                                  // empty
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 33 chars, over the max
 		"micorreo@example.com",              // has "@" — classifyIdentifier would always route this to email lookup
+		"1234.5678",                         // digits + a dot — looksLikeRUT strips the dot and still sees a RUT shape
+		"12.345.678-5",                      // fully RUT-formatted, even though it "has non-digit characters"
 	}
 	for _, u := range invalid {
 		if ValidateUsername(u) {

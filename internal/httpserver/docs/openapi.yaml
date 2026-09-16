@@ -105,9 +105,9 @@ paths:
                 $ref: "#/components/schemas/UserResponse"
         "400":
           description: >
-            Solicitud inválida — email vacío, password muy corto, username
-            ausente/muy corto/muy largo/puramente numérico/con "@", o rut
-            ausente/con dígito verificador inválido.
+            Solicitud inválida — email vacío o con formato inválido, password
+            muy corto, username ausente/muy corto/muy largo/con forma de
+            rut/con "@", o rut ausente/con dígito verificador inválido.
           content:
             application/json:
               schema:
@@ -567,6 +567,9 @@ components:
         email:
           type: string
           format: email
+          description: >
+            Formato validado en el servidor (un solo "@", dominio con
+            punto, sin espacios) — no alcanza con que no esté vacío.
         password:
           type: string
           format: password
@@ -581,8 +584,9 @@ components:
             identificador que sí es único de verdad). Sí es único dentro de
             este sistema (tenant): si ya está tomado, el registro falla con
             409 sugiriendo una alternativa libre (ej. "juan.perez2"). No
-            puede ser puramente numérico ni contener "@" — eso evita que se
-            confunda con un RUT o un email, respectivamente, al loguear
+            puede tener forma de RUT (ni siquiera con puntos/guiones — ej.
+            "1234.5678" también se rechaza) ni contener "@" — eso evita que
+            se confunda con un RUT o un email, respectivamente, al loguear
             (ver `LoginRequest.identifier`).
           example: juan.perez
         rut:

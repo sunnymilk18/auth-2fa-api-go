@@ -171,7 +171,7 @@ func TestRegister_DuplicateUsername_SuggestsAlternative(t *testing.T) {
 func TestRegister_InvalidUsername(t *testing.T) {
 	svc, apiClientID := newTestUserService(t)
 
-	cases := []string{"short", "12345678", "123456785"} // too short, purely numeric (8 and 9 digits)
+	cases := []string{"short", "12345678", "123456785", "1234.5678", "12.345.678-5"} // too short, purely numeric, and digits+separators that still look like a rut
 	for _, username := range cases {
 		if _, err := svc.Register(t.Context(), apiClientID, "a-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", username, testutil.UniqueRUT(t)); !errors.Is(err, user.ErrInvalidUsername) {
 			t.Errorf("Register(username=%q): err = %v, want %v", username, err, user.ErrInvalidUsername)
@@ -184,6 +184,45 @@ func TestRegister_InvalidRUT(t *testing.T) {
 
 	if _, err := svc.Register(t.Context(), apiClientID, "a-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), "11111111-2" /* wrong check digit, should be 1 */); !errors.Is(err, user.ErrInvalidRUT) {
 		t.Fatalf("err = %v, want %v", err, user.ErrInvalidRUT)
+	}
+}
+
+func TestRegister_InvalidEmail(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+
+	cases := []string{"no-at-sign.example.com", "@example.com", "user@", "user@nodot", "has space@example.com"}
+	for _, email := range cases {
+		if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); !errors.Is(err, user.ErrInvalidEmail) {
+			t.Errorf("Register(email=%q): err = %v, want %v", email, err, user.ErrInvalidEmail)
+		}
+	}
+}
+
+// A suggested alternative must itself be something the caller could
+// actually register with — never longer than the max username length.
+func TestRegister_DuplicateUsername_SuggestionStaysWithinLengthLimit(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	// 32 chars exactly (the max) so any numeric suffix would overflow it
+	// unless suggestUsername truncates the base to make room.
+	username := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if len(username) != 32 {
+		t.Fatalf("test setup: username length = %d, want 32", len(username))
+	}
+
+	if _, err := svc.Register(t.Context(), apiClientID, "a-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", username, testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+
+	_, err := svc.Register(t.Context(), apiClientID, "b-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", username, testutil.UniqueRUT(t))
+	var taken *user.UsernameTakenError
+	if !errors.As(err, &taken) {
+		t.Fatalf("second Register with the same username: err = %v, want a *user.UsernameTakenError", err)
+	}
+	if len(taken.Suggested) > 32 {
+		t.Fatalf("suggested username %q is %d chars, want <= 32", taken.Suggested, len(taken.Suggested))
+	}
+	if !user.ValidateUsername(taken.Suggested) {
+		t.Fatalf("suggested username %q would itself fail ValidateUsername", taken.Suggested)
 	}
 }
 

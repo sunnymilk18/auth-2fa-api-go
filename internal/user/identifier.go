@@ -69,25 +69,25 @@ func NormalizeUsername(username string) string {
 
 // ValidateUsername enforces 8-32 characters (checked after
 // NormalizeUsername, so surrounding whitespace doesn't count either way),
-// at least one non-digit character, and no "@". Neither rule is arbitrary —
-// both keep classifyIdentifier's shape detection unambiguous, since it
-// checks "@" first and RUT-shape second: a purely numeric 7-9 digit
-// username would be indistinguishable from a RUT (see looksLikeRUT's doc
-// comment), and a username containing "@" would always be misrouted to an
-// email lookup instead, no matter what it actually is — either way, that
-// username becomes silently unreachable at login for the person who chose
-// it, which is exactly what this function exists to rule out up front.
+// no "@", and — critically — nothing classifyIdentifier's own RUT-shape
+// check (looksLikeRUT) would accept. That's deliberately delegated to
+// looksLikeRUT itself rather than reimplemented here (an earlier version
+// of this function only rejected *purely numeric* usernames, which missed
+// digits-plus-separators like "1234.5678": no letters, so it passed this
+// check, but looksLikeRUT still strips the dot and sees a bare 8-digit
+// RUT shape underneath — exactly the ambiguity this function exists to
+// rule out). Calling looksLikeRUT directly means the two can't drift apart
+// again: whatever classifyIdentifier would call a RUT, this rejects as a
+// username, by construction. Same reasoning for "@" and email.
 func ValidateUsername(username string) bool {
-	if len(username) < 8 || len(username) > 32 {
+	if len(username) < 8 || len(username) > maxUsernameLen {
 		return false
 	}
 	if strings.Contains(username, "@") {
 		return false
 	}
-	for _, r := range username {
-		if r < '0' || r > '9' {
-			return true
-		}
+	if looksLikeRUT(username) {
+		return false
 	}
-	return false
+	return true
 }

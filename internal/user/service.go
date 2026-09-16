@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 )
+
+// maxUsernameLen mirrors ValidateUsername's own upper bound — suggestUsername
+// needs it too, to make sure a suggested candidate is never itself too long
+// to register with (see its doc comment).
+const maxUsernameLen = 32
 
 var ErrInvalidCredentials = errors.New("invalid email or password")
 
@@ -19,6 +25,12 @@ var ErrInvalidCredentials = errors.New("invalid email or password")
 // the handler just translates the error to a status code.
 var ErrInvalidUsername = errors.New("invalid username")
 var ErrInvalidRUT = errors.New("invalid rut")
+
+// ErrInvalidEmail: Register previously only checked email for emptiness —
+// a value with no "@" was accepted and stored, then became permanently
+// unreachable as a login identifier (classifyIdentifier only tries an
+// email lookup when "@" is present). See ValidateEmail's doc comment.
+var ErrInvalidEmail = errors.New("invalid email")
 
 type Service struct {
 	repo *Repository
@@ -58,6 +70,9 @@ func (s *Service) Register(ctx context.Context, apiClientID, email, password, us
 	// Checked here, not just at the HTTP boundary — see ErrInvalidUsername's
 	// doc comment. Before hashing the password too: no point paying bcrypt's
 	// cost for a request that's going to fail anyway.
+	if !ValidateEmail(email) {
+		return nil, ErrInvalidEmail
+	}
 	if !ValidateUsername(username) {
 		return nil, ErrInvalidUsername
 	}
@@ -92,7 +107,15 @@ func (s *Service) Register(ctx context.Context, apiClientID, email, password, us
 func (s *Service) suggestUsername(ctx context.Context, apiClientID, base string) (string, error) {
 	const maxAttempts = 1000
 	for n := 2; n <= maxAttempts; n++ {
-		candidate := fmt.Sprintf("%s%d", base, n)
+		suffix := strconv.Itoa(n)
+		// Truncate, never grow past maxUsernameLen — a candidate the
+		// caller couldn't actually register with (because it's too long)
+		// isn't a useful suggestion.
+		trimmedBase := base
+		if maxBaseLen := maxUsernameLen - len(suffix); len(trimmedBase) > maxBaseLen {
+			trimmedBase = trimmedBase[:maxBaseLen]
+		}
+		candidate := trimmedBase + suffix
 		_, err := s.repo.FindByUsername(ctx, apiClientID, candidate)
 		if errors.Is(err, ErrNotFound) {
 			return candidate, nil
