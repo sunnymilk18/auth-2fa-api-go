@@ -79,8 +79,8 @@ var ErrEmailNotVerified = errors.New("email not verified")
 // stranger's real email without their consent, and every login attempt
 // against that account would keep emailing OTP codes to an inbox that
 // person never agreed to receive them in.
-func (s *Service) Register(ctx context.Context, apiClientID, email, password string) (*user.User, error) {
-	u, err := s.users.Register(ctx, apiClientID, email, password)
+func (s *Service) Register(ctx context.Context, apiClientID, email, password, username, rut string) (*user.User, error) {
+	u, err := s.users.Register(ctx, apiClientID, email, password, username, rut)
 	if err != nil {
 		return nil, err
 	}
@@ -134,19 +134,28 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 	return s.sendVerificationEmail(ctx, u)
 }
 
-// LoginStep1 verifies email+password within one api client (tenant) and, on
-// success, generates and emails an OTP code. It returns a login token the
-// client must present in LoginStep2 along with the code — the code itself
-// is never returned here.
+// LoginStep1 verifies identifier+password within one api client (tenant)
+// and, on success, generates and emails an OTP code. identifier accepts an
+// email, a username or a RUT (see user.Service.VerifyPassword) — whichever
+// one was used, it returns a login token the client must present in
+// LoginStep2 along with the code — the code itself is never returned here.
 //
 // Guards against password-guessing spread across many IPs against one
 // account (see LoginAttemptLimiter) — checked before, and recorded after,
 // VerifyPassword itself, so an account that doesn't exist is throttled
 // exactly the same way a real one would be (same as VerifyPassword's own
 // error not distinguishing the two) — this must not become a way to probe
-// which emails are registered.
-func (s *Service) LoginStep1(ctx context.Context, apiClientID, email, password string) (loginToken string, err error) {
-	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, email)
+// which identifiers are registered.
+//
+// The lockout counter is keyed by the exact identifier string used, same
+// as it always was for email alone — not by the resolved account. That
+// means someone locked out via email isn't also locked out via username or
+// rut for the same account (three separate counters instead of one shared
+// one). Worth tightening later (key by resolved user id once found, falling
+// back to the raw identifier only when nothing matches) but out of scope
+// for this change.
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, err error) {
+	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, identifier)
 	if err != nil {
 		return "", err
 	}
@@ -154,18 +163,18 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, email, password s
 		return "", ErrTooManyFailedLogins
 	}
 
-	u, err := s.users.VerifyPassword(ctx, apiClientID, email, password)
+	u, err := s.users.VerifyPassword(ctx, apiClientID, identifier, password)
 	if err != nil {
 		if errors.Is(err, user.ErrInvalidCredentials) {
 			// Best-effort: a Redis hiccup here shouldn't turn a legitimate
 			// wrong-password response into a 500.
-			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, email)
+			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, identifier)
 		}
 		return "", err
 	}
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
-	_ = s.loginAttempts.Reset(ctx, apiClientID, email)
+	_ = s.loginAttempts.Reset(ctx, apiClientID, identifier)
 
 	// Checked only after a correct password, never before: doing it earlier
 	// would let an unauthenticated caller learn whether an email is

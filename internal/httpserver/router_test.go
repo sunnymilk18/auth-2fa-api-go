@@ -60,7 +60,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery")
+	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
 	if err != nil {
 		t.Fatalf("seeding test user: %v", err)
 	}
@@ -294,12 +294,33 @@ func TestRouter_Me_NeedsBearerButNotAPIKey(t *testing.T) {
 	}
 }
 
+// /me must surface username and rut too, not just id/email — they're core
+// identity fields now, not an afterthought bolted onto email alone.
+func TestRouter_Me_IncludesUsernameAndRUT(t *testing.T) {
+	r, _, accessToken := newTestRouter(t)
+
+	rec := doRequest(r, http.MethodGet, "/me", "", accessToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /me: status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	for _, field := range []string{"id", "email", "username", "rut"} {
+		if resp[field] == "" {
+			t.Errorf("GET /me response missing non-empty %q: %v", field, resp)
+		}
+	}
+}
+
 func TestRouter_Register_WithAPIKey_Succeeds(t *testing.T) {
 	r, apiKey, _ := newTestRouter(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 
 	rec := doRequest(r, http.MethodPost, "/auth/register", apiKey, "", map[string]string{
 		"email": email, "password": "correcthorsebattery",
+		"username": "user-" + testutil.UniqueSuffix(t), "rut": testutil.UniqueRUT(t),
 	})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusCreated, rec.Body.String())

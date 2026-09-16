@@ -146,8 +146,10 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]string{
-				"id":    u.ID,
-				"email": u.Email,
+				"id":       u.ID,
+				"email":    u.Email,
+				"username": u.Username,
+				"rut":      u.RUT,
 			})
 		})
 	})

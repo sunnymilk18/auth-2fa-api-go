@@ -11,7 +11,8 @@ API independiente en Go para autenticación con doble factor por correo (email +
   - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
 - **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login`, `/auth/password-reset/*` y `/auth/verify-email/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
-- **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas bajo dos API keys diferentes.
+- **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas bajo dos API keys diferentes.
+- **Identidad del usuario**: además de email + password, cada cuenta tiene `username` (8-32 caracteres, no único entre personas, no puede ser puramente numérico ni contener "@") y `rut` (documento chileno, único por sistema, validado con dígito verificador). El login acepta cualquiera de los tres — email, username o rut — en un único campo `identifier`, detectado automáticamente por su forma.
 - **CORS**: habilitado para cualquier origen (`*`), sin credenciales — la API se autentica por headers (`X-API-Key`, `Authorization`), no por cookies de sesión, así que no hay nada que filtrar abriendo el origen a todos. Cada sistema consumidor puede llamar desde su propio frontend sin que haga falta mantener una lista de dominios permitidos.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
 - **Observabilidad**: métricas (Prometheus) y logs estructurados (Loki) vía OpenTelemetry — ver [Observabilidad](#observabilidad) más abajo.
@@ -21,12 +22,14 @@ API independiente en Go para autenticación con doble factor por correo (email +
 
 Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#multi-tenant-api-keys) más abajo).
 
-1. `POST /auth/register` — crea el usuario (email + password, hasheado con bcrypt), dentro del sistema identificado por la API key, y envía un código de verificación por correo (ver [Verificación de correo](#verificación-de-correo) más abajo). La cuenta existe desde ya, pero no puede loguear hasta confirmarlo.
-2. `POST /auth/login` — valida email/password. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué. Si todo está en orden, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
+1. `POST /auth/register` — crea el usuario (email + password hasheado con bcrypt + username + rut), dentro del sistema identificado por la API key, y envía un código de verificación por correo (ver [Verificación de correo](#verificación-de-correo) más abajo). La cuenta existe desde ya, pero no puede loguear hasta confirmarlo.
+   - `username`: 8-32 caracteres, no puede ser puramente numérico ni contener "@" (ver por qué en el paso 2), y no tiene que ser único entre personas — si ya está tomado, el registro falla con `409` sugiriendo una alternativa libre (ej. `"el usuario 'juan.perez' ya está en uso, probá con 'juan.perez2'"`).
+   - `rut`: documento de identidad chileno, único por sistema, validado con el dígito verificador (módulo 11) — acepta cualquier formato de entrada (`12.345.678-5`, `12345678-5`, `123456785`).
+2. `POST /auth/login` — valida `identifier` + `password`. `identifier` acepta el email, el username **o** el rut de la cuenta — el backend detecta cuál es solo por la forma (nada que el cliente tenga que indicar aparte: un solo campo, sin selector de "con qué querés loguear"). Es justamente por esto que `username` no puede ser puramente numérico ni contener "@": un username de puros dígitos sería indistinguible de un rut, y uno con "@" siempre se enrutaría como email. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué. Si todo está en orden, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
 3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
-6. `GET /me` — ejemplo de endpoint protegido (requiere `Authorization: Bearer <access_token>`).
+6. `GET /me` — ejemplo de endpoint protegido (requiere `Authorization: Bearer <access_token>`); devuelve `id`, `email`, `username` y `rut`.
 
 ### Dispositivo de confianza + PIN (opcional, atajo alrededor de 1-3)
 
@@ -119,7 +122,7 @@ Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se 
 
 ## Multi-tenant (API keys)
 
-Cada sistema que va a consumir esta API (una app móvil, un sitio web, etc.) necesita su propia API key. Los usuarios quedan aislados por sistema — el mismo email puede existir como cuentas distintas en dos sistemas diferentes.
+Cada sistema que va a consumir esta API (una app móvil, un sitio web, etc.) necesita su propia API key. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas en dos sistemas diferentes.
 
 ### Crear el primer cliente
 
@@ -237,10 +240,11 @@ Corre en un VPS propio, gestionado con [Dokploy](https://dokploy.com) (PaaS auto
 ```bash
 API_KEY="<tu api key de cmd/createclient>"
 
-# 1. Registro (envía un código de verificación por correo)
+# 1. Registro (envía un código de verificación por correo). username no
+# puede ser puramente numérico, y rut necesita dígito verificador válido.
 curl -X POST http://localhost:8080/auth/register \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
+  -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123","username":"juan.perez","rut":"12.345.678-5"}'
 
 # 2. Verificar el correo con el código recibido — sin esto, el login del
 # siguiente paso falla con 403 aunque la contraseña sea correcta.
@@ -248,10 +252,11 @@ curl -X POST http://localhost:8080/auth/verify-email/confirm \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","code":"<el del correo>"}'
 
-# 3. Login (dispara el envío del código OTP por email)
+# 3. Login (dispara el envío del código OTP por email) — "identifier" acepta
+# el email, el username o el rut indistintamente, no hace falta indicar cuál es.
 curl -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
-  -d '{"email":"tucorreo@example.com","password":"unaClaveSegura123"}'
+  -d '{"identifier":"tucorreo@example.com","password":"unaClaveSegura123"}'
 # -> devuelve { "login_token": "...", "message": "..." }
 
 # 4. Verificar el código recibido por correo

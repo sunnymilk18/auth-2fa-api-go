@@ -11,7 +11,7 @@ func TestEmailVerification_BlocksLoginUntilConfirmed(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, ok := mailer.Last()
@@ -52,7 +52,7 @@ func TestEmailVerification_UnknownCode(t *testing.T) {
 func TestEmailVerification_WrongCode(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, _ := mailer.Last()
@@ -73,7 +73,7 @@ func TestEmailVerification_WrongCode(t *testing.T) {
 func TestEmailVerification_CodeIsSingleUse(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, _ := mailer.Last()
@@ -90,7 +90,7 @@ func TestEmailVerification_CodeIsSingleUse(t *testing.T) {
 func TestEmailVerification_TooManyWrongCodesInvalidatesSession(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, _ := mailer.Last()
@@ -140,7 +140,7 @@ func TestResendEmailVerification_AlreadyVerified(t *testing.T) {
 func TestResendEmailVerification_NewCodeWorks(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	firstSent, _ := mailer.Last()

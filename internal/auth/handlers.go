@@ -3,6 +3,7 @@ package auth
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -43,6 +44,8 @@ func decodeJSON(r *http.Request, dst interface{}) error {
 type registerRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Username string `json:"username"`
+	RUT      string `json:"rut"`
 }
 
 func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
@@ -55,6 +58,18 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "el correo es obligatorio y la contraseña debe tener al menos 8 caracteres")
 		return
 	}
+	if req.Username == "" {
+		writeError(w, http.StatusBadRequest, "el usuario (username) es obligatorio")
+		return
+	}
+	if req.RUT == "" {
+		writeError(w, http.StatusBadRequest, "el rut es obligatorio")
+		return
+	}
+	// Presence only, above — the actual shape rules (username length/no
+	// puramente-numérico, rut checksum) are user.Service.Register's job, not
+	// this handler's: see ErrInvalidUsername/ErrInvalidRUT's doc comment for
+	// why that validation belongs in the domain, not just at this boundary.
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
@@ -62,21 +77,35 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password)
+	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password, req.Username, req.RUT)
 	if err != nil {
-		if errors.Is(err, user.ErrEmailTaken) {
+		var usernameTaken *user.UsernameTakenError
+		switch {
+		case errors.Is(err, user.ErrEmailTaken):
 			writeError(w, http.StatusConflict, "el correo ya está registrado")
-			return
+		case errors.Is(err, user.ErrRUTTaken):
+			writeError(w, http.StatusConflict, "el rut ya está registrado")
+		case errors.As(err, &usernameTaken):
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"el usuario %q ya está en uso, probá con %q", usernameTaken.Requested, usernameTaken.Suggested,
+			))
+		case errors.Is(err, user.ErrInvalidUsername):
+			writeError(w, http.StatusBadRequest, "el usuario debe tener entre 8 y 32 caracteres y no puede ser solo números")
+		case errors.Is(err, user.ErrInvalidRUT):
+			writeError(w, http.StatusBadRequest, "el rut no es válido")
+		default:
+			log.Printf("register error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo registrar el usuario")
 		}
-		log.Printf("register error: %v", err)
-		writeError(w, http.StatusInternalServerError, "no se pudo registrar el usuario")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{
-		"id":      u.ID,
-		"email":   u.Email,
-		"message": "revisa tu correo para confirmar tu cuenta antes de iniciar sesión",
+		"id":       u.ID,
+		"email":    u.Email,
+		"username": u.Username,
+		"rut":      u.RUT,
+		"message":  "revisa tu correo para confirmar tu cuenta antes de iniciar sesión",
 	})
 }
 
@@ -166,8 +195,11 @@ func (h *Handlers) ResendEmailVerification(w http.ResponseWriter, r *http.Reques
 // --- Login step 1: password -> OTP sent by email ---
 
 type loginRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	// Accepts an email, a username or a rut — see
+	// user.Service.VerifyPassword / classifyIdentifier for how it's told
+	// apart.
+	Identifier string `json:"identifier"`
+	Password   string `json:"password"`
 }
 
 type loginResponse struct {
@@ -188,11 +220,11 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Email, req.Password)
+	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
-			writeError(w, http.StatusUnauthorized, "correo o contraseña incorrectos")
+			writeError(w, http.StatusUnauthorized, "correo, usuario, rut o contraseña incorrectos")
 		case errors.Is(err, ErrEmailNotVerified):
 			writeError(w, http.StatusForbidden, "confirma tu correo antes de iniciar sesión")
 		case errors.Is(err, ErrTooManyFailedLogins):

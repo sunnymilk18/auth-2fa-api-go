@@ -3,9 +3,11 @@ info:
   title: auth-2fa-api
   description: |
     API independiente de autenticación con doble factor por correo (2FA).
-    Flujo: registro → verificación de correo (obligatoria, o /auth/login
-    responde 403) → login (password) → código OTP enviado por email →
-    verificación del código → tokens JWT (access + refresh).
+    Flujo: registro (email + password + username + rut) → verificación de
+    correo (obligatoria, o /auth/login responde 403) → login (identifier +
+    password, donde identifier acepta email, username o rut indistintamente)
+    → código OTP enviado por email → verificación del código → tokens JWT
+    (access + refresh).
 
     Los access tokens se firman con RS256. Cualquier sistema que reciba un
     token de un cliente puede verificarlo por su cuenta usando la clave
@@ -102,13 +104,22 @@ paths:
               schema:
                 $ref: "#/components/schemas/UserResponse"
         "400":
-          description: Solicitud inválida (email vacío o password muy corto)
+          description: >
+            Solicitud inválida — email vacío, password muy corto, username
+            ausente/muy corto/muy largo/puramente numérico/con "@", o rut
+            ausente/con dígito verificador inválido.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
         "409":
-          description: El email ya está registrado
+          description: >
+            El email, el username o el rut ya están registrados. Si es el
+            username, el mensaje de error incluye una alternativa libre
+            sugerida (ej. "el usuario 'juan.perez' ya está en uso, probá
+            con 'juan.perez2'") — email y rut no se sugieren, porque no
+            tiene sentido inventarle a alguien un email o un documento de
+            identidad distinto al que puso.
           content:
             application/json:
               schema:
@@ -123,7 +134,10 @@ paths:
   /auth/login:
     post:
       tags: [auth]
-      summary: Paso 1 del login - Verifica email/password y envía el código OTP por correo
+      summary: Paso 1 del login - Verifica identifier/password y envía el código OTP por correo
+      description: >
+        `identifier` acepta el email, el username o el rut de la cuenta —
+        ver `LoginRequest.identifier`.
       security:
         - apiKeyAuth: []
       requestBody:
@@ -140,7 +154,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/LoginResponse"
         "401":
-          description: Email o contraseña incorrectos
+          description: Identifier (email, username o rut) o contraseña incorrectos
           content:
             application/json:
               schema:
@@ -548,7 +562,7 @@ components:
   schemas:
     RegisterRequest:
       type: object
-      required: [email, password]
+      required: [email, password, username, rut]
       properties:
         email:
           type: string
@@ -557,14 +571,42 @@ components:
           type: string
           format: password
           minLength: 8
+        username:
+          type: string
+          minLength: 8
+          maxLength: 32
+          description: >
+            No tiene que ser único entre personas distintas — muchas cuentas
+            pueden compartir el mismo nombre elegido (ver `rut` para el
+            identificador que sí es único de verdad). Sí es único dentro de
+            este sistema (tenant): si ya está tomado, el registro falla con
+            409 sugiriendo una alternativa libre (ej. "juan.perez2"). No
+            puede ser puramente numérico ni contener "@" — eso evita que se
+            confunda con un RUT o un email, respectivamente, al loguear
+            (ver `LoginRequest.identifier`).
+          example: juan.perez
+        rut:
+          type: string
+          description: >
+            Documento de identidad chileno — único por sistema (tenant),
+            validado con el dígito verificador módulo 11. Acepta cualquier
+            formato de entrada ("12.345.678-5", "12345678-5", "123456785");
+            se normaliza igual sea cual sea el que se use.
+          example: "12.345.678-5"
 
     LoginRequest:
       type: object
-      required: [email, password]
+      required: [identifier, password]
       properties:
-        email:
+        identifier:
           type: string
-          format: email
+          description: >
+            Acepta el email, el username o el rut de la cuenta — el backend
+            detecta cuál es solo por la forma (contiene "@" → email; tiene
+            forma de RUT → rut; si no → username), sin que haga falta
+            indicarlo. No hay que ofrecer un selector de "con qué querés
+            loguear" en el cliente: un solo campo alcanza para los tres.
+          example: juan.perez
         password:
           type: string
           format: password
@@ -660,6 +702,10 @@ components:
         email:
           type: string
           format: email
+        username:
+          type: string
+        rut:
+          type: string
 
     JWKS:
       type: object

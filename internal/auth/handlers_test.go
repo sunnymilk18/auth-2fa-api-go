@@ -89,7 +89,7 @@ func TestHandler_Register_ShortPassword(t *testing.T) {
 
 func TestHandler_Register_MissingAPIClientContext(t *testing.T) {
 	h, _, _, _, _ := newTestHandlers(t)
-	body := jsonBody(t, map[string]string{"email": "a@example.com", "password": "correcthorsebattery"})
+	body := jsonBody(t, map[string]string{"email": "a@example.com", "password": "correcthorsebattery", "username": "user-" + testutil.UniqueSuffix(t), "rut": testutil.UniqueRUT(t)})
 	req := httptest.NewRequest(http.MethodPost, "/auth/register", body) // no withAPIClient
 	rec := httptest.NewRecorder()
 
@@ -103,7 +103,7 @@ func TestHandler_Register_MissingAPIClientContext(t *testing.T) {
 func TestHandler_Register_Success(t *testing.T) {
 	h, _, _, _, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery", "username": "user-" + testutil.UniqueSuffix(t), "rut": testutil.UniqueRUT(t)})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body), apiClientID)
 	rec := httptest.NewRecorder()
 
@@ -128,12 +128,65 @@ func TestHandler_Register_DuplicateEmail(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery", "username": "user-" + testutil.UniqueSuffix(t), "rut": testutil.UniqueRUT(t)})
 	rec := httptest.NewRecorder()
 	h.Register(rec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body), apiClientID))
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusConflict)
+	}
+}
+
+func TestHandler_Register_DuplicateUsername_SuggestsAlternativeInMessage(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	username := "juan-" + testutil.UniqueSuffix(t)
+	firstEmail := "a-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegisterWithUsername(t, svc, mailer, apiClientID, firstEmail, "correcthorsebattery", username)
+
+	secondEmail := "b-" + testutil.UniqueSuffix(t) + "@example.com"
+	body := jsonBody(t, map[string]string{"email": secondEmail, "password": "correcthorsebattery", "username": username, "rut": testutil.UniqueRUT(t)})
+	rec := httptest.NewRecorder()
+	h.Register(rec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body), apiClientID))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	wantSuggestion := username + "2"
+	if errMsg, _ := resp["error"].(string); !bytes.Contains([]byte(errMsg), []byte(wantSuggestion)) {
+		t.Fatalf("error message %q doesn't mention the suggested username %q", errMsg, wantSuggestion)
+	}
+}
+
+func TestHandler_Register_InvalidRUT(t *testing.T) {
+	h, _, _, _, apiClientID := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{
+		"email": "a-" + testutil.UniqueSuffix(t) + "@example.com", "password": "correcthorsebattery",
+		"username": "user-" + testutil.UniqueSuffix(t), "rut": "11111111-2", // wrong check digit (should be 1)
+	})
+	rec := httptest.NewRecorder()
+	h.Register(rec, withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/register", body), apiClientID))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandler_Login_WithUsernameOrRUT(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	username := "user-" + testutil.UniqueSuffix(t)
+	rut := testutil.UniqueRUT(t)
+	mustRegisterFull(t, svc, mailer, apiClientID, email, "correcthorsebattery", username, rut)
+
+	for _, identifier := range []string{username, rut} {
+		body := jsonBody(t, map[string]string{"identifier": identifier, "password": "correcthorsebattery"})
+		req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
+		rec := httptest.NewRecorder()
+		h.Login(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("Login(identifier=%q): status = %d, want %d, body=%s", identifier, rec.Code, http.StatusOK, rec.Body.String())
+		}
 	}
 }
 
@@ -143,8 +196,10 @@ func TestHandler_Register_DuplicateEmail(t *testing.T) {
 func TestHandler_Register_ReclaimsUnverifiedDuplicate(t *testing.T) {
 	h, _, _, _, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	username := "user-" + testutil.UniqueSuffix(t)
+	rut := testutil.UniqueRUT(t)
 	body := func() *bytes.Buffer {
-		return jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+		return jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery", "username": username, "rut": rut})
 	}
 
 	firstRec := httptest.NewRecorder()
@@ -172,12 +227,12 @@ func TestHandler_Login_BlockedUntilEmailVerified(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	// Register only — not mustRegister, which also confirms the email.
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	_, _ = mailer.Last() // drain the verification email, not asserted on here
 
-	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	body := jsonBody(t, map[string]string{"identifier": email, "password": "correcthorsebattery"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
 	rec := httptest.NewRecorder()
 
@@ -191,7 +246,7 @@ func TestHandler_Login_BlockedUntilEmailVerified(t *testing.T) {
 func TestHandler_ConfirmEmailVerification_FullFlow(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, ok := mailer.Last()
@@ -211,7 +266,7 @@ func TestHandler_ConfirmEmailVerification_FullFlow(t *testing.T) {
 	}
 
 	// Login now succeeds.
-	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})), apiClientID)
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"identifier": email, "password": "correcthorsebattery"})), apiClientID)
 	loginRec := httptest.NewRecorder()
 	h.Login(loginRec, loginReq)
 	if loginRec.Code != http.StatusOK {
@@ -268,7 +323,7 @@ func TestHandler_Login_WrongPassword(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	body := jsonBody(t, map[string]string{"email": email, "password": "wrong"})
+	body := jsonBody(t, map[string]string{"identifier": email, "password": "wrong"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
 	rec := httptest.NewRecorder()
 
@@ -285,7 +340,7 @@ func TestHandler_Login_TooManyFailedAttempts(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	doLogin := func(password string) *httptest.ResponseRecorder {
-		body := jsonBody(t, map[string]string{"email": email, "password": password})
+		body := jsonBody(t, map[string]string{"identifier": email, "password": password})
 		req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
 		rec := httptest.NewRecorder()
 		h.Login(rec, req)
@@ -310,7 +365,7 @@ func TestHandler_Login_Success(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	body := jsonBody(t, map[string]string{"email": email, "password": "correcthorsebattery"})
+	body := jsonBody(t, map[string]string{"identifier": email, "password": "correcthorsebattery"})
 	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
 	rec := httptest.NewRecorder()
 
@@ -472,7 +527,7 @@ func TestHandler_PasswordReset_FullFlow(t *testing.T) {
 	}
 
 	// The new password now logs in; the old one doesn't.
-	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"email": email, "password": "new-password-456"})), apiClientID)
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{"identifier": email, "password": "new-password-456"})), apiClientID)
 	loginRec := httptest.NewRecorder()
 	h.Login(loginRec, loginReq)
 	if loginRec.Code != http.StatusOK {

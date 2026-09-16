@@ -44,7 +44,22 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 // rather than testing the verification flow itself.
 func mustRegister(t *testing.T, svc *auth.Service, mailer *testutil.FakeMailer, apiClientID, email, password string) {
 	t.Helper()
-	if _, err := svc.Register(t.Context(), apiClientID, email, password); err != nil {
+	mustRegisterFull(t, svc, mailer, apiClientID, email, password, "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+}
+
+// mustRegisterWithUsername is mustRegister but with a caller-chosen
+// username (a fresh rut is still generated) — for tests that care about a
+// specific, possibly-colliding username.
+func mustRegisterWithUsername(t *testing.T, svc *auth.Service, mailer *testutil.FakeMailer, apiClientID, email, password, username string) {
+	t.Helper()
+	mustRegisterFull(t, svc, mailer, apiClientID, email, password, username, testutil.UniqueRUT(t))
+}
+
+// mustRegisterFull is mustRegister but with a caller-chosen username and
+// rut too — for tests asserting login by one of those identifiers.
+func mustRegisterFull(t *testing.T, svc *auth.Service, mailer *testutil.FakeMailer, apiClientID, email, password, username, rut string) {
+	t.Helper()
+	if _, err := svc.Register(t.Context(), apiClientID, email, password, username, rut); err != nil {
 		t.Fatalf("Register(%q): %v", email, err)
 	}
 	sent, ok := mailer.Last()

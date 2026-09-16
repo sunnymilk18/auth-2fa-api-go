@@ -2,6 +2,9 @@ package testutil
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,8 +20,10 @@ func NewUser(t *testing.T, pool *pgxpool.Pool, apiClientID, password string) *us
 	t.Helper()
 
 	svc := user.NewService(user.NewRepository(pool))
-	email := "user-" + UniqueSuffix(t) + "@example.com"
-	u, err := svc.Register(context.Background(), apiClientID, email, password)
+	suffix := UniqueSuffix(t)
+	email := "user-" + suffix + "@example.com"
+	username := "user-" + suffix
+	u, err := svc.Register(context.Background(), apiClientID, email, password, username, UniqueRUT(t))
 	if err != nil {
 		t.Fatalf("creating test user: %v", err)
 	}
@@ -28,4 +33,17 @@ func NewUser(t *testing.T, pool *pgxpool.Pool, apiClientID, password string) *us
 	})
 
 	return u
+}
+
+// UniqueRUT returns a fresh, checksum-valid RUT (see user.NewRUT) with a
+// random 8-digit body — collision-free the same way UniqueSuffix is.
+func UniqueRUT(t *testing.T) string {
+	t.Helper()
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		t.Fatalf("generating unique rut: %v", err)
+	}
+	// %08d over a uint32 mod 1e8 always yields exactly 8 digits.
+	body := fmt.Sprintf("%08d", binary.BigEndian.Uint32(b[:])%100000000)
+	return user.NewRUT(body)
 }
