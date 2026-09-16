@@ -326,5 +326,18 @@ Todo corre en un mismo proyecto Compose en Dokploy — `api`, `postgres`, `redis
 
 ## Notas para producción (pendiente, no implementado aún)
 
-- **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse.
+- **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse. Sin esto, nadie fuera de esa única cuenta puede recibir el código de verificación ni el OTP de login — es lo primero a resolver antes de cualquier usuario real.
 - **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
+
+## Checklist para el equipo de TI antes de producción
+
+Esta API en sí misma no depende de nada de esto para funcionar en desarrollo/pruebas — pero antes de que la use gente real, hay una capa de infraestructura y operación que le corresponde a quien administre el entorno final, no al desarrollo de la API. Se las dejamos listadas acá para que no se pierdan en el traspaso.
+
+- **HTTPS obligatorio, no opcional**: el dominio final necesita certificado válido y debería rechazar tráfico por HTTP plano (redirigir o cerrar el puerto), no solo "tenerlo disponible". Sin esto, credenciales y tokens viajan sin cifrar. Ver [Deploy en producción](#deploy-en-producción) — Dokploy/Traefik lo gestiona, pero hay que confirmar que quede forzado.
+- **Backups de PostgreSQL, con restore probado**: hoy no hay ninguna política de backup configurada. Un backup que nunca se probó restaurar no es un backup real — hace falta definir frecuencia, retención, y probar el restore al menos una vez antes de ir a producción.
+- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `RESEND_API_KEY`, la contraseña de Postgres — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan.
+- **Alertas activas, no solo dashboards**: el stack de [Observabilidad](#observabilidad) ya expone todo lo necesario (métricas de error rate, latencia, salud del servicio) pero nadie recibe una notificación si algo se rompe fuera de horario — hoy hay que entrar a Grafana a mirar. Conviene conectar alertas (Grafana Alerting, o lo que ya usen) sobre esas mismas métricas.
+- **Redundancia / alta disponibilidad**: todo corre en un único VPS (ver [Producción (Dokploy)](#producción-dokploy)) — si esa máquina se cae, el sistema completo se cae con ella. Si el municipio requiere continuidad de servicio, esto necesita evaluarse aparte (más de una instancia, balanceo de carga, etc.).
+- **Protección a nivel de borde (WAF / anti-DDoS)**: el rate limiting de esta API (`internal/middleware.RateLimiter`, por IP y por cuenta) protege contra fuerza bruta sobre credenciales y OTP, pero no contra un ataque volumétrico de verdad contra la infraestructura — eso se resuelve en la capa de red/proxy, no en la aplicación.
+- **Pruebas de carga**: nunca se verificó cuánto tráfico real aguanta esta configuración. Antes de anunciar el servicio a todo el municipio, vale la pena simular la carga esperada.
+- **Cumplimiento legal y normativo**: fuera del alcance de este README — el municipio ya cuenta con su propio proceso para esto.
