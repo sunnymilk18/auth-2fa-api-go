@@ -28,6 +28,17 @@ type Config struct {
 	JWTPrivateKeyPath      string
 	JWTPrivateKeyPEMBase64 string
 	JWTKeyID               string
+
+	// Both optional, and only meaningful together with each other — set
+	// during a JWT key rotation's overlap window so the *previous* signing
+	// key's public half stays verifiable for a while after a new key
+	// (JWTPrivateKeyPath/PEMBase64 + JWTKeyID above) takes over signing.
+	// See auth.TokenManager.AddVerificationKey and README's "Rotación de
+	// claves JWT" for the actual rotation procedure. Left empty (the
+	// default), JWKS publishes exactly one key, same as always.
+	JWTPreviousKeyID              string
+	JWTPreviousPublicKeyPEMBase64 string
+
 	// Refresh tokens stay HS256 (shared secret) — they're only ever
 	// presented back to this API's own /auth/refresh endpoint.
 	JWTRefreshSecret string
@@ -113,7 +124,11 @@ func Load() (*Config, error) {
 		JWTPrivateKeyPath:      getEnv("JWT_PRIVATE_KEY_PATH", "keys/private.pem"),
 		JWTPrivateKeyPEMBase64: getEnv("JWT_PRIVATE_KEY_PEM_BASE64", ""),
 		JWTKeyID:               getEnv("JWT_KEY_ID", "auth-2fa-api-1"),
-		JWTRefreshSecret:       getEnv("JWT_REFRESH_SECRET", ""),
+
+		JWTPreviousKeyID:              getEnv("JWT_PREVIOUS_KEY_ID", ""),
+		JWTPreviousPublicKeyPEMBase64: getEnv("JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64", ""),
+
+		JWTRefreshSecret: getEnv("JWT_REFRESH_SECRET", ""),
 
 		ResendAPIKey: getEnv("RESEND_API_KEY", ""),
 		ResendFrom:   getEnv("RESEND_FROM", "onboarding@resend.dev"),

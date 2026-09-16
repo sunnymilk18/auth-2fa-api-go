@@ -49,3 +49,26 @@ func ParsePrivateKeyPEM(data []byte) (*rsa.PrivateKey, error) {
 	}
 	return key, nil
 }
+
+// ParsePublicKeyPEM parses a standalone PEM-encoded RSA public key (PKIX,
+// the format `openssl rsa -pubout` produces — the same keys/public.pem this
+// project already generates) — used for JWT key rotation, where a
+// *previous* signing key's public half needs to stay verifiable for a
+// while after a new key takes over signing, without ever needing that old
+// key's private half again (see TokenManager.AddVerificationKey).
+func ParsePublicKeyPEM(data []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, errors.New("no PEM block found")
+	}
+
+	keyAny, err := x509.ParsePKIXPublicKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing public key: %w", err)
+	}
+	key, ok := keyAny.(*rsa.PublicKey)
+	if !ok {
+		return nil, errors.New("public key is not an RSA key")
+	}
+	return key, nil
+}

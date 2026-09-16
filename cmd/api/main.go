@@ -82,6 +82,9 @@ func run(logger *slog.Logger) error {
 
 	otpStore := auth.NewOTPStore(rdb, cfg.OTPTTL, cfg.OTPMaxTries, cfg.OTPLength)
 	tokenMgr := auth.NewTokenManager(privateKey, cfg.JWTKeyID, cfg.JWTRefreshSecret, cfg.AccessTokenTTL, cfg.RefreshTokenTTL)
+	if err := addPreviousVerificationKey(tokenMgr, cfg); err != nil {
+		return err
+	}
 	refreshRepo := auth.NewRefreshRepository(pgPool)
 	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL, cfg.PasswordResetMaxTries, cfg.PasswordResetCodeLength)
 	emailVerificationStore := auth.NewEmailVerificationStore(rdb, cfg.EmailVerificationTTL, cfg.EmailVerificationMaxTries, cfg.EmailVerificationCodeLength)
@@ -152,4 +155,32 @@ func loadPrivateKey(cfg *config.Config) (*rsa.PrivateKey, error) {
 		return auth.ParsePrivateKeyPEM(pemBytes)
 	}
 	return auth.LoadPrivateKey(cfg.JWTPrivateKeyPath)
+}
+
+// addPreviousVerificationKey wires in the previous signing key's public
+// half, if configured, so access tokens issued right before a JWT key
+// rotation stay verifiable during the overlap window — see
+// auth.TokenManager.AddVerificationKey and README's "Rotación de claves
+// JWT". A no-op (not an error) when neither JWT_PREVIOUS_KEY_ID nor
+// JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64 is set, which is the normal case
+// outside of an active rotation.
+func addPreviousVerificationKey(tokenMgr *auth.TokenManager, cfg *config.Config) error {
+	if cfg.JWTPreviousKeyID == "" && cfg.JWTPreviousPublicKeyPEMBase64 == "" {
+		return nil
+	}
+	if cfg.JWTPreviousKeyID == "" || cfg.JWTPreviousPublicKeyPEMBase64 == "" {
+		return fmt.Errorf("JWT_PREVIOUS_KEY_ID and JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64 must be set together")
+	}
+
+	pemBytes, err := base64.StdEncoding.DecodeString(cfg.JWTPreviousPublicKeyPEMBase64)
+	if err != nil {
+		return fmt.Errorf("decoding JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64: %w", err)
+	}
+	pub, err := auth.ParsePublicKeyPEM(pemBytes)
+	if err != nil {
+		return fmt.Errorf("parsing JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64: %w", err)
+	}
+
+	tokenMgr.AddVerificationKey(cfg.JWTPreviousKeyID, pub)
+	return nil
 }

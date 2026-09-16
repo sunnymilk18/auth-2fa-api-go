@@ -348,9 +348,11 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 	return s.devices.RevokeAllForUser(ctx, userID)
 }
 
-// PublicKey exposes the access-token signing key's public half, for JWKS.
-func (s *Service) PublicKey() (*rsa.PublicKey, string) {
-	return s.tokens.PublicKey()
+// PublicKeys exposes every public key access tokens can currently be
+// verified against (kid -> key), for JWKS — normally just one, more only
+// during a JWT key rotation's overlap window (see TokenManager.AddVerificationKey).
+func (s *Service) PublicKeys() map[string]*rsa.PublicKey {
+	return s.tokens.PublicKeys()
 }
 
 // RegisterDevice marks deviceID as trusted for the already-authenticated

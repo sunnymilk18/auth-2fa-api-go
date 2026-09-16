@@ -327,7 +327,23 @@ Todo corre en un mismo proyecto Compose en Dokploy — `api`, `postgres`, `redis
 ## Notas para producción (pendiente, no implementado aún)
 
 - **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse. Sin esto, nadie fuera de esa única cuenta puede recibir el código de verificación ni el OTP de login — es lo primero a resolver antes de cualquier usuario real.
-- **Rotación de claves JWT**: hoy se usa una sola clave RSA (`JWT_KEY_ID` fijo). En producción conviene poder rotar claves sin invalidar tokens en curso (publicar varias claves en el JWKS durante la transición).
+
+## Rotación de claves JWT
+
+El access token se firma con una sola clave RSA a la vez, pero `/.well-known/jwks.json` puede publicar más de una — el JWT lleva su `kid` (key id) en el header, y `ParseAccessToken` busca la clave pública que corresponda a ese `kid` en vez de asumir que hay una sola. Esto permite rotar la clave de firma sin invalidar de golpe los tokens que ya estaban circulando: durante una ventana de solapamiento, la clave vieja sigue publicada (solo para verificar, ya no para firmar) hasta que ningún token firmado con ella pueda seguir siendo válido.
+
+**Cuándo rotar**: como higiene de rutina, cada 6-12 meses alcanza para un proyecto de este tamaño — no hay ganancia real en rotar más seguido si nadie más tiene acceso a la clave. Rotá de inmediato, sin esperar al cronograma, si sospechás que la clave privada pudo haberse expuesto (un backup filtrado, acceso no autorizado al servidor, etc.).
+
+**Procedimiento** (dos deploys, con una espera en el medio):
+
+1. Generá el par de claves nuevo (mismo comando que en [Claves RS256](#claves-rs256-para-el-access-token), a otro archivo para no pisar el actual) y elegí un `kid` nuevo (ej. `auth-2fa-api-2` si el actual es `auth-2fa-api-1`).
+2. En las variables de entorno del deploy, seteá:
+   - `JWT_PREVIOUS_KEY_ID` = el `kid` **actual** (el que está por dejar de firmar).
+   - `JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64` = la clave **pública** actual, en base64 (`base64 -w0 keys/public.pem`, o el equivalente de tu SO) — la privada vieja ya no hace falta para nada.
+   - `JWT_PRIVATE_KEY_PATH` (o `JWT_PRIVATE_KEY_PEM_BASE64`) + `JWT_KEY_ID` = la clave nueva.
+3. Deploy. Desde acá: los tokens nuevos se firman con la clave nueva; el JWKS publica las dos; los tokens ya emitidos (hasta `ACCESS_TOKEN_TTL` de antigüedad) siguen verificando con la vieja.
+4. Esperá al menos `ACCESS_TOKEN_TTL` (15m por default) más un margen — una hora es de sobra.
+5. Sacá `JWT_PREVIOUS_KEY_ID` y `JWT_PREVIOUS_PUBLIC_KEY_PEM_BASE64` de las variables de entorno. Deploy de nuevo. El JWKS vuelve a tener una sola clave — rotación terminada.
 
 ## Checklist para el equipo de TI antes de producción
 
