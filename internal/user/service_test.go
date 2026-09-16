@@ -198,6 +198,14 @@ func TestRegister_InvalidEmail(t *testing.T) {
 	}
 }
 
+func TestRegister_InvalidPassword(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+
+	if _, err := svc.Register(t.Context(), apiClientID, "a-"+testutil.UniqueSuffix(t)+"@example.com", "short", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); !errors.Is(err, user.ErrInvalidPassword) {
+		t.Fatalf("Register with a too-short password: err = %v, want %v", err, user.ErrInvalidPassword)
+	}
+}
+
 // A suggested alternative must itself be something the caller could
 // actually register with — never longer than the max username length.
 func TestRegister_DuplicateUsername_SuggestionStaysWithinLengthLimit(t *testing.T) {

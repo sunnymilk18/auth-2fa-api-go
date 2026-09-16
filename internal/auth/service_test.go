@@ -157,6 +157,32 @@ func TestLoginStep1_LocksOutAfterTooManyFailures(t *testing.T) {
 	}
 }
 
+// Failed attempts against the same account share one lockout counter
+// regardless of which identifier (email/username/rut) was typed each
+// time — alternating between them must not multiply the attempt budget.
+func TestLoginStep1_LockoutSharedAcrossIdentifiers(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	username := "user-" + testutil.UniqueSuffix(t)
+	rut := testutil.UniqueRUT(t)
+	mustRegisterFull(t, svc, mailer, apiClientID, email, "correcthorsebattery", username, rut)
+
+	// newTestService builds the limiter with maxFails=3. One failure each
+	// via email, username and rut — three total, the shared limit.
+	for _, identifier := range []string{email, username, rut} {
+		if _, err := svc.LoginStep1(t.Context(), apiClientID, identifier, "wrong"); err != user.ErrInvalidCredentials {
+			t.Fatalf("wrong password via %q: err = %v, want %v", identifier, err, user.ErrInvalidCredentials)
+		}
+	}
+
+	// Locked out now, even via a fourth identifier (email again) with the
+	// CORRECT password — if this were still three separate counters, each
+	// would only be at 1 failure and none would be locked.
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrTooManyFailedLogins {
+		t.Fatalf("correct password after 3 failures spread across identifiers: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
+	}
+}
+
 // The lockout must not become a way to enumerate which emails are
 // registered: an account that doesn't exist gets throttled exactly the same
 // way a real one would, since VerifyPassword already returns the same

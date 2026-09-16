@@ -54,8 +54,12 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
-	if req.Email == "" || len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "el correo es obligatorio y la contraseña debe tener al menos 8 caracteres")
+	if req.Email == "" {
+		writeError(w, http.StatusBadRequest, "el correo es obligatorio")
+		return
+	}
+	if req.Password == "" {
+		writeError(w, http.StatusBadRequest, "la contraseña es obligatoria")
 		return
 	}
 	if req.Username == "" {
@@ -66,10 +70,11 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "el rut es obligatorio")
 		return
 	}
-	// Presence only, above — the actual shape rules (username length/no
-	// puramente-numérico, rut checksum) are user.Service.Register's job, not
-	// this handler's: see ErrInvalidUsername/ErrInvalidRUT's doc comment for
-	// why that validation belongs in the domain, not just at this boundary.
+	// Presence only, above — the actual shape rules (password length,
+	// username length/no puramente-numérico, rut checksum) are
+	// user.Service.Register's job, not this handler's: see
+	// ErrInvalidUsername/ErrInvalidRUT's doc comment for why that
+	// validation belongs in the domain, not just at this boundary.
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
@@ -95,6 +100,8 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "el rut no es válido")
 		case errors.Is(err, user.ErrInvalidEmail):
 			writeError(w, http.StatusBadRequest, "el correo no tiene un formato válido")
+		case errors.Is(err, user.ErrInvalidPassword):
+			writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
 		default:
 			log.Printf("register error: %v", err)
 			writeError(w, http.StatusInternalServerError, "no se pudo registrar el usuario")
@@ -198,8 +205,7 @@ func (h *Handlers) ResendEmailVerification(w http.ResponseWriter, r *http.Reques
 
 type loginRequest struct {
 	// Accepts an email, a username or a rut — see
-	// user.Service.VerifyPassword / classifyIdentifier for how it's told
-	// apart.
+	// user.Service.VerifyPassword / findByIdentifier for how it's resolved.
 	Identifier string `json:"identifier"`
 	Password   string `json:"password"`
 }
@@ -384,10 +390,13 @@ func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "el correo y el código son obligatorios")
 		return
 	}
-	if len(req.NewPassword) < 8 {
-		writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
+	if req.NewPassword == "" {
+		writeError(w, http.StatusBadRequest, "la nueva contraseña es obligatoria")
 		return
 	}
+	// Presence only — the length rule is user.ValidatePassword's job, see
+	// auth.Service.ResetPassword's doc comment for why it's checked there
+	// before the reset code is consumed, not just in user.Service.UpdatePassword.
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
@@ -397,6 +406,8 @@ func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) 
 
 	if err := h.svc.ResetPassword(r.Context(), apiClientID, req.Email, req.Code, req.NewPassword); err != nil {
 		switch {
+		case errors.Is(err, user.ErrInvalidPassword):
+			writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
 		case errors.Is(err, ErrPasswordResetNotFound):
 			writeError(w, http.StatusUnauthorized, "no hay un restablecimiento pendiente para ese correo, o expiró")
 		case errors.Is(err, ErrPasswordResetInvalidCode):

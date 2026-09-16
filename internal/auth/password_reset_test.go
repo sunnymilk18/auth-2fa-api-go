@@ -6,6 +6,7 @@ import (
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/testutil"
+	"auth-2fa-api/internal/user"
 )
 
 func TestPasswordReset_FullFlow(t *testing.T) {
@@ -38,6 +39,31 @@ func TestPasswordReset_FullFlow(t *testing.T) {
 	}
 	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "new-password-456"); err != nil {
 		t.Fatalf("LoginStep1 with the new password: unexpected error %v", err)
+	}
+}
+
+// A too-short new password must be rejected WITHOUT consuming the
+// single-use reset code — otherwise a simple typo forces requesting a
+// whole new code, since ResetPassword validates the password before
+// PasswordResetStore.ConsumeCode runs.
+func TestPasswordReset_InvalidNewPassword_DoesNotConsumeCode(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
+
+	if err := svc.RequestPasswordReset(t.Context(), apiClientID, email); err != nil {
+		t.Fatalf("RequestPasswordReset: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractResetCode(sent.Body)
+
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "short"); err != user.ErrInvalidPassword {
+		t.Fatalf("ResetPassword with a too-short password: err = %v, want %v", err, user.ErrInvalidPassword)
+	}
+
+	// The SAME code still works — it was never consumed by the failed attempt.
+	if err := svc.ResetPassword(t.Context(), apiClientID, email, code, "new-password-456"); err != nil {
+		t.Fatalf("ResetPassword with the same code and a valid password: unexpected error %v", err)
 	}
 }
 

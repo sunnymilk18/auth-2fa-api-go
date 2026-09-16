@@ -134,6 +134,22 @@ func (r *Repository) FindByRUT(ctx context.Context, apiClientID, rut string) (*U
 	return findOne(ctx, r.pool, q, "rut", apiClientID, rut)
 }
 
+// FindByIdentifier looks up a user scoped to a single api client, matching
+// ANY of the three normalized forms in one query — no upfront guess about
+// which one the caller actually typed. emailCandidate/usernameCandidate/
+// rutCandidate are the same raw identifier normalized three different ways
+// (see user.Service.findByIdentifier) — at most one of the three OR
+// clauses can ever be true for a real row, since ValidateUsername already
+// refuses any username that could collide with an email or rut shape (see
+// its doc comment), so this can't return an ambiguous match. LIMIT 1 is a
+// second layer of defense on top of that, not a substitute for it.
+func (r *Repository) FindByIdentifier(ctx context.Context, apiClientID, emailCandidate, usernameCandidate, rutCandidate string) (*User, error) {
+	q := "SELECT " + selectUserColumns + ` FROM users
+		WHERE api_client_id = $1 AND (email = $2 OR username = $3 OR rut = $4)
+		LIMIT 1`
+	return findOne(ctx, r.pool, q, "identifier", apiClientID, emailCandidate, usernameCandidate, rutCandidate)
+}
+
 // FindByID looks up a user by their globally-unique id — no api client
 // scoping needed here, since the id alone already identifies one user.
 func (r *Repository) FindByID(ctx context.Context, id string) (*User, error) {

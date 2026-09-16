@@ -2,22 +2,30 @@ package user
 
 import "testing"
 
-func TestClassifyIdentifier(t *testing.T) {
-	cases := map[string]identifierKind{
-		"user@example.com": identifierEmail,
-		"a@b.co":           identifierEmail,
-		"12.345.678-5":     identifierRUT,
-		"12345678-5":       identifierRUT,
-		"123456785":        identifierRUT,
-		"12345678-K":       identifierRUT,
-		"juan.perez":       identifierUsername,
-		"juan.perez2":      identifierUsername,
-		"":                 identifierUsername,
-		"short":            identifierUsername,
+func TestLooksLikeRUT(t *testing.T) {
+	rutShaped := []string{
+		"12.345.678-5",
+		"12345678-5",
+		"123456785",
+		"12345678-K",
 	}
-	for in, want := range cases {
-		if got := classifyIdentifier(in); got != want {
-			t.Errorf("classifyIdentifier(%q) = %v, want %v", in, got, want)
+	for _, s := range rutShaped {
+		if !looksLikeRUT(s) {
+			t.Errorf("looksLikeRUT(%q) = false, want true", s)
+		}
+	}
+
+	notRUTShaped := []string{
+		"user@example.com",
+		"a@b.co",
+		"juan.perez",
+		"juan.perez2",
+		"",
+		"short",
+	}
+	for _, s := range notRUTShaped {
+		if looksLikeRUT(s) {
+			t.Errorf("looksLikeRUT(%q) = true, want false", s)
 		}
 	}
 }
@@ -40,7 +48,7 @@ func TestValidateUsername(t *testing.T) {
 		"123456785",                         // 9 digits, purely numeric (RUT-shaped even)
 		"",                                  // empty
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 33 chars, over the max
-		"micorreo@example.com",              // has "@" — classifyIdentifier would always route this to email lookup
+		"micorreo@example.com",              // has "@" — would always match the email column instead
 		"1234.5678",                         // digits + a dot — looksLikeRUT strips the dot and still sees a RUT shape
 		"12.345.678-5",                      // fully RUT-formatted, even though it "has non-digit characters"
 	}

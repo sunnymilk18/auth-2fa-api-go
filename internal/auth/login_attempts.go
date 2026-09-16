@@ -12,11 +12,16 @@ import (
 
 var ErrTooManyFailedLogins = errors.New("too many failed login attempts, try again later")
 
-// LoginAttemptLimiter tracks failed password attempts per (api client,
-// email) in Redis — distinct from the per-IP rate limiter already on
-// /auth/login (internal/middleware.RateLimiter): that one bounds total
-// request volume from one IP, which doesn't catch someone spreading
-// password guesses against a single account across many different IPs.
+// LoginAttemptLimiter tracks failed password attempts per (api client, key)
+// in Redis — distinct from the per-IP rate limiter already on /auth/login
+// (internal/middleware.RateLimiter): that one bounds total request volume
+// from one IP, which doesn't catch someone spreading password guesses
+// against a single account across many different IPs.
+//
+// key is normally the resolved account's user id — see
+// auth.Service.LoginStep1, which is the only real caller — falling back
+// to the raw login identifier (email/username/rut, whatever was typed)
+// only when it doesn't resolve to any account.
 //
 // Deliberately a temporary throttle (same order of magnitude as the IP
 // limiter's own window), not a hard/permanent lockout — an unconditional
@@ -34,10 +39,10 @@ func NewLoginAttemptLimiter(rdb *redis.Client, maxFails int, window time.Duratio
 	return &LoginAttemptLimiter{rdb: rdb, maxFails: int64(maxFails), window: window}
 }
 
-// IsLocked reports whether apiClientID/email currently has too many
+// IsLocked reports whether apiClientID/lockoutKey currently has too many
 // recorded failures to allow another attempt.
-func (l *LoginAttemptLimiter) IsLocked(ctx context.Context, apiClientID, email string) (bool, error) {
-	count, err := l.rdb.Get(ctx, l.key(apiClientID, email)).Int64()
+func (l *LoginAttemptLimiter) IsLocked(ctx context.Context, apiClientID, lockoutKey string) (bool, error) {
+	count, err := l.rdb.Get(ctx, l.redisKey(apiClientID, lockoutKey)).Int64()
 	if errors.Is(err, redis.Nil) {
 		return false, nil
 	}
@@ -49,14 +54,14 @@ func (l *LoginAttemptLimiter) IsLocked(ctx context.Context, apiClientID, email s
 
 // RecordFailure increments the failure count, starting its TTL on the
 // first failure of a new window.
-func (l *LoginAttemptLimiter) RecordFailure(ctx context.Context, apiClientID, email string) error {
-	key := l.key(apiClientID, email)
-	count, err := l.rdb.Incr(ctx, key).Result()
+func (l *LoginAttemptLimiter) RecordFailure(ctx context.Context, apiClientID, lockoutKey string) error {
+	redisKey := l.redisKey(apiClientID, lockoutKey)
+	count, err := l.rdb.Incr(ctx, redisKey).Result()
 	if err != nil {
 		return fmt.Errorf("recording login failure: %w", err)
 	}
 	if count == 1 {
-		if err := l.rdb.Expire(ctx, key, l.window).Err(); err != nil {
+		if err := l.rdb.Expire(ctx, redisKey, l.window).Err(); err != nil {
 			return fmt.Errorf("setting login attempts ttl: %w", err)
 		}
 	}
@@ -65,13 +70,13 @@ func (l *LoginAttemptLimiter) RecordFailure(ctx context.Context, apiClientID, em
 
 // Reset clears the failure count — called after a successful login so past
 // failures don't linger against a legitimate user's next typo.
-func (l *LoginAttemptLimiter) Reset(ctx context.Context, apiClientID, email string) error {
-	return l.rdb.Del(ctx, l.key(apiClientID, email)).Err()
+func (l *LoginAttemptLimiter) Reset(ctx context.Context, apiClientID, lockoutKey string) error {
+	return l.rdb.Del(ctx, l.redisKey(apiClientID, lockoutKey)).Err()
 }
 
-func (l *LoginAttemptLimiter) key(apiClientID, email string) string {
-	// Same normalization user.Service applies before comparing emails —
-	// duplicated rather than exported, since it's two lines and pulling in
-	// a shared dependency just for this isn't worth it.
-	return "login_attempts:" + apiClientID + ":" + strings.ToLower(strings.TrimSpace(email))
+func (l *LoginAttemptLimiter) redisKey(apiClientID, lockoutKey string) string {
+	// Lowercased/trimmed same as any of the three identifier forms would
+	// be before comparison — harmless no-op when lockoutKey is already a
+	// user id (UUIDs are lowercase hex to begin with).
+	return "login_attempts:" + apiClientID + ":" + strings.ToLower(strings.TrimSpace(lockoutKey))
 }

@@ -147,15 +147,25 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // error not distinguishing the two) — this must not become a way to probe
 // which identifiers are registered.
 //
-// The lockout counter is keyed by the exact identifier string used, same
-// as it always was for email alone — not by the resolved account. That
-// means someone locked out via email isn't also locked out via username or
-// rut for the same account (three separate counters instead of one shared
-// one). Worth tightening later (key by resolved user id once found, falling
-// back to the raw identifier only when nothing matches) but out of scope
-// for this change.
+// The lockout counter is keyed by the resolved account's id, not by the
+// identifier string used to log in — email, username and rut for the same
+// account now share one counter (fixed 2026-09-16; used to be three
+// separate ones, one per identifier, letting someone get ~3x the intended
+// attempt budget by alternating which one they typed). Resolving the
+// account here, before checking the password, doesn't leak anything new:
+// VerifyPassword's own error already never distinguishes "no such account"
+// from "wrong password" in what it returns, only in this internal lookup.
+// When the identifier doesn't resolve to any account at all, falls back to
+// the raw identifier string — same as every attempt worked before this,
+// and still throttles guessing against nonexistent accounts the same way
+// as a real one, which matters for the same enumeration reasons.
 func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, err error) {
-	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, identifier)
+	lockoutKey := identifier
+	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
+		lockoutKey = resolved.ID
+	}
+
+	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
 	if err != nil {
 		return "", err
 	}
@@ -168,13 +178,13 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		if errors.Is(err, user.ErrInvalidCredentials) {
 			// Best-effort: a Redis hiccup here shouldn't turn a legitimate
 			// wrong-password response into a 500.
-			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, identifier)
+			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, lockoutKey)
 		}
 		return "", err
 	}
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
-	_ = s.loginAttempts.Reset(ctx, apiClientID, identifier)
+	_ = s.loginAttempts.Reset(ctx, apiClientID, lockoutKey)
 
 	// Checked only after a correct password, never before: doing it earlier
 	// would let an unauthenticated caller learn whether an email is
@@ -296,7 +306,17 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 // intact would let whoever set it up (possibly an attacker, during whatever
 // compromise prompted the reset) keep getting in regardless of the new
 // password.
+//
+// Validates newPassword before consuming the code, not after — the code is
+// single-use (see PasswordResetStore.ConsumeCode), so checking it only
+// afterward (as user.Service.UpdatePassword itself also does, as a
+// backstop) would burn a legitimate reset attempt on a too-short password
+// and force requesting a whole new code just for that.
 func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, newPassword string) error {
+	if !user.ValidatePassword(newPassword) {
+		return user.ErrInvalidPassword
+	}
+
 	userID, err := s.passwordReset.ConsumeCode(ctx, apiClientID, email, code)
 	if err != nil {
 		return err

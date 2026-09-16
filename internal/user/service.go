@@ -27,10 +27,25 @@ var ErrInvalidUsername = errors.New("invalid username")
 var ErrInvalidRUT = errors.New("invalid rut")
 
 // ErrInvalidEmail: Register previously only checked email for emptiness —
-// a value with no "@" was accepted and stored, then became permanently
-// unreachable as a login identifier (classifyIdentifier only tries an
-// email lookup when "@" is present). See ValidateEmail's doc comment.
+// see ValidateEmail's doc comment for why that's not enough on its own.
 var ErrInvalidEmail = errors.New("invalid email")
+
+// ErrInvalidPassword guards the same invariant the others do — the minimum
+// length used to be checked only in the HTTP handler, so any other future
+// caller of Register could slip past it. Same fix as ErrInvalidUsername.
+var ErrInvalidPassword = errors.New("invalid password")
+
+const minPasswordLen = 8
+
+// ValidatePassword is exported so callers with an ordering constraint
+// Register/UpdatePassword don't have — auth.Service.ResetPassword needs to
+// know a new password is long enough *before* it consumes the one-time
+// reset code, otherwise a too-short password would burn the code and force
+// requesting a whole new one just for a length mistake — can check it
+// without duplicating the rule.
+func ValidatePassword(password string) bool {
+	return len(password) >= minPasswordLen
+}
 
 type Service struct {
 	repo *Repository
@@ -78,6 +93,9 @@ func (s *Service) Register(ctx context.Context, apiClientID, email, password, us
 	}
 	if !ValidateRUT(rut) {
 		return nil, ErrInvalidRUT
+	}
+	if !ValidatePassword(password) {
+		return nil, ErrInvalidPassword
 	}
 
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -130,7 +148,7 @@ func (s *Service) suggestUsername(ctx context.Context, apiClientID, base string)
 // VerifyPassword checks credentials within one api client (tenant) and
 // returns the user on success. It does not issue tokens or trigger OTP —
 // that's the auth package's job. identifier accepts an email, a username or
-// a RUT — see classifyIdentifier — since all three are unique per tenant, at
+// a RUT — see findByIdentifier — since all three are unique per tenant, at
 // most one account can ever match.
 func (s *Service) VerifyPassword(ctx context.Context, apiClientID, identifier, password string) (*User, error) {
 	u, err := s.findByIdentifier(ctx, apiClientID, identifier)
@@ -153,17 +171,32 @@ func (s *Service) VerifyPassword(ctx context.Context, apiClientID, identifier, p
 	return u, nil
 }
 
-// findByIdentifier resolves a login identifier to a user, dispatching to
-// the matching lookup and normalizing it the same way registration did.
+// FindByIdentifier resolves email, username or rut to the account it
+// belongs to — same resolution VerifyPassword does internally, exported so
+// callers that need the account *before* checking the password (the login
+// lockout counter, keyed by account id rather than by whichever identifier
+// string was typed — see auth.Service.LoginStep1) can reuse it.
+func (s *Service) FindByIdentifier(ctx context.Context, apiClientID, identifier string) (*User, error) {
+	return s.findByIdentifier(ctx, apiClientID, identifier)
+}
+
+// findByIdentifier resolves a login identifier — email, username or rut,
+// whichever it turns out to be — in one query rather than guessing which
+// one first: identifier gets normalized all three ways (only one of which
+// will ever actually be "correct" for it), and the query matches on
+// whichever column agrees. No shape-detection step to get subtly wrong —
+// the two bugs that bit this project's earlier "guess the type, then look
+// in one column" version (a numeric-ish username misread as a rut; one
+// with dots misread as a rut too) can't recur, because there's no guess
+// left to get wrong. Safe from cross-column ambiguity (someone's username
+// accidentally matching a stranger's rut) because ValidateUsername already
+// refuses any username shaped like a rut or an email — see its doc
+// comment; FindByIdentifier's own LIMIT 1 is a second line of defense on
+// top of that, not the only thing preventing it.
 func (s *Service) findByIdentifier(ctx context.Context, apiClientID, identifier string) (*User, error) {
-	switch classifyIdentifier(identifier) {
-	case identifierEmail:
-		return s.repo.FindByEmail(ctx, apiClientID, normalizeEmail(identifier))
-	case identifierRUT:
-		return s.repo.FindByRUT(ctx, apiClientID, NormalizeRUT(identifier))
-	default:
-		return s.repo.FindByUsername(ctx, apiClientID, NormalizeUsername(identifier))
-	}
+	return s.repo.FindByIdentifier(ctx, apiClientID,
+		normalizeEmail(identifier), NormalizeUsername(identifier), NormalizeRUT(identifier),
+	)
 }
 
 func (s *Service) FindByID(ctx context.Context, id string) (*User, error) {
@@ -180,6 +213,15 @@ func (s *Service) FindByEmail(ctx context.Context, apiClientID, email string) (*
 // UpdatePassword bcrypt-hashes newPassword and replaces userID's stored
 // hash.
 func (s *Service) UpdatePassword(ctx context.Context, userID, newPassword string) error {
+	// Same invariant as Register's — the password-reset flow (auth.Service.
+	// ResetPassword) used to only check this in the handler too. ResetPassword
+	// itself also checks ValidatePassword before this, earlier, so its
+	// one-time reset code isn't burned on a too-short password — this check
+	// stays too, as a backstop for any other caller of UpdatePassword.
+	if !ValidatePassword(newPassword) {
+		return ErrInvalidPassword
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
 		return fmt.Errorf("hashing password: %w", err)
