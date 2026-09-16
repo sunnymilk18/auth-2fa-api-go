@@ -606,9 +606,9 @@ components:
           type: string
           description: >
             Acepta el email, el username o el rut de la cuenta — el backend
-            detecta cuál es solo por la forma (contiene "@" → email; tiene
-            forma de RUT → rut; si no → username), sin que haga falta
-            indicarlo. No hay que ofrecer un selector de "con qué querés
+            prueba las tres columnas en una sola consulta
+            (email = ? OR username = ? OR rut = ?), sin adivinar antes cuál
+            es cuál. No hay que ofrecer un selector de "con qué querés
             loguear" en el cliente: un solo campo alcanza para los tres.
           example: juan.perez
         password:
