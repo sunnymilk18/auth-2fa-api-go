@@ -3,9 +3,7 @@ package middleware
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -26,10 +24,25 @@ type RateLimiter struct {
 	// it themselves and reset their own counter on every request, making
 	// the limit trivial to bypass.
 	trustProxyHeaders bool
+
+	// blacklist, when attached, is told about every request this limiter
+	// denies — see Blacklist's doc comment for the escalation that feeds.
+	// nil is a valid, common state (most limiters don't need it attached
+	// more than once — router.go shares a single Blacklist across all of
+	// them).
+	blacklist *Blacklist
 }
 
 func NewRateLimiter(rdb *redis.Client, prefix string, limit int64, window time.Duration, trustProxyHeaders bool) *RateLimiter {
 	return &RateLimiter{rdb: rdb, prefix: prefix, limit: limit, window: window, trustProxyHeaders: trustProxyHeaders}
+}
+
+// AttachBlacklist wires bl into this limiter so a denied request also
+// counts as a strike toward bl's own escalating ban — returns rl so it can
+// be chained onto NewRateLimiter at the call site.
+func (rl *RateLimiter) AttachBlacklist(bl *Blacklist) *RateLimiter {
+	rl.blacklist = bl
+	return rl
 }
 
 // Allow increments the counter for key and reports whether the caller is
@@ -63,6 +76,13 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		if !allowed {
+			if rl.blacklist != nil {
+				// Best-effort, same fail-open spirit as everything else on
+				// this path — a Redis hiccup here just means one strike
+				// goes unrecorded, not a request that should have failed
+				// open turning into a 500.
+				_ = rl.blacklist.RecordViolation(r.Context(), ip)
+			}
 			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", rl.window.Seconds()))
 			http.Error(w, `{"error":"demasiadas solicitudes, intenta de nuevo más tarde"}`, http.StatusTooManyRequests)
 			return
@@ -73,21 +93,5 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 }
 
 func (rl *RateLimiter) clientIP(r *http.Request) string {
-	// Only consulted when trustProxyHeaders is set — i.e. a reverse proxy
-	// we control sits in front and overwrites this header, so callers can't
-	// forge it to reset their own counter. Takes the first (client-facing)
-	// hop, since ELB/nginx/etc. append the real client IP at the front and
-	// any hop after that is ours.
-	if rl.trustProxyHeaders {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := strings.TrimSpace(strings.Split(fwd, ",")[0]); ip != "" {
-				return ip
-			}
-		}
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
+	return ClientIP(r, rl.trustProxyHeaders)
 }

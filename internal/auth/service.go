@@ -377,6 +377,9 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 	if err != nil {
 		return "", "", "", err
 	}
+	if !u.IsActive {
+		return "", "", "", ErrAccountBanned
+	}
 
 	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
@@ -396,3 +399,12 @@ func (s *Service) RevokeDevice(ctx context.Context, userID, deviceRowID string) 
 }
 
 var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrAccountBanned is returned by DeviceLogin when the account behind an
+// otherwise-valid device_token+pin has been deactivated (see
+// user.Service.Ban). LoginStep1's own password check already refuses a
+// deactivated account via user.ErrInvalidCredentials (see
+// user.Service.VerifyPassword) — this closes the same door for the
+// trusted-device shortcut, which bypasses password+OTP entirely and so
+// never went through that check on its own.
+var ErrAccountBanned = errors.New("account is banned")

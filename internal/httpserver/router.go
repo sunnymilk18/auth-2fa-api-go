@@ -48,6 +48,20 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Use(chimw.Timeout(15 * time.Second))
 	r.Use(middleware.Metrics(meter))
 
+	// Escalates a client IP that keeps tripping the rate limits declared
+	// below into a standalone ban: 3 denials within 24h bans it outright,
+	// 24h the first time, 72h the second, 7 days from the third on — see
+	// middleware.Blacklist's doc comment for why it resets after 30 days of
+	// good behavior instead of climbing forever. Registered globally here
+	// (chi requires every Use before any route) so a banned IP never
+	// reaches any route at all, rate-limited or not.
+	blacklist := middleware.NewBlacklist(rdb, trustProxyHeaders,
+		3, 24*time.Hour,
+		[]time.Duration{24 * time.Hour, 72 * time.Hour, 7 * 24 * time.Hour},
+		30*24*time.Hour,
+	)
+	r.Use(blacklist.Middleware)
+
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health
 	// check) relying on this to detect an outage needs it to be true.
@@ -80,14 +94,16 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 	// Rate limits blunt brute-force attempts against credentials, OTP codes
 	// and device PINs. Fixed windows, keyed by client IP, backed by Redis.
-	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour, trustProxyHeaders)
-	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute, trustProxyHeaders)
-	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute, trustProxyHeaders)
-	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders)
-	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour, trustProxyHeaders)
-	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders)
-	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders)
-	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders)
+	// Each is wired into the shared blacklist above: repeatedly tripping
+	// any one of them (or a mix of several) counts toward the same ban.
+	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
+	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
+	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -129,6 +145,33 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Post("/{id}/deactivate", adminHandlers.Deactivate)
 			r.Post("/{id}/activate", adminHandlers.Activate)
 			r.Post("/{id}/rotate", adminHandlers.Rotate)
+		})
+
+		// Manual, account-level moderation — see user.Service.Ban's doc
+		// comment for why this is never triggered automatically.
+		userAdminHandlers := user.NewAdminHandlers(users)
+		r.Route("/admin/users", func(r chi.Router) {
+			r.Use(middleware.RequireAdminToken(adminToken))
+
+			r.Post("/{id}/ban", userAdminHandlers.Ban)
+			r.Post("/{id}/unban", userAdminHandlers.Unban)
+		})
+
+		// Manual override for the automatic IP blacklist above — lifts a
+		// ban early (most commonly: a shared IP where the actual offender
+		// is long gone, but everyone else behind it is still paying for
+		// it) and clears its strike/level history.
+		r.Route("/admin/blacklist", func(r chi.Router) {
+			r.Use(middleware.RequireAdminToken(adminToken))
+
+			r.Delete("/{ip}", func(w http.ResponseWriter, r *http.Request) {
+				ip := chi.URLParam(r, "ip")
+				if err := blacklist.Unban(r.Context(), ip); err != nil {
+					http.Error(w, `{"error":"no se pudo levantar el baneo"}`, http.StatusInternalServerError)
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			})
 		})
 	}
 

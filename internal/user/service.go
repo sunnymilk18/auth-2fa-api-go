@@ -235,6 +235,23 @@ func (s *Service) MarkEmailVerified(ctx context.Context, userID string) error {
 	return s.repo.MarkEmailVerified(ctx, userID)
 }
 
+// Ban deactivates an account: VerifyPassword refuses it from then on (same
+// path an already-deactivated account takes today), and auth.Service.
+// DeviceLogin refuses its trusted devices too. Deliberately manual only —
+// never triggered automatically by failed login attempts, unlike the IP
+// blacklist (see middleware.Blacklist) — an automatic account-level ban
+// keyed off failed passwords would itself be a denial-of-service tool:
+// anyone who knows a victim's email/username/rut could lock them out on
+// purpose just by guessing wrong on purpose.
+func (s *Service) Ban(ctx context.Context, userID string) error {
+	return s.repo.SetActive(ctx, userID, false)
+}
+
+// Unban reverses a previous Ban.
+func (s *Service) Unban(ctx context.Context, userID string) error {
+	return s.repo.SetActive(ctx, userID, true)
+}
+
 // NormalizeEmail trims and lowercases — the only form ever stored or
 // looked up, same reasoning as NormalizeUsername/NormalizeRUT. Exported so
 // auth.Service can apply the same rule where it builds Redis keys directly

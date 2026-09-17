@@ -88,6 +88,44 @@ func TestRegister_EmailIsNormalized(t *testing.T) {
 	}
 }
 
+// Ban must block login the same way an already-inactive account does
+// (VerifyPassword's own is_active check); Unban must restore it — see
+// auth.Service.DeviceLogin's own test coverage for the trusted-device
+// shortcut, which this same flag also gates.
+func TestBan_ThenUnban(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	email := "ban-" + testutil.UniqueSuffix(t) + "@example.com"
+
+	created, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.MarkEmailVerified(t.Context(), created.ID); err != nil {
+		t.Fatalf("MarkEmailVerified: %v", err)
+	}
+
+	if err := svc.Ban(t.Context(), created.ID); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+	if _, err := svc.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != user.ErrInvalidCredentials {
+		t.Fatalf("VerifyPassword for a banned account: err = %v, want %v", err, user.ErrInvalidCredentials)
+	}
+
+	if err := svc.Unban(t.Context(), created.ID); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if _, err := svc.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("VerifyPassword after Unban: unexpected error %v", err)
+	}
+}
+
+func TestBan_UnknownID(t *testing.T) {
+	svc, _ := newTestUserService(t)
+	if err := svc.Ban(t.Context(), "00000000-0000-0000-0000-000000000000"); err != user.ErrNotFound {
+		t.Fatalf("err = %v, want %v", err, user.ErrNotFound)
+	}
+}
+
 func upper(s string) string {
 	b := []byte(s)
 	for i, c := range b {

@@ -172,6 +172,22 @@ func (r *Repository) MarkEmailVerified(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetActive flips is_active — used to manually ban (false) or unban (true)
+// an account. VerifyPassword already refuses login for an inactive user
+// (see its own doc comment); this is what actually lets an operator flip
+// that switch, via user.Service.Ban/Unban.
+func (r *Repository) SetActive(ctx context.Context, id string, active bool) error {
+	const q = `UPDATE users SET is_active = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, active)
+	if err != nil {
+		return fmt.Errorf("updating user active state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpdatePassword replaces id's stored password hash — used by the password
 // reset flow (the hash is already computed by the caller; this repository
 // never sees a plaintext password).

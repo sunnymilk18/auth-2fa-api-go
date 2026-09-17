@@ -377,6 +377,77 @@ func TestDeviceLoginFlow(t *testing.T) {
 	}
 }
 
+// A banned account (user.Service.Ban) must lose the trusted-device
+// shortcut too, not just password+OTP login (see LoginStep1's own test
+// coverage in internal/user for that half) — DeviceLogin bypasses password
+// entirely, so it never went through user.Service.VerifyPassword's
+// is_active check on its own before this.
+func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	client, _ := testutil.NewAPIClient(t, pool)
+	apiClientID := client.ID
+
+	users := user.NewService(user.NewRepository(pool))
+	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	refresh := auth.NewRefreshRepository(pool)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
+	mailer := testutil.NewFakeMailer()
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractOTPCode(sent.Body)
+	access, _, err := svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+	claims, err := tokens.ParseAccessToken(access)
+	if err != nil {
+		t.Fatalf("parsing access token: %v", err)
+	}
+	userID := claims.Subject
+
+	deviceID := "device-" + testutil.UniqueSuffix(t)
+	deviceToken, err := svc.RegisterDevice(t.Context(), userID, deviceID, "Test Phone", "123456")
+	if err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+
+	// Trust was established before the ban — same as a real "account
+	// compromised after the device was already trusted" scenario.
+	if err := users.Ban(t.Context(), userID); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != auth.ErrAccountBanned {
+		t.Fatalf("DeviceLogin for a banned account: err = %v, want %v", err, auth.ErrAccountBanned)
+	}
+
+	// Unban restores password+OTP login (the trusted-device token itself
+	// was already rotated server-side by the pin check inside the attempt
+	// above — same pre-existing behavior as any other failure that happens
+	// after a correct PIN, e.g. device.ErrTooManyPinTries — so re-trying
+	// DeviceLogin with the original, now-stale token correctly still fails;
+	// the client would need to re-register a device after this).
+	if err := users.Unban(t.Context(), userID); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if _, err := users.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("VerifyPassword after Unban: unexpected error %v", err)
+	}
+}
+
 func TestDeviceLogin_TooManyFailedPinsRevokesTrust(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"

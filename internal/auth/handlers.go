@@ -501,6 +501,8 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "PIN inválido")
 		case errors.Is(err, device.ErrTooManyPinTries):
 			writeError(w, http.StatusTooManyRequests, "demasiados intentos de PIN fallidos, vuelve a iniciar sesión")
+		case errors.Is(err, ErrAccountBanned):
+			writeError(w, http.StatusForbidden, "esta cuenta está bloqueada")
 		default:
 			log.Printf("device login error: %v", err)
 			writeError(w, http.StatusInternalServerError, "no se pudo iniciar sesión con el dispositivo")
