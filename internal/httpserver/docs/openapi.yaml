@@ -880,6 +880,12 @@ components:
           type: string
         rut:
           type: string
+        totp_enabled:
+          type: boolean
+          description: >
+            Si la cuenta activó la app autenticadora (TOTP) como su segundo
+            factor. Siempre presente, incluso cuando el servidor no tiene
+            TOTP_ENCRYPTION_KEY configurada (en ese caso, siempre false).
 
     JWKS:
       type: object

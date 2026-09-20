@@ -374,14 +374,17 @@ func TestRouter_Me_IncludesUsernameAndRUT(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /me: status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	var resp map[string]string
+	var resp map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
 	for _, field := range []string{"id", "email", "username", "rut"} {
-		if resp[field] == "" {
+		if s, _ := resp[field].(string); s == "" {
 			t.Errorf("GET /me response missing non-empty %q: %v", field, resp)
 		}
+	}
+	if _, ok := resp["totp_enabled"].(bool); !ok {
+		t.Errorf("GET /me response missing boolean totp_enabled: %v", resp)
 	}
 }
 
