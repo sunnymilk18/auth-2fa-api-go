@@ -27,6 +27,14 @@ func newTestHandlers(t *testing.T) (*auth.Handlers, *auth.Service, *auth.TokenMa
 	return auth.NewHandlers(svc), svc, tokens, mailer, apiClientID
 }
 
+// newTestHandlersWithChoice is newTestHandlers but with the first-login
+// "choose your method" flow enabled — see newTestServiceWithChoice.
+func newTestHandlersWithChoice(t *testing.T) (*auth.Handlers, *auth.Service, *auth.TokenManager, *testutil.FakeMailer, string) {
+	t.Helper()
+	svc, tokens, mailer, apiClientID := newTestServiceWithChoice(t)
+	return auth.NewHandlers(svc), svc, tokens, mailer, apiClientID
+}
+
 func withAPIClient(req *http.Request, apiClientID string) *http.Request {
 	return req.WithContext(auth.ContextWithAPIClient(req.Context(), apiClientID))
 }
@@ -400,7 +408,7 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -604,7 +612,7 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -792,5 +800,154 @@ func TestHandler_EnrollThenConfirmTOTP_FullFlow(t *testing.T) {
 	}
 	if len(mailer.Sent()) != sentBeforeFallback+1 {
 		t.Fatalf("Login after DisableTOTP: want a new OTP email, got %d -> %d sent", sentBeforeFallback, len(mailer.Sent()))
+	}
+}
+
+// --- First-login "choose email or authenticator" over HTTP ---
+
+func TestHandler_Login_FirstTime_NeedsSetup(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlersWithChoice(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	sentBefore := len(mailer.Sent())
+
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	rec := httptest.NewRecorder()
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("Login status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	body := decodeJSON(t, rec)
+	if needs, _ := body["needs_2fa_setup"].(bool); !needs {
+		t.Fatalf("Login response needs_2fa_setup = %v, want true: %v", body["needs_2fa_setup"], body)
+	}
+	if body["login_token"] == "" || body["login_token"] == nil {
+		t.Fatalf("Login response missing login_token: %v", body)
+	}
+	if len(mailer.Sent()) != sentBefore {
+		t.Fatalf("first-time Login must not send an OTP email yet, got %d -> %d sent", sentBefore, len(mailer.Sent()))
+	}
+}
+
+func TestHandler_SendLoginEmailCode_CompletesFirstLogin(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlersWithChoice(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+	loginBody := decodeJSON(t, loginRec)
+	loginToken, _ := loginBody["login_token"].(string)
+	if loginToken == "" {
+		t.Fatalf("Login response missing login_token: %v", loginBody)
+	}
+
+	sendReq := httptest.NewRequest(http.MethodPost, "/auth/login/send-email-code", jsonBody(t, map[string]string{"login_token": loginToken}))
+	sendRec := httptest.NewRecorder()
+	h.SendLoginEmailCode(sendRec, sendReq)
+	if sendRec.Code != http.StatusOK {
+		t.Fatalf("SendLoginEmailCode status = %d, want %d, body=%s", sendRec.Code, http.StatusOK, sendRec.Body.String())
+	}
+
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("SendLoginEmailCode: no email was sent")
+	}
+	code := testutil.ExtractOTPCode(sent.Body)
+	if code == "" {
+		t.Fatalf("could not find an OTP code in email body: %q", sent.Body)
+	}
+
+	verifyReq := httptest.NewRequest(http.MethodPost, "/auth/verify-otp", jsonBody(t, map[string]string{
+		"login_token": loginToken, "code": code,
+	}))
+	verifyRec := httptest.NewRecorder()
+	h.VerifyOTP(verifyRec, verifyReq)
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("VerifyOTP status = %d, want %d, body=%s", verifyRec.Code, http.StatusOK, verifyRec.Body.String())
+	}
+}
+
+func TestHandler_SendLoginEmailCode_UnknownToken(t *testing.T) {
+	h, _, _, _, _ := newTestHandlersWithChoice(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/login/send-email-code", jsonBody(t, map[string]string{"login_token": "does-not-exist"}))
+	rec := httptest.NewRecorder()
+	h.SendLoginEmailCode(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusUnauthorized, rec.Body.String())
+	}
+}
+
+// The "authenticator app" branch of the first-login choice: EnrollTOTP and
+// ConfirmTOTP called with a login_token instead of a Bearer token —
+// confirming completes the login directly (200 + tokens), unlike the
+// Bearer-authenticated settings-screen path (204, no tokens) already
+// covered by TestHandler_EnrollThenConfirmTOTP_FullFlow.
+func TestHandler_EnrollAndConfirmTOTP_ViaLoginToken_CompletesFirstLogin(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlersWithChoice(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginReq := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	loginRec := httptest.NewRecorder()
+	h.Login(loginRec, loginReq)
+	loginBody := decodeJSON(t, loginRec)
+	loginToken, _ := loginBody["login_token"].(string)
+	if loginToken == "" {
+		t.Fatalf("Login response missing login_token: %v", loginBody)
+	}
+
+	// No Authorization header at all here — proves this really goes
+	// through the login_token path, not context left over from something
+	// else.
+	enrollReq := httptest.NewRequest(http.MethodPost, "/auth/totp/enroll", jsonBody(t, map[string]string{"login_token": loginToken}))
+	enrollRec := httptest.NewRecorder()
+	h.EnrollTOTP(enrollRec, enrollReq)
+	if enrollRec.Code != http.StatusOK {
+		t.Fatalf("EnrollTOTP (login_token mode) status = %d, want %d, body=%s", enrollRec.Code, http.StatusOK, enrollRec.Body.String())
+	}
+	enrollBody := decodeJSON(t, enrollRec)
+	otpauthURL, _ := enrollBody["otpauth_url"].(string)
+	if otpauthURL == "" {
+		t.Fatalf("EnrollTOTP response missing otpauth_url: %v", enrollBody)
+	}
+
+	code := totpCodeFromOTPAuthURL(t, otpauthURL)
+	confirmReq := httptest.NewRequest(http.MethodPost, "/auth/totp/confirm", jsonBody(t, map[string]string{
+		"login_token": loginToken, "code": code,
+	}))
+	confirmRec := httptest.NewRecorder()
+	h.ConfirmTOTP(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("ConfirmTOTP (login_token mode) status = %d, want %d, body=%s", confirmRec.Code, http.StatusOK, confirmRec.Body.String())
+	}
+	confirmBody := decodeJSON(t, confirmRec)
+	if confirmBody["access_token"] == "" || confirmBody["access_token"] == nil {
+		t.Fatalf("ConfirmTOTP (login_token mode) response missing access_token: %v", confirmBody)
+	}
+	if confirmBody["refresh_token"] == "" || confirmBody["refresh_token"] == nil {
+		t.Fatalf("ConfirmTOTP (login_token mode) response missing refresh_token: %v", confirmBody)
+	}
+}
+
+func TestHandler_EnrollTOTP_NoBearerNoLoginToken_Unauthorized(t *testing.T) {
+	h, _, _, _, _ := newTestHandlersWithChoice(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/totp/enroll", nil)
+	rec := httptest.NewRecorder()
+	h.EnrollTOTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }

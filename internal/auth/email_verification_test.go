@@ -29,7 +29,7 @@ func TestEmailVerification_BlocksLoginUntilConfirmed(t *testing.T) {
 
 	// Correct password, but the account isn't verified yet — login must be
 	// refused rather than silently proceeding.
-	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrEmailNotVerified {
+	if _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrEmailNotVerified {
 		t.Fatalf("LoginStep1 before verifying: err = %v, want %v", err, auth.ErrEmailNotVerified)
 	}
 
@@ -38,7 +38,7 @@ func TestEmailVerification_BlocksLoginUntilConfirmed(t *testing.T) {
 	}
 
 	// Now it works.
-	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
 		t.Fatalf("LoginStep1 after verifying: unexpected error %v", err)
 	}
 }

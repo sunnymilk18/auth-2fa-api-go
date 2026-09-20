@@ -255,6 +255,12 @@ func (s *Service) DisableTOTP(ctx context.Context, userID string) error {
 	return s.repo.DisableTOTP(ctx, userID)
 }
 
+// MarkTwoFactorMethodChosen is a thin passthrough — see
+// Repository.MarkTwoFactorMethodChosen's doc comment.
+func (s *Service) MarkTwoFactorMethodChosen(ctx context.Context, userID string) error {
+	return s.repo.MarkTwoFactorMethodChosen(ctx, userID)
+}
+
 // Ban deactivates an account: VerifyPassword refuses it from then on (same
 // path an already-deactivated account takes today), and auth.Service.
 // DeviceLogin refuses its trusted devices too. Deliberately manual only —

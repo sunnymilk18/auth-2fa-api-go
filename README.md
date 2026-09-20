@@ -29,7 +29,9 @@ Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#m
    - `email`: formato validado (un solo "@", dominio con punto, sin espacios) — no alcanza con que no esté vacío.
    - `username`: 8-32 caracteres, no puede tener forma de rut (ni siquiera con puntos/guiones — `"1234.5678"` también se rechaza) ni contener "@" (ver por qué en el paso 2), y no tiene que ser único entre personas — si ya está tomado, el registro falla con `409` sugiriendo una alternativa libre (ej. `"el usuario 'juan.perez' ya está en uso, probá con 'juan.perez2'"`).
    - `rut`: documento de identidad chileno, único por sistema, validado con el dígito verificador (módulo 11) — acepta cualquier formato de entrada (`12.345.678-5`, `12345678-5`, `123456785`).
-2. `POST /auth/login` — valida `identifier` + `password`. `identifier` acepta el email, el username **o** el rut de la cuenta — el backend prueba las tres columnas en una sola consulta (`email = ? OR username = ? OR rut = ?`), sin adivinar antes cuál es cuál (nada que el cliente tenga que indicar aparte: un solo campo, sin selector de "con qué querés loguear"). Es justamente por esto que `username` no puede tener forma de rut ni contener "@": si se permitiera, el username de una persona podría coincidir con el rut o el email real de otra, y esa consulta ya no sería segura. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué. Si todo está en orden, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
+2. `POST /auth/login` — valida `identifier` + `password`. `identifier` acepta el email, el username **o** el rut de la cuenta — el backend prueba las tres columnas en una sola consulta (`email = ? OR username = ? OR rut = ?`), sin adivinar antes cuál es cuál (nada que el cliente tenga que indicar aparte: un solo campo, sin selector de "con qué querés loguear"). Es justamente por esto que `username` no puede tener forma de rut ni contener "@": si se permitiera, el username de una persona podría coincidir con el rut o el email real de otra, y esa consulta ya no sería segura. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué.
+   - **Primer login de la cuenta** (y solo si el servidor tiene `TOTP_ENCRYPTION_KEY` configurada — ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)): no manda ningún código todavía. La respuesta trae `needs_2fa_setup: true` + un `login_token` — el cliente le muestra al usuario la elección ("¿correo o app autenticadora?") y sigue por uno de los dos caminos descritos ahí. Esto pasa una sola vez por cuenta.
+   - **Cualquier otro caso** (ya eligió método antes, o el servidor no tiene TOTP configurada): genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve `login_token` (`needs_2fa_setup: false`) — el comportamiento de siempre.
 3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`. El mismo endpoint sirve tanto si la cuenta usa el código por correo como si activó una app autenticadora (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional) más abajo) — el cliente no necesita saber cuál de los dos aplica, el paso 2 ya decide eso por dentro.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
@@ -62,13 +64,29 @@ A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocult
 
 ### Verificación por app autenticadora (TOTP, opcional)
 
-Alternativa al código por correo del paso 2/3 — cada cuenta la activa (o no) por su cuenta, no es algo que el sistema consumidor elija de antemano. Requiere `TOTP_ENCRYPTION_KEY` configurada (ver [Variables opcionales](#variables-opcionales)); si no está seteada, estas rutas ni siquiera existen (404, mismo criterio que `ADMIN_API_TOKEN`).
+Alternativa al código por correo — cada cuenta la elige (o no) por su cuenta, no es algo que el sistema consumidor decida de antemano. Requiere `TOTP_ENCRYPTION_KEY` configurada (ver [Variables opcionales](#variables-opcionales)); si no está seteada, estas rutas ni siquiera existen (404, mismo criterio que `ADMIN_API_TOKEN`) y `/auth/login` nunca ofrece la elección — se comporta exactamente como si esta sección no existiera.
 
-15. `POST /auth/totp/enroll` (protegido, requiere un login completo previo) — genera un secreto nuevo para la cuenta y devuelve `otpauth_url`, para renderizar como código QR (Google Authenticator, Authy, etc. lo escanean directo) o mostrar como texto para carga manual. Todavía no queda activo para el login — ver el paso siguiente.
-16. `POST /auth/totp/confirm` (protegido) — recibe `code` (el que la app ya está mostrando tras escanear el QR). Si coincide, activa la app autenticadora como segundo factor de esa cuenta: de ahí en más, el login de esa cuenta salta el correo por completo y `/auth/verify-otp` valida contra la app en su lugar.
-17. `POST /auth/totp/disable` (protegido) — desactiva la app autenticadora; el login de esa cuenta vuelve a usar el código por correo. No pide el código de la app para desactivarla, mismo criterio que revocar un dispositivo de confianza — alcanza con una sesión ya autenticada.
+`/auth/totp/enroll` y `/auth/totp/confirm` aceptan **dos formas distintas** de identificar la cuenta, según el momento:
+
+- **`Authorization: Bearer <access_token>`** — cambiar de método más adelante, desde una pantalla de "Seguridad de mi cuenta" ya logueado. `/confirm` responde `204`, sin tokens (la sesión ya existe).
+- **`{"login_token": "..."}` en el body** — eligiendo el método en el primer login de la cuenta (ver abajo), antes de que exista ningún `access_token` todavía. `/confirm` responde `200` con `access_token` + `refresh_token` directo — confirmar el código activa TOTP **y** completa el login en un solo paso, sin pasar por `/auth/verify-otp`.
+
+**Primer login de una cuenta, paso a paso** (solo la primera vez — ver el paso 2 de arriba):
+
+15. `POST /auth/login` devuelve `needs_2fa_setup: true` + `login_token`, sin mandar ningún correo. El cliente le muestra al usuario la elección.
+16. Si elige **correo**: `POST /auth/login/send-email-code` con ese mismo `login_token` — recién ahí se manda el código, y de ahí en más el flujo sigue normal con `/auth/verify-otp` (mismo `login_token`, sin necesidad de uno nuevo).
+17. Si elige **app autenticadora**: `POST /auth/totp/enroll` con `{"login_token": "..."}` (en vez de `Authorization: Bearer`) → devuelve `otpauth_url` para el QR → `POST /auth/totp/confirm` con `{"login_token": "...", "code": "..."}` → si coincide, activa TOTP y entrega `access_token` + `refresh_token` ahí mismo.
+18. Cualquiera de los dos caminos marca la elección como hecha — todos los logins siguientes de esa cuenta van directo al método elegido, sin volver a mostrar la pantalla de elección.
+
+**Cambiar de método más adelante** (ya logueado, en cualquier momento):
+
+19. `POST /auth/totp/enroll` (protegido, con `Authorization: Bearer`) — genera un secreto nuevo y devuelve `otpauth_url`. Todavía no queda activo — ver el paso siguiente.
+20. `POST /auth/totp/confirm` (protegido) — recibe `code`. Si coincide, activa la app autenticadora: de ahí en más, el login de esa cuenta salta el correo por completo y `/auth/verify-otp` valida contra la app en su lugar.
+21. `POST /auth/totp/disable` (protegido) — desactiva la app autenticadora; el login vuelve a usar el código por correo. No pide el código de la app para desactivarla, mismo criterio que revocar un dispositivo de confianza — alcanza con una sesión ya autenticada.
 
 El secreto de cada cuenta se guarda cifrado (`AES-256-GCM`) en la base, nunca en texto plano — a diferencia de la contraseña (que se guarda hasheada, de un solo sentido), acá el servidor necesita poder recuperar el secreto real para calcular si un código es válido en este momento, así que un hash no alcanza.
+
+**Cuentas que ya existían antes de activar esta función**: la migración que agrega la elección de método marca automáticamente como "ya elegida" (correo) a toda cuenta que ya existiera en ese momento — nadie que ya usaba la API antes ve la pantalla de elección de golpe en su próximo login. Solo las cuentas registradas después empiezan a verla.
 
 ## Requisitos previos
 
@@ -281,18 +299,49 @@ curl -X POST http://localhost:8080/auth/verify-email/confirm \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"email":"tucorreo@example.com","code":"<el del correo>"}'
 
-# 3. Login (dispara el envío del código OTP por email) — "identifier" acepta
-# el email, el username o el rut indistintamente, no hace falta indicar cuál es.
+# 3. Login — "identifier" acepta el email, el username o el rut
+# indistintamente, no hace falta indicar cuál es.
 curl -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"identifier":"tucorreo@example.com","password":"unaClaveSegura123"}'
-# -> devuelve { "login_token": "...", "message": "..." }
+# -> Sin TOTP_ENCRYPTION_KEY configurada (el caso de abajo), manda el OTP
+# por correo directo: { "login_token": "...", "needs_2fa_setup": false, ... }
+#
+# -> CON TOTP_ENCRYPTION_KEY configurada, y solo en el primer login de esta
+# cuenta, en cambio devuelve { "login_token": "...", "needs_2fa_setup": true }
+# sin mandar ningún correo todavía — ver "Elegir método (primer login)" más
+# abajo antes de seguir con el paso 4.
 
 # 4. Verificar el código recibido por correo
 curl -X POST http://localhost:8080/auth/verify-otp \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"login_token":"<el del paso 3>","code":"<el del correo>"}'
 # -> devuelve { "access_token": "...", "refresh_token": "...", "token_type": "Bearer" }
+
+# --- Elegir método (solo el primer login de la cuenta, y solo si el
+# servidor tiene TOTP_ENCRYPTION_KEY configurada — ver paso 3) ---
+
+# 4a. Elige correo: pide el código con el login_token del paso 3, y de ahí
+# el flujo sigue normal con el paso 4 de arriba (mismo login_token).
+curl -X POST http://localhost:8080/auth/login/send-email-code \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"login_token":"<el del paso 3>"}'
+
+# 4b. O elige app autenticadora: enroll + confirm usando el login_token del
+# paso 3 en vez de un Authorization: Bearer (todavía no existe uno).
+curl -X POST http://localhost:8080/auth/totp/enroll \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"login_token":"<el del paso 3>"}'
+# -> devuelve { "otpauth_url": "otpauth://totp/...?secret=...&issuer=..." }
+# Renderizar esa URL como código QR (o pasar el "secret" a mano) y
+# escanearla con Google Authenticator/Authy antes de confirmar.
+
+curl -X POST http://localhost:8080/auth/totp/confirm \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
+  -d '{"login_token":"<el del paso 3>","code":"<el que muestra la app>"}'
+# -> 200 con { "access_token": "...", "refresh_token": "...", "token_type": "Bearer" }
+# directo — activa TOTP y completa el login en un solo paso, no hace falta
+# pasar por /auth/verify-otp acá.
 
 # 5. Consumir un endpoint protegido (no necesita X-API-Key, solo el JWT)
 curl http://localhost:8080/me -H "Authorization: Bearer <access_token>"
@@ -309,13 +358,12 @@ curl -X POST http://localhost:8080/auth/devices/login \
   -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 6>","pin":"123456"}'
 # -> devuelve access_token + refresh_token + un device_token rotado (reemplaza al anterior)
 
-# 8. Activar la app autenticadora como alternativa al OTP por correo
-# (requiere TOTP_ENCRYPTION_KEY configurada — ver Variables opcionales).
+# 8. Cambiar de método MÁS ADELANTE, ya logueado (a diferencia del paso 4b,
+# acá se usa Authorization: Bearer en vez de login_token, y confirmar no
+# devuelve tokens nuevos — la sesión ya existe).
 curl -X POST http://localhost:8080/auth/totp/enroll \
   -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>"
 # -> devuelve { "otpauth_url": "otpauth://totp/...?secret=...&issuer=..." }
-# Renderizar esa URL como código QR (o pasar el "secret" a mano) y escanearla
-# con Google Authenticator/Authy antes del siguiente paso.
 
 curl -X POST http://localhost:8080/auth/totp/confirm \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>" \

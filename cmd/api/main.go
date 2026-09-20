@@ -100,12 +100,12 @@ func run(logger *slog.Logger) error {
 
 	resendMailer := mailer.NewResendMailer(cfg.ResendAPIKey, cfg.ResendFrom)
 
-	totpManager, totpLoginStore, err := setupTOTP(cfg, rdb)
+	totpManager, totpLoginStore, twoFactorSetupStore, err := setupTOTP(cfg, rdb)
 	if err != nil {
 		return err
 	}
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore)
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
@@ -192,23 +192,24 @@ func addPreviousVerificationKey(tokenMgr *auth.TokenManager, cfg *config.Config)
 	return nil
 }
 
-// setupTOTP builds the TOTP manager/login store when TOTP_ENCRYPTION_KEY is
-// configured — see Config.TOTPEncryptionKeyBase64's doc comment for why
-// this is opt-in rather than always-on. Both return values are nil (not an
-// error) when unset; auth.Service treats a nil totp/totpLogin as "feature
-// not configured" rather than requiring every caller here to branch on it.
-func setupTOTP(cfg *config.Config, rdb *redis.Client) (*auth.TOTPManager, *auth.TOTPLoginStore, error) {
+// setupTOTP builds the TOTP manager/login store/setup store when
+// TOTP_ENCRYPTION_KEY is configured — see Config.TOTPEncryptionKeyBase64's
+// doc comment for why this is opt-in rather than always-on. All three
+// return values are nil (not an error) when unset; auth.Service treats a
+// nil totp/totpLogin/twoFactorSetup as "feature not configured" rather than
+// requiring every caller here to branch on it.
+func setupTOTP(cfg *config.Config, rdb *redis.Client) (*auth.TOTPManager, *auth.TOTPLoginStore, *auth.TwoFactorSetupStore, error) {
 	if cfg.TOTPEncryptionKeyBase64 == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 
 	key, err := base64.StdEncoding.DecodeString(cfg.TOTPEncryptionKeyBase64)
 	if err != nil {
-		return nil, nil, fmt.Errorf("decoding TOTP_ENCRYPTION_KEY: %w", err)
+		return nil, nil, nil, fmt.Errorf("decoding TOTP_ENCRYPTION_KEY: %w", err)
 	}
 	totpManager, err := auth.NewTOTPManager(cfg.TOTPIssuer, key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("setting up totp: %w", err)
+		return nil, nil, nil, fmt.Errorf("setting up totp: %w", err)
 	}
-	return totpManager, auth.NewTOTPLoginStore(rdb, cfg.OTPTTL), nil
+	return totpManager, auth.NewTOTPLoginStore(rdb, cfg.OTPTTL), auth.NewTwoFactorSetupStore(rdb, cfg.OTPTTL), nil
 }

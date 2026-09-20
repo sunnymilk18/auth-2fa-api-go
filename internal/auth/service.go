@@ -41,6 +41,13 @@ type Service struct {
 	// non-nil before reaching it.
 	totp      *TOTPManager
 	totpLogin *TOTPLoginStore
+
+	// twoFactorSetup is nil under the exact same condition as totp/totpLogin
+	// (TOTP_ENCRYPTION_KEY unset) — when nil, LoginStep1 never offers the
+	// first-login "choose your method" screen at all (there's nothing to
+	// choose between if TOTP isn't available on this deployment), and just
+	// behaves exactly as it did before this feature existed.
+	twoFactorSetup *TwoFactorSetupStore
 }
 
 func NewService(
@@ -59,6 +66,7 @@ func NewService(
 	emailVerificationTTL time.Duration,
 	totpManager *TOTPManager,
 	totpLogin *TOTPLoginStore,
+	twoFactorSetup *TwoFactorSetupStore,
 ) *Service {
 	return &Service{
 		users:                users,
@@ -76,6 +84,7 @@ func NewService(
 		emailVerificationTTL: emailVerificationTTL,
 		totp:                 totpManager,
 		totpLogin:            totpLogin,
+		twoFactorSetup:       twoFactorSetup,
 	}
 }
 
@@ -165,6 +174,17 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // one was used, it returns a login token the client must present in
 // LoginStep2 along with the code — the code itself is never returned here.
 //
+// needsSetup is true exactly once per account: the very first time its
+// password checks out, if it has never chosen a second-factor method AND
+// this deployment actually has TOTP configured (nothing to choose between
+// otherwise). When true, loginToken is NOT an OTP/TOTP session — no code
+// was generated or emailed — it identifies a pending choice instead, and
+// the client is expected to call either SendLoginEmailCode (picks email) or
+// EnrollTOTP/ConfirmTOTP with that same token (picks the authenticator
+// app), not LoginStep2 directly. Every login after the first behaves
+// exactly as before (needsSetup always false), since whichever path gets
+// taken marks the account's choice as made.
+//
 // Guards against password-guessing spread across many IPs against one
 // account (see LoginAttemptLimiter) — checked before, and recorded after,
 // VerifyPassword itself, so an account that doesn't exist is throttled
@@ -184,7 +204,7 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // the raw identifier string — same as every attempt worked before this,
 // and still throttles guessing against nonexistent accounts the same way
 // as a real one, which matters for the same enumeration reasons.
-func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, err error) {
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, err error) {
 	lockoutKey := identifier
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
 		lockoutKey = resolved.ID
@@ -192,10 +212,10 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 
 	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if locked {
-		return "", ErrTooManyFailedLogins
+		return "", false, ErrTooManyFailedLogins
 	}
 
 	u, err := s.users.VerifyPassword(ctx, apiClientID, identifier, password)
@@ -205,7 +225,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// wrong-password response into a 500.
 			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, lockoutKey)
 		}
-		return "", err
+		return "", false, err
 	}
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
@@ -220,7 +240,18 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	// otherwise logs in exactly as normal, emailing that real owner an OTP
 	// code on every attempt they never asked for.
 	if !u.EmailVerified {
-		return "", ErrEmailNotVerified
+		return "", false, ErrEmailNotVerified
+	}
+
+	// First login ever, and there's actually something to choose between —
+	// hand back a pending-choice token instead of defaulting to email. See
+	// this method's doc comment for the full shape of what happens next.
+	if !u.TwoFactorMethodChosen && s.twoFactorSetup != nil {
+		token, err := s.twoFactorSetup.StartSession(ctx, u.ID, u.APIClientID, u.Email)
+		if err != nil {
+			return "", false, err
+		}
+		return token, true, nil
 	}
 
 	// Accounts that confirmed an authenticator app (see
@@ -235,14 +266,25 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// deployment after some accounts already enrolled — not a
 			// normal state, but worth a clear error over a nil-pointer
 			// panic or silently falling back to a weaker factor.
-			return "", ErrTOTPNotConfigured
+			return "", false, ErrTOTPNotConfigured
 		}
-		return s.totpLogin.StartSession(ctx, u.ID, u.APIClientID, u.Email)
+		token, err := s.totpLogin.StartSession(ctx, u.ID, u.APIClientID, u.Email)
+		return token, false, err
 	}
 
 	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+
+	// Idempotent, and only actually writes for the (rare) case of an
+	// account whose first-ever login landed here directly because TOTP
+	// isn't configured on this deployment at all — every other caller of
+	// this path already has TwoFactorMethodChosen = true, so the guard
+	// skips the query entirely rather than issuing a no-op UPDATE on every
+	// single normal login forever.
+	if !u.TwoFactorMethodChosen {
+		_ = s.users.MarkTwoFactorMethodChosen(ctx, u.ID)
 	}
 
 	body := fmt.Sprintf(
@@ -250,10 +292,10 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		code, s.otpTTL.String(),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
-		return "", fmt.Errorf("sending otp email: %w", err)
+		return "", false, fmt.Errorf("sending otp email: %w", err)
 	}
 
-	return loginToken, nil
+	return loginToken, false, nil
 }
 
 // LoginStep2 verifies the code — emailed OTP or, for accounts with an
@@ -278,53 +320,6 @@ func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (acce
 		return "", "", err
 	}
 	return s.issueTokenPair(ctx, userID, apiClientID, email)
-}
-
-// verifyTOTPLogin checks code against sess's account's TOTP secret,
-// rate-limited the same way password guesses are (see loginAttempts) so a
-// login token alone (already gated behind a correct password) can't be
-// used to brute-force the 10^6 possible codes. Keyed by "totp:"+loginToken
-// rather than the account id — this counter is about how many guesses this
-// one login attempt gets, not the account's overall failed-login history,
-// which loginAttempts already tracks separately in LoginStep1.
-func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess totpLoginSession, code string) (accessToken, refreshToken string, err error) {
-	lockoutKey := "totp:" + loginToken
-
-	locked, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
-	if err != nil {
-		return "", "", err
-	}
-	if locked {
-		_ = s.totpLogin.Consume(ctx, loginToken)
-		return "", "", ErrTooManyAttempts
-	}
-
-	encryptedSecret, enabled, err := s.users.GetTOTPSecret(ctx, sess.UserID)
-	if err != nil {
-		return "", "", err
-	}
-	if !enabled || encryptedSecret == "" {
-		// The account disabled TOTP after LoginStep1 issued this token
-		// (e.g. from another device/tab) — nothing left to verify against.
-		_ = s.totpLogin.Consume(ctx, loginToken)
-		return "", "", ErrInvalidTOTPCode
-	}
-
-	secret, err := s.totp.Decrypt(encryptedSecret)
-	if err != nil {
-		return "", "", err
-	}
-
-	if !s.totp.ValidateCode(secret, code) {
-		_ = s.loginAttempts.RecordFailure(ctx, sess.APIClientID, lockoutKey)
-		return "", "", ErrInvalidTOTPCode
-	}
-
-	_ = s.loginAttempts.Reset(ctx, sess.APIClientID, lockoutKey)
-	if err := s.totpLogin.Consume(ctx, loginToken); err != nil {
-		return "", "", err
-	}
-	return s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
 }
 
 // issueTokenPair mints an access+refresh token pair for an already-verified
@@ -493,71 +488,6 @@ func (s *Service) RevokeDevice(ctx context.Context, userID, deviceRowID string) 
 }
 
 var ErrUnauthorized = errors.New("unauthorized")
-
-// ErrTOTPNotConfigured is returned by every TOTP-related method when this
-// deployment never set TOTP_ENCRYPTION_KEY — the feature is opt-in at the
-// deployment level (see cmd/api/main.go), same as ADMIN_API_TOKEN gating
-// /admin/*: absent config means the capability doesn't exist here, not
-// "exists but insecure".
-var ErrTOTPNotConfigured = errors.New("totp is not configured on this server")
-
-// StartTOTPEnrollment generates a new TOTP secret for the already
-// password+OTP-authenticated userID and stores it encrypted, but NOT yet
-// enabled — LoginStep1 won't start expecting a TOTP code for this account
-// until ConfirmTOTPEnrollment proves the user actually scanned the QR and
-// their app is producing matching codes. Returns the otpauth:// URL a
-// client renders as a QR code (or shows as a manual-entry secret).
-func (s *Service) StartTOTPEnrollment(ctx context.Context, userID, email string) (otpauthURL string, err error) {
-	if s.totp == nil {
-		return "", ErrTOTPNotConfigured
-	}
-
-	secret, otpauthURL, err := s.totp.GenerateSecret(email)
-	if err != nil {
-		return "", err
-	}
-	encrypted, err := s.totp.Encrypt(secret)
-	if err != nil {
-		return "", err
-	}
-	if err := s.users.SetPendingTOTPSecret(ctx, userID, encrypted); err != nil {
-		return "", err
-	}
-	return otpauthURL, nil
-}
-
-// ConfirmTOTPEnrollment validates code against the pending secret set by
-// StartTOTPEnrollment and, on success, enables it — from then on,
-// LoginStep1 sends this account through the TOTP path instead of emailing
-// a code.
-func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID, code string) error {
-	if s.totp == nil {
-		return ErrTOTPNotConfigured
-	}
-
-	encryptedSecret, _, err := s.users.GetTOTPSecret(ctx, userID)
-	if err != nil {
-		return err
-	}
-	if encryptedSecret == "" {
-		return ErrInvalidTOTPCode
-	}
-	secret, err := s.totp.Decrypt(encryptedSecret)
-	if err != nil {
-		return err
-	}
-	if !s.totp.ValidateCode(secret, code) {
-		return ErrInvalidTOTPCode
-	}
-	return s.users.EnableTOTP(ctx, userID)
-}
-
-// DisableTOTP turns the TOTP second factor off — login falls back to the
-// email OTP flow. No code confirmation required, same bar as RevokeDevice:
-// a valid access token (already-authenticated session) is enough.
-func (s *Service) DisableTOTP(ctx context.Context, userID string) error {
-	return s.users.DisableTOTP(ctx, userID)
-}
 
 // ErrAccountBanned is returned by DeviceLogin when the account behind an
 // otherwise-valid device_token+pin has been deactivated (see

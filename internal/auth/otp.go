@@ -49,14 +49,26 @@ func NewOTPStore(rdb *redis.Client, ttl time.Duration, maxTries, codeLen int) *O
 // client) and the plain code (to email to the user — never returned to the
 // caller of this API).
 func (s *OTPStore) StartSession(ctx context.Context, userID, apiClientID, email string) (loginToken, code string, err error) {
-	code, err = generateNumericCode(s.codeLen)
-	if err != nil {
-		return "", "", fmt.Errorf("generating otp code: %w", err)
-	}
-
 	loginToken, err = generateToken(32)
 	if err != nil {
 		return "", "", fmt.Errorf("generating login token: %w", err)
+	}
+	code, err = s.StartSessionWithToken(ctx, loginToken, userID, apiClientID, email)
+	if err != nil {
+		return "", "", err
+	}
+	return loginToken, code, nil
+}
+
+// StartSessionWithToken is StartSession but under a caller-supplied token
+// instead of a freshly generated one — used by the first-login "choose your
+// method" flow (see Service.SendLoginEmailCode) to keep handing the client
+// the exact same login_token throughout, rather than swapping it out midway
+// once a method is picked.
+func (s *OTPStore) StartSessionWithToken(ctx context.Context, loginToken, userID, apiClientID, email string) (code string, err error) {
+	code, err = generateNumericCode(s.codeLen)
+	if err != nil {
+		return "", fmt.Errorf("generating otp code: %w", err)
 	}
 
 	sess := loginSession{
@@ -68,14 +80,14 @@ func (s *OTPStore) StartSession(ctx context.Context, userID, apiClientID, email 
 	}
 	data, err := json.Marshal(sess)
 	if err != nil {
-		return "", "", fmt.Errorf("marshaling login session: %w", err)
+		return "", fmt.Errorf("marshaling login session: %w", err)
 	}
 
 	if err := s.rdb.Set(ctx, sessionKey(loginToken), data, s.ttl).Err(); err != nil {
-		return "", "", fmt.Errorf("storing login session: %w", err)
+		return "", fmt.Errorf("storing login session: %w", err)
 	}
 
-	return loginToken, code, nil
+	return code, nil
 }
 
 // verifyCodeScript does the whole read-compare-increment-write in one

@@ -35,10 +35,10 @@ func TestPasswordReset_FullFlow(t *testing.T) {
 	}
 
 	// Old password no longer works; the new one does.
-	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123"); err == nil {
+	if _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123"); err == nil {
 		t.Fatal("LoginStep1 with the old password: want an error, got nil")
 	}
-	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "new-password-456"); err != nil {
+	if _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "new-password-456"); err != nil {
 		t.Fatalf("LoginStep1 with the new password: unexpected error %v", err)
 	}
 }
@@ -160,7 +160,7 @@ func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
-	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
+	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "old-password-123")
 
-	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
+	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "old-password-123")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

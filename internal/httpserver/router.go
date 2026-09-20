@@ -109,6 +109,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
 	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -132,19 +133,38 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		r.With(verifyEmailConfirmLimiter.Middleware).Post("/verify-email/confirm", authHandlers.ConfirmEmailVerification)
 		r.With(verifyEmailResendLimiter.Middleware).Post("/verify-email/resend", authHandlers.ResendEmailVerification)
 
+		if totpEnabled {
+			// First-login "choose email or authenticator" screen (see
+			// auth.Service.LoginStep1's doc comment) — the "email" branch.
+			// No Bearer token exists yet at this point, only the pending
+			// setup login_token from /auth/login.
+			r.With(sendLoginEmailCodeLimiter.Middleware).Post("/login/send-email-code", authHandlers.SendLoginEmailCode)
+
+			// Authenticator app (Google Authenticator, Authy, etc.) as an
+			// opt-in alternative to the emailed OTP. EnrollTOTP/ConfirmTOTP
+			// accept EITHER a Bearer token (changing method later, from an
+			// already-authenticated settings screen) OR a login_token (the
+			// first-login setup flow's "authenticator" branch — no Bearer
+			// exists yet) — see middleware.OptionalAuth and auth.Handlers.
+			// EnrollTOTP's doc comments. Only registered when the server
+			// has TOTP_ENCRYPTION_KEY configured.
+			r.Group(func(r chi.Router) {
+				r.Use(middleware.OptionalAuth(tokens))
+				r.Post("/totp/enroll", authHandlers.EnrollTOTP)
+				r.With(totpConfirmLimiter.Middleware).Post("/totp/confirm", authHandlers.ConfirmTOTP)
+			})
+		}
+
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAuth(tokens))
 			r.Post("/devices/register", authHandlers.RegisterDevice)
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
 
-			// Authenticator app (Google Authenticator, Authy, etc.) as an
-			// opt-in alternative to the emailed OTP — see auth.Service.
-			// StartTOTPEnrollment's doc comment. Only registered when the
-			// server has TOTP_ENCRYPTION_KEY configured.
+			// Disabling only ever makes sense from an already-authenticated
+			// settings screen — there's no first-login equivalent of "turn
+			// off the thing I haven't set up yet".
 			if totpEnabled {
-				r.Post("/totp/enroll", authHandlers.EnrollTOTP)
-				r.With(totpConfirmLimiter.Middleware).Post("/totp/confirm", authHandlers.ConfirmTOTP)
 				r.Post("/totp/disable", authHandlers.DisableTOTP)
 			}
 		})

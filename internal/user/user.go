@@ -24,6 +24,13 @@ type User struct {
 	// needed to verify a code, via Repository.GetTOTPSecret) so it isn't
 	// floating around in every generic user lookup.
 	TOTPEnabled bool
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// TwoFactorMethodChosen is false only for an account that has never
+	// completed a login before — see auth.Service.LoginStep1's doc comment
+	// on the first-login "choose email or authenticator" screen this
+	// gates. Flips to true the first time either method actually succeeds,
+	// and stays true forever after (switching methods later, from an
+	// already-authenticated session, never resets it).
+	TwoFactorMethodChosen bool
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
 }

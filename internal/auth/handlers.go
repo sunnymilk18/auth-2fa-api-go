@@ -213,6 +213,12 @@ type loginRequest struct {
 type loginResponse struct {
 	LoginToken string `json:"login_token"`
 	Message    string `json:"message"`
+	// NeedsTwoFactorSetup is true exactly on an account's first-ever login
+	// (see auth.Service.LoginStep1's doc comment) — the client should show
+	// a "choose email or authenticator" screen instead of prompting for a
+	// code, and call SendLoginEmailCode or EnrollTOTP/ConfirmTOTP with this
+	// same login_token depending on what's picked, not VerifyOTP directly.
+	NeedsTwoFactorSetup bool `json:"needs_2fa_setup"`
 }
 
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +234,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
+	loginToken, needsSetup, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
@@ -246,9 +252,14 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	message := "código de verificación enviado por correo"
+	if needsSetup {
+		message = "elegí cómo proteger tu cuenta: correo o app autenticadora"
+	}
 	writeJSON(w, http.StatusOK, loginResponse{
-		LoginToken: loginToken,
-		Message:    "código de verificación enviado por correo",
+		LoginToken:          loginToken,
+		Message:             message,
+		NeedsTwoFactorSetup: needsSetup,
 	})
 }
 
@@ -573,103 +584,6 @@ func (h *Handlers) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("revoke device error: %v", err)
 		writeError(w, http.StatusInternalServerError, "no se pudo revocar el dispositivo")
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// --- TOTP (authenticator app) — opt-in alternative to the emailed OTP ---
-
-type totpEnrollResponse struct {
-	// OTPAuthURL is what a client renders as a QR code (or shows as a
-	// manual-entry secret) — it embeds the secret itself, so nothing else
-	// needs to be returned separately.
-	OTPAuthURL string `json:"otpauth_url"`
-}
-
-// EnrollTOTP starts activating an authenticator app for the caller's
-// account — requires a valid access token (a completed password+OTP or
-// device login), same bar as RegisterDevice. Not yet active for login until
-// ConfirmTOTP proves the code the app produces actually matches.
-func (h *Handlers) EnrollTOTP(w http.ResponseWriter, r *http.Request) {
-	userID, ok := UserIDFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "no autorizado")
-		return
-	}
-	email, ok := EmailFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "no autorizado")
-		return
-	}
-
-	otpauthURL, err := h.svc.StartTOTPEnrollment(r.Context(), userID, email)
-	if err != nil {
-		if errors.Is(err, ErrTOTPNotConfigured) {
-			writeError(w, http.StatusNotFound, "la verificación por app autenticadora no está disponible")
-			return
-		}
-		log.Printf("enroll totp error: %v", err)
-		writeError(w, http.StatusInternalServerError, "no se pudo iniciar la activación")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, totpEnrollResponse{OTPAuthURL: otpauthURL})
-}
-
-type totpConfirmRequest struct {
-	Code string `json:"code"`
-}
-
-// ConfirmTOTP finishes activating the authenticator app started by
-// EnrollTOTP — from a successful call on, LoginStep1 sends this account
-// through the TOTP path instead of emailing a code.
-func (h *Handlers) ConfirmTOTP(w http.ResponseWriter, r *http.Request) {
-	userID, ok := UserIDFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "no autorizado")
-		return
-	}
-
-	var req totpConfirmRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
-		return
-	}
-	if req.Code == "" {
-		writeError(w, http.StatusBadRequest, "el código es obligatorio")
-		return
-	}
-
-	if err := h.svc.ConfirmTOTPEnrollment(r.Context(), userID, req.Code); err != nil {
-		switch {
-		case errors.Is(err, ErrTOTPNotConfigured):
-			writeError(w, http.StatusNotFound, "la verificación por app autenticadora no está disponible")
-		case errors.Is(err, ErrInvalidTOTPCode):
-			writeError(w, http.StatusUnauthorized, "código inválido")
-		default:
-			log.Printf("confirm totp error: %v", err)
-			writeError(w, http.StatusInternalServerError, "no se pudo confirmar la activación")
-		}
-		return
-	}
-
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// DisableTOTP turns the authenticator-app factor off — login falls back to
-// the emailed OTP. No code required, same bar as RevokeDevice.
-func (h *Handlers) DisableTOTP(w http.ResponseWriter, r *http.Request) {
-	userID, ok := UserIDFromContext(r.Context())
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "no autorizado")
-		return
-	}
-
-	if err := h.svc.DisableTOTP(r.Context(), userID); err != nil {
-		log.Printf("disable totp error: %v", err)
-		writeError(w, http.StatusInternalServerError, "no se pudo desactivar")
 		return
 	}
 

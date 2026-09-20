@@ -146,7 +146,11 @@ paths:
       summary: Paso 1 del login - Verifica identifier/password y envía el código OTP por correo
       description: >
         `identifier` acepta el email, el username o el rut de la cuenta —
-        ver `LoginRequest.identifier`.
+        ver `LoginRequest.identifier`. Si es el primer login de la cuenta
+        (y el servidor tiene TOTP_ENCRYPTION_KEY configurada), no manda
+        ningún código todavía — la respuesta trae `needs_2fa_setup: true`
+        en su lugar, ver `LoginResponse` y las rutas `/auth/login/send-email-code`
+        y `/auth/totp/enroll`/`confirm` (con `login_token`).
       security:
         - apiKeyAuth: []
       requestBody:
@@ -157,7 +161,10 @@ paths:
               $ref: "#/components/schemas/LoginRequest"
       responses:
         "200":
-          description: Credenciales válidas, código enviado por email
+          description: >
+            Credenciales válidas. `needs_2fa_setup` indica si el código ya
+            se mandó por correo (false, caso normal) o si falta que el
+            cliente elija un método por primera vez (true).
           content:
             application/json:
               schema:
@@ -213,6 +220,43 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429":
           description: Demasiados intentos fallidos, se debe reiniciar el login
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login/send-email-code:
+    post:
+      tags: [totp]
+      summary: "Elige \"correo\" en la pantalla de primer login"
+      description: >
+        Solo aplica cuando /auth/login devolvió needs_2fa_setup: true. Manda
+        el código OTP por correo bajo el mismo login_token — de ahí en más
+        el flujo sigue normal con /auth/verify-otp, sin un login_token
+        distinto.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [login_token]
+              properties:
+                login_token:
+                  type: string
+      responses:
+        "200":
+          description: Código enviado por correo
+        "401":
+          description: login_token inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: La verificación por app autenticadora no está habilitada en este servidor
           content:
             application/json:
               schema:
@@ -526,13 +570,25 @@ paths:
       tags: [totp]
       summary: Inicia la activación de una app autenticadora para la cuenta
       description: >
-        Requiere un login completo previo (password + OTP, o dispositivo de
-        confianza). Genera un secreto nuevo y devuelve la URL otpauth:// para
-        renderizar como código QR — todavía no queda activo para el login
-        hasta confirmarlo con /auth/totp/confirm.
+        Identifica la cuenta de UNA de estas dos formas — nunca hace falta
+        pasar ambas: `Authorization: Bearer <access_token>` (cambiando de
+        método más adelante, ya logueado) o `login_token` en el body (la
+        pantalla de elección del primer login — ver `/auth/login`, todavía
+        no existe ningún access_token en ese momento). Genera un secreto
+        nuevo y devuelve la URL otpauth:// para renderizar como código QR —
+        todavía no queda activo hasta confirmarlo con /auth/totp/confirm.
       security:
         - apiKeyAuth: []
-          bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                login_token:
+                  type: string
+                  description: Solo para la pantalla de elección del primer login — omitir cuando se usa Authorization Bearer.
       responses:
         "200":
           description: Secreto generado
@@ -541,7 +597,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/TOTPEnrollResponse"
         "401":
-          description: Token faltante, inválido o expirado
+          description: Ni un Bearer válido ni un login_token válido fueron provistos
           content:
             application/json:
               schema:
@@ -559,12 +615,14 @@ paths:
       summary: Confirma la activación de la app autenticadora
       description: >
         Recibe el código que la app ya está mostrando tras escanear el QR de
-        /auth/totp/enroll. Si coincide, activa la app como segundo factor de
-        la cuenta — de ahí en más, el login de esa cuenta usa /auth/verify-otp
-        contra la app en vez de un código por correo.
+        /auth/totp/enroll — misma identificación dual que enroll (Bearer o
+        login_token). Si coincide, activa la app como segundo factor.
+        Con Bearer (cambiando de método, ya logueado): responde 204, sin
+        tokens. Con login_token (primer login): responde 200 con
+        access_token + refresh_token directo — activar TOTP completa el
+        login en el mismo paso, no hace falta pasar por /auth/verify-otp.
       security:
         - apiKeyAuth: []
-          bearerAuth: []
       requestBody:
         required: true
         content:
@@ -572,8 +630,14 @@ paths:
             schema:
               $ref: "#/components/schemas/TOTPConfirmRequest"
       responses:
+        "200":
+          description: "Código válido, vía login_token (primer login): login completado"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
         "204":
-          description: App autenticadora activada
+          description: "Código válido, vía Authorization Bearer: app autenticadora activada"
         "400":
           description: Falta el código
           content:
@@ -581,7 +645,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
         "401":
-          description: Código inválido, o token faltante/inválido/expirado
+          description: Código inválido, o ni un Bearer válido ni un login_token válido fueron provistos
           content:
             application/json:
               schema:
@@ -716,10 +780,20 @@ components:
       properties:
         login_token:
           type: string
-          description: Token temporal que se debe presentar junto al código OTP en /auth/verify-otp.
+          description: >
+            Si needs_2fa_setup es false: presentar junto al código OTP en
+            /auth/verify-otp. Si es true: pasar a /auth/login/send-email-code
+            o a /auth/totp/enroll (login_token en el body) según lo que
+            elija el usuario.
         message:
           type: string
           example: verification code sent to email
+        needs_2fa_setup:
+          type: boolean
+          description: >
+            true solo en el primer login de la cuenta (y solo si el
+            servidor tiene TOTP configurada) — el cliente debe mostrar la
+            elección de método en vez de pedir un código.
 
     VerifyOTPRequest:
       type: object
@@ -890,6 +964,9 @@ components:
           type: string
           description: Código de 6 dígitos mostrado por la app autenticadora.
           example: "123456"
+        login_token:
+          type: string
+          description: Solo para la pantalla de elección del primer login — omitir cuando se usa Authorization Bearer.
 
     DeviceLoginResponse:
       type: object

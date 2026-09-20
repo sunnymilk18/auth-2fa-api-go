@@ -12,10 +12,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/pquerna/otp/totp"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric/noop"
 
@@ -26,6 +28,28 @@ import (
 	"auth-2fa-api/internal/testutil"
 	"auth-2fa-api/internal/user"
 )
+
+// totpCodeFromOTPAuthURL extracts the secret embedded in an otpauth:// URL
+// and computes the code currently valid for it — standing in for "the
+// user's authenticator app" in these tests. See its twin in
+// internal/auth's own tests (service_test.go); kept separate since Go
+// doesn't share unexported test helpers across packages.
+func totpCodeFromOTPAuthURL(t *testing.T, otpauthURL string) string {
+	t.Helper()
+	u, err := url.Parse(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url %q: %v", otpauthURL, err)
+	}
+	secret := u.Query().Get("secret")
+	if secret == "" {
+		t.Fatalf("otpauth url %q has no secret param", otpauthURL)
+	}
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("computing totp code: %v", err)
+	}
+	return code
+}
 
 // testTOTPKey is a fixed 32-byte AES-256 key used only in tests.
 var testTOTPKey = []byte("0123456789abcdef0123456789abcdef")
@@ -62,7 +86,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	}
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, nil)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, testLogger())
@@ -78,6 +102,45 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	}
 
 	return r, plaintextKey, access
+}
+
+// newTestRouterWithChoice is newTestRouter but with the first-login
+// "choose your method" flow enabled (twoFactorSetup wired in, non-nil) —
+// used only by the tests exercising that flow through the real router
+// (middleware chain, rate limiters, OptionalAuth included), since wiring it
+// into newTestRouter itself would change what every other test in this
+// file gets when it registers a fresh account. Returns the router and a
+// working API key — no pre-seeded access token, since these tests each
+// drive their own first login through the real endpoints.
+func newTestRouterWithChoice(t *testing.T) (router http.Handler, apiKey string, mailer *testutil.FakeMailer) {
+	t.Helper()
+
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	_, plaintextKey := testutil.NewAPIClient(t, pool)
+
+	users := user.NewService(user.NewRepository(pool))
+	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	refresh := auth.NewRefreshRepository(pool)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	totpManager, err := auth.NewTOTPManager("test-issuer", testTOTPKey)
+	if err != nil {
+		t.Fatalf("NewTOTPManager: %v", err)
+	}
+	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
+	twoFactorSetup := auth.NewTwoFactorSetupStore(rdb, 5*time.Minute)
+	mailer = testutil.NewFakeMailer()
+
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, twoFactorSetup)
+	handlers := auth.NewHandlers(svc)
+
+	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, testLogger())
+	return r, plaintextKey, mailer
 }
 
 func doRequest(r http.Handler, method, path, apiKey, bearer string, body any) *httptest.ResponseRecorder {
@@ -187,7 +250,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil,
 	))
 	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, testLogger())
 }
@@ -449,5 +512,166 @@ func TestRouter_TOTPRoutes_UnregisteredWhenNotConfigured(t *testing.T) {
 	rec := doRequest(r, http.MethodPost, "/auth/totp/enroll", apiKey, access, nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("POST /auth/totp/enroll with TOTP not configured: status = %d, want %d (route should not exist), body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+// registerAndVerify drives a fresh account through /auth/register and
+// /auth/verify-email/confirm via real HTTP requests against r, returning
+// the email used — the shared setup every first-login-choice router test
+// needs before it can even attempt /auth/login.
+func registerAndVerify(t *testing.T, r http.Handler, apiKey string, mailer *testutil.FakeMailer) (email string) {
+	t.Helper()
+	email = "user-" + testutil.UniqueSuffix(t) + "@example.com"
+
+	regRec := doRequest(r, http.MethodPost, "/auth/register", apiKey, "", map[string]string{
+		"email": email, "password": "correcthorsebattery",
+		"username": "user-" + testutil.UniqueSuffix(t), "rut": testutil.UniqueRUT(t),
+	})
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("register: status = %d, want %d, body=%s", regRec.Code, http.StatusCreated, regRec.Body.String())
+	}
+
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("register: no verification email was sent")
+	}
+	code := testutil.ExtractVerificationCode(sent.Body)
+	if code == "" {
+		t.Fatalf("register: could not find a verification code in email body: %q", sent.Body)
+	}
+
+	verifyRec := doRequest(r, http.MethodPost, "/auth/verify-email/confirm", apiKey, "", map[string]string{
+		"email": email, "code": code,
+	})
+	if verifyRec.Code != http.StatusNoContent {
+		t.Fatalf("verify-email/confirm: status = %d, want %d, body=%s", verifyRec.Code, http.StatusNoContent, verifyRec.Body.String())
+	}
+	return email
+}
+
+// End-to-end through the real router (middleware chain, rate limiters,
+// OptionalAuth included) for the "email" branch of the first-login choice.
+func TestRouter_FirstLogin_EmailBranch_EndToEnd(t *testing.T) {
+	r, apiKey, mailer := newTestRouterWithChoice(t)
+	email := registerAndVerify(t, r, apiKey, mailer)
+	sentBeforeLogin := len(mailer.Sent())
+
+	loginRec := doRequest(r, http.MethodPost, "/auth/login", apiKey, "", map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})
+	if loginRec.Code != http.StatusOK {
+		t.Fatalf("login: status = %d, want %d, body=%s", loginRec.Code, http.StatusOK, loginRec.Body.String())
+	}
+	var loginBody struct {
+		LoginToken          string `json:"login_token"`
+		NeedsTwoFactorSetup bool   `json:"needs_2fa_setup"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginBody); err != nil {
+		t.Fatalf("decoding login response: %v", err)
+	}
+	if !loginBody.NeedsTwoFactorSetup {
+		t.Fatal("first login: needs_2fa_setup = false, want true")
+	}
+	if len(mailer.Sent()) != sentBeforeLogin {
+		t.Fatal("first login must not send an OTP email before a method is chosen")
+	}
+
+	sendRec := doRequest(r, http.MethodPost, "/auth/login/send-email-code", apiKey, "", map[string]string{
+		"login_token": loginBody.LoginToken,
+	})
+	if sendRec.Code != http.StatusOK {
+		t.Fatalf("send-email-code: status = %d, want %d, body=%s", sendRec.Code, http.StatusOK, sendRec.Body.String())
+	}
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("send-email-code: no email was sent")
+	}
+	code := testutil.ExtractOTPCode(sent.Body)
+	if code == "" {
+		t.Fatalf("could not find an OTP code in email body: %q", sent.Body)
+	}
+
+	verifyRec := doRequest(r, http.MethodPost, "/auth/verify-otp", apiKey, "", map[string]string{
+		"login_token": loginBody.LoginToken, "code": code,
+	})
+	if verifyRec.Code != http.StatusOK {
+		t.Fatalf("verify-otp: status = %d, want %d, body=%s", verifyRec.Code, http.StatusOK, verifyRec.Body.String())
+	}
+
+	// Second login: choice already made, straight to email, no setup screen.
+	sentBeforeSecond := len(mailer.Sent())
+	secondLoginRec := doRequest(r, http.MethodPost, "/auth/login", apiKey, "", map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})
+	if secondLoginRec.Code != http.StatusOK {
+		t.Fatalf("second login: status = %d, want %d", secondLoginRec.Code, http.StatusOK)
+	}
+	var secondBody struct {
+		NeedsTwoFactorSetup bool `json:"needs_2fa_setup"`
+	}
+	if err := json.Unmarshal(secondLoginRec.Body.Bytes(), &secondBody); err != nil {
+		t.Fatalf("decoding second login response: %v", err)
+	}
+	if secondBody.NeedsTwoFactorSetup {
+		t.Fatal("second login: needs_2fa_setup = true, want false")
+	}
+	if len(mailer.Sent()) != sentBeforeSecond+1 {
+		t.Fatalf("second login: want a new OTP email sent automatically, got %d -> %d", sentBeforeSecond, len(mailer.Sent()))
+	}
+}
+
+// Same, for the "authenticator app" branch — EnrollTOTP/ConfirmTOTP reached
+// through OptionalAuth with no Authorization header at all, only the
+// login_token in the body.
+func TestRouter_FirstLogin_TOTPBranch_EndToEnd(t *testing.T) {
+	r, apiKey, mailer := newTestRouterWithChoice(t)
+	email := registerAndVerify(t, r, apiKey, mailer)
+
+	loginRec := doRequest(r, http.MethodPost, "/auth/login", apiKey, "", map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})
+	var loginBody struct {
+		LoginToken          string `json:"login_token"`
+		NeedsTwoFactorSetup bool   `json:"needs_2fa_setup"`
+	}
+	if err := json.Unmarshal(loginRec.Body.Bytes(), &loginBody); err != nil {
+		t.Fatalf("decoding login response: %v", err)
+	}
+	if !loginBody.NeedsTwoFactorSetup {
+		t.Fatal("first login: needs_2fa_setup = false, want true")
+	}
+
+	enrollRec := doRequest(r, http.MethodPost, "/auth/totp/enroll", apiKey, "", map[string]string{
+		"login_token": loginBody.LoginToken,
+	})
+	if enrollRec.Code != http.StatusOK {
+		t.Fatalf("enroll (login_token mode): status = %d, want %d, body=%s", enrollRec.Code, http.StatusOK, enrollRec.Body.String())
+	}
+	var enrollBody struct {
+		OTPAuthURL string `json:"otpauth_url"`
+	}
+	if err := json.Unmarshal(enrollRec.Body.Bytes(), &enrollBody); err != nil {
+		t.Fatalf("decoding enroll response: %v", err)
+	}
+	if enrollBody.OTPAuthURL == "" {
+		t.Fatal("enroll response missing otpauth_url")
+	}
+
+	code := totpCodeFromOTPAuthURL(t, enrollBody.OTPAuthURL)
+	confirmRec := doRequest(r, http.MethodPost, "/auth/totp/confirm", apiKey, "", map[string]string{
+		"login_token": loginBody.LoginToken, "code": code,
+	})
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm (login_token mode): status = %d, want %d, body=%s", confirmRec.Code, http.StatusOK, confirmRec.Body.String())
+	}
+	var confirmBody struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(confirmRec.Body.Bytes(), &confirmBody); err != nil {
+		t.Fatalf("decoding confirm response: %v", err)
+	}
+	if confirmBody.AccessToken == "" || confirmBody.RefreshToken == "" {
+		t.Fatalf("confirm response missing tokens: %s", confirmRec.Body.String())
 	}
 }
