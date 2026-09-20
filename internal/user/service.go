@@ -235,6 +235,26 @@ func (s *Service) MarkEmailVerified(ctx context.Context, userID string) error {
 	return s.repo.MarkEmailVerified(ctx, userID)
 }
 
+// SetPendingTOTPSecret, GetTOTPSecret, EnableTOTP and DisableTOTP are thin
+// passthroughs to the repository — the actual secret generation/encryption
+// and code validation live in auth.TOTPManager (this package only persists
+// the already-encrypted value, it never sees a plaintext secret or a code).
+func (s *Service) SetPendingTOTPSecret(ctx context.Context, userID, encryptedSecret string) error {
+	return s.repo.SetPendingTOTPSecret(ctx, userID, encryptedSecret)
+}
+
+func (s *Service) GetTOTPSecret(ctx context.Context, userID string) (encryptedSecret string, enabled bool, err error) {
+	return s.repo.GetTOTPSecret(ctx, userID)
+}
+
+func (s *Service) EnableTOTP(ctx context.Context, userID string) error {
+	return s.repo.EnableTOTP(ctx, userID)
+}
+
+func (s *Service) DisableTOTP(ctx context.Context, userID string) error {
+	return s.repo.DisableTOTP(ctx, userID)
+}
+
 // Ban deactivates an account: VerifyPassword refuses it from then on (same
 // path an already-deactivated account takes today), and auth.Service.
 // DeviceLogin refuses its trusted devices too. Deliberately manual only —

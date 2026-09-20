@@ -146,6 +146,12 @@ services:
       # .env. Set it there to provision api_clients over HTTP instead of
       # `docker compose run --rm api ./createclient ...`.
       ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+
+      # Optional — leaves /auth/totp/* unregistered entirely if unset. Set
+      # TOTP_ENCRYPTION_KEY in your .env to enable the authenticator-app
+      # second factor (see .env.example for how to generate one).
+      TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
+      TOTP_ISSUER: ${TOTP_ISSUER:-auth-2fa-api}
     volumes:
       - ./keys:/app/keys:ro
     depends_on:

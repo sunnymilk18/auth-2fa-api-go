@@ -21,6 +21,8 @@ import (
 	"auth-2fa-api/internal/mailer"
 	"auth-2fa-api/internal/telemetry"
 	"auth-2fa-api/internal/user"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -98,7 +100,12 @@ func run(logger *slog.Logger) error {
 
 	resendMailer := mailer.NewResendMailer(cfg.ResendAPIKey, cfg.ResendFrom)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL)
+	totpManager, totpLoginStore, err := setupTOTP(cfg, rdb)
+	if err != nil {
+		return err
+	}
+
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
@@ -116,7 +123,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, logger)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -183,4 +190,25 @@ func addPreviousVerificationKey(tokenMgr *auth.TokenManager, cfg *config.Config)
 
 	tokenMgr.AddVerificationKey(cfg.JWTPreviousKeyID, pub)
 	return nil
+}
+
+// setupTOTP builds the TOTP manager/login store when TOTP_ENCRYPTION_KEY is
+// configured — see Config.TOTPEncryptionKeyBase64's doc comment for why
+// this is opt-in rather than always-on. Both return values are nil (not an
+// error) when unset; auth.Service treats a nil totp/totpLogin as "feature
+// not configured" rather than requiring every caller here to branch on it.
+func setupTOTP(cfg *config.Config, rdb *redis.Client) (*auth.TOTPManager, *auth.TOTPLoginStore, error) {
+	if cfg.TOTPEncryptionKeyBase64 == "" {
+		return nil, nil, nil
+	}
+
+	key, err := base64.StdEncoding.DecodeString(cfg.TOTPEncryptionKeyBase64)
+	if err != nil {
+		return nil, nil, fmt.Errorf("decoding TOTP_ENCRYPTION_KEY: %w", err)
+	}
+	totpManager, err := auth.NewTOTPManager(cfg.TOTPIssuer, key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("setting up totp: %w", err)
+	}
+	return totpManager, auth.NewTOTPLoginStore(rdb, cfg.OTPTTL), nil
 }

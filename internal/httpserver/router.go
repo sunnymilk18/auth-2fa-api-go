@@ -26,7 +26,11 @@ import (
 // ran with no OTLP endpoint configured) — callers never need to check.
 // adminToken == "" leaves /admin/* unregistered entirely (404, not "open
 // with no auth") — see middleware.RequireAdminToken.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, logger *slog.Logger) http.Handler {
+// totpEnabled controls whether /auth/totp/* is registered at all — see
+// config.Config.TOTPEncryptionKeyBase64's doc comment: unset means the
+// feature doesn't exist here (404, not "exists but always fails"), same
+// pattern as adminToken == "" for /admin/*.
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -104,6 +108,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
+	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -132,6 +137,16 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Post("/devices/register", authHandlers.RegisterDevice)
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
+
+			// Authenticator app (Google Authenticator, Authy, etc.) as an
+			// opt-in alternative to the emailed OTP — see auth.Service.
+			// StartTOTPEnrollment's doc comment. Only registered when the
+			// server has TOTP_ENCRYPTION_KEY configured.
+			if totpEnabled {
+				r.Post("/totp/enroll", authHandlers.EnrollTOTP)
+				r.With(totpConfirmLimiter.Middleware).Post("/totp/confirm", authHandlers.ConfirmTOTP)
+				r.Post("/totp/disable", authHandlers.DisableTOTP)
+			}
 		})
 	})
 

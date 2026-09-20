@@ -107,6 +107,19 @@ type Config struct {
 	// secret configured would be a much worse mistake than requiring an
 	// explicit opt-in.
 	AdminAPIToken string
+
+	// TOTPEncryptionKeyBase64 enables the optional TOTP (Google
+	// Authenticator-style) second factor as an alternative to the email
+	// OTP flow. Base64 of exactly 32 raw bytes (AES-256) — generate one
+	// like any other high-entropy secret, e.g. `openssl rand -base64 32`.
+	//
+	// Empty (the default) disables /auth/totp/* entirely, same reasoning
+	// as AdminAPIToken: an opt-in feature with no secret configured should
+	// not exist, not fall back to some default key.
+	TOTPEncryptionKeyBase64 string
+	// TOTPIssuer is the label shown next to the account name in the
+	// authenticator app (e.g. "Auth2FA — Acme Inc"). Purely cosmetic.
+	TOTPIssuer string
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -134,6 +147,9 @@ func Load() (*Config, error) {
 		ResendFrom:   getEnv("RESEND_FROM", "onboarding@resend.dev"),
 
 		AdminAPIToken: getEnv("ADMIN_API_TOKEN", ""),
+
+		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
+		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),
 	}
 
 	var err error

@@ -17,6 +17,13 @@ type User struct {
 	PasswordHash  string
 	IsActive      bool
 	EmailVerified bool
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// TOTPEnabled is true once the account has confirmed an authenticator
+	// app (Google Authenticator, Authy, etc.) as its second factor — see
+	// auth.Service.ConfirmTOTPEnrollment. The encrypted secret itself is
+	// deliberately not part of this struct (fetched only when actually
+	// needed to verify a code, via Repository.GetTOTPSecret) so it isn't
+	// floating around in every generic user lookup.
+	TOTPEnabled bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }

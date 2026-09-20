@@ -29,6 +29,18 @@ type Service struct {
 	refreshTTL           time.Duration
 	passwordResetTTL     time.Duration
 	emailVerificationTTL time.Duration
+
+	// totp/totpLogin are both nil when TOTP_ENCRYPTION_KEY isn't configured
+	// (see cmd/api/main.go) — the feature is opt-in at the deployment level,
+	// same as ADMIN_API_TOKEN gating /admin/*. Always constructed together
+	// (NewService's caller is the only place that sets either), so every
+	// exported TOTP-related method checks totp/totpLogin for nil and
+	// returns ErrTOTPNotConfigured rather than panicking; the unexported
+	// verifyTOTPLogin skips its own check and relies on that invariant,
+	// since its only caller (LoginStep2) already confirmed totpLogin is
+	// non-nil before reaching it.
+	totp      *TOTPManager
+	totpLogin *TOTPLoginStore
 }
 
 func NewService(
@@ -45,6 +57,8 @@ func NewService(
 	refreshTTL time.Duration,
 	passwordResetTTL time.Duration,
 	emailVerificationTTL time.Duration,
+	totpManager *TOTPManager,
+	totpLogin *TOTPLoginStore,
 ) *Service {
 	return &Service{
 		users:                users,
@@ -60,6 +74,8 @@ func NewService(
 		refreshTTL:           refreshTTL,
 		passwordResetTTL:     passwordResetTTL,
 		emailVerificationTTL: emailVerificationTTL,
+		totp:                 totpManager,
+		totpLogin:            totpLogin,
 	}
 }
 
@@ -207,6 +223,23 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		return "", ErrEmailNotVerified
 	}
 
+	// Accounts that confirmed an authenticator app (see
+	// ConfirmTOTPEnrollment) skip the emailed code entirely — VerifyOTP
+	// still takes the code, but LoginStep2 validates it against the
+	// account's TOTP secret instead of a Redis-stored hash. See
+	// TOTPLoginStore's doc comment for why this needs its own session
+	// rather than reusing OTPStore's.
+	if u.TOTPEnabled {
+		if s.totp == nil || s.totpLogin == nil {
+			// Only reachable if TOTP_ENCRYPTION_KEY was removed from the
+			// deployment after some accounts already enrolled — not a
+			// normal state, but worth a clear error over a nil-pointer
+			// panic or silently falling back to a weaker factor.
+			return "", ErrTOTPNotConfigured
+		}
+		return s.totpLogin.StartSession(ctx, u.ID, u.APIClientID, u.Email)
+	}
+
 	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
 		return "", err
@@ -223,14 +256,75 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	return loginToken, nil
 }
 
-// LoginStep2 verifies the OTP code and, on success, issues a fresh
-// access/refresh token pair.
+// LoginStep2 verifies the code — emailed OTP or, for accounts with an
+// authenticator app confirmed, a TOTP code — and, on success, issues a
+// fresh access/refresh token pair. The client calls the same endpoint
+// either way; which verification path applies is decided here, by which
+// store recognizes loginToken (see LoginStep1), not by anything the client
+// has to specify.
 func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (accessToken, refreshToken string, err error) {
+	if s.totpLogin != nil {
+		sess, found, err := s.totpLogin.Peek(ctx, loginToken)
+		if err != nil {
+			return "", "", err
+		}
+		if found {
+			return s.verifyTOTPLogin(ctx, loginToken, sess, code)
+		}
+	}
+
 	userID, apiClientID, email, err := s.otp.VerifyCode(ctx, loginToken, code)
 	if err != nil {
 		return "", "", err
 	}
 	return s.issueTokenPair(ctx, userID, apiClientID, email)
+}
+
+// verifyTOTPLogin checks code against sess's account's TOTP secret,
+// rate-limited the same way password guesses are (see loginAttempts) so a
+// login token alone (already gated behind a correct password) can't be
+// used to brute-force the 10^6 possible codes. Keyed by "totp:"+loginToken
+// rather than the account id — this counter is about how many guesses this
+// one login attempt gets, not the account's overall failed-login history,
+// which loginAttempts already tracks separately in LoginStep1.
+func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess totpLoginSession, code string) (accessToken, refreshToken string, err error) {
+	lockoutKey := "totp:" + loginToken
+
+	locked, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
+	if err != nil {
+		return "", "", err
+	}
+	if locked {
+		_ = s.totpLogin.Consume(ctx, loginToken)
+		return "", "", ErrTooManyAttempts
+	}
+
+	encryptedSecret, enabled, err := s.users.GetTOTPSecret(ctx, sess.UserID)
+	if err != nil {
+		return "", "", err
+	}
+	if !enabled || encryptedSecret == "" {
+		// The account disabled TOTP after LoginStep1 issued this token
+		// (e.g. from another device/tab) — nothing left to verify against.
+		_ = s.totpLogin.Consume(ctx, loginToken)
+		return "", "", ErrInvalidTOTPCode
+	}
+
+	secret, err := s.totp.Decrypt(encryptedSecret)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !s.totp.ValidateCode(secret, code) {
+		_ = s.loginAttempts.RecordFailure(ctx, sess.APIClientID, lockoutKey)
+		return "", "", ErrInvalidTOTPCode
+	}
+
+	_ = s.loginAttempts.Reset(ctx, sess.APIClientID, lockoutKey)
+	if err := s.totpLogin.Consume(ctx, loginToken); err != nil {
+		return "", "", err
+	}
+	return s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
 }
 
 // issueTokenPair mints an access+refresh token pair for an already-verified
@@ -399,6 +493,71 @@ func (s *Service) RevokeDevice(ctx context.Context, userID, deviceRowID string) 
 }
 
 var ErrUnauthorized = errors.New("unauthorized")
+
+// ErrTOTPNotConfigured is returned by every TOTP-related method when this
+// deployment never set TOTP_ENCRYPTION_KEY — the feature is opt-in at the
+// deployment level (see cmd/api/main.go), same as ADMIN_API_TOKEN gating
+// /admin/*: absent config means the capability doesn't exist here, not
+// "exists but insecure".
+var ErrTOTPNotConfigured = errors.New("totp is not configured on this server")
+
+// StartTOTPEnrollment generates a new TOTP secret for the already
+// password+OTP-authenticated userID and stores it encrypted, but NOT yet
+// enabled — LoginStep1 won't start expecting a TOTP code for this account
+// until ConfirmTOTPEnrollment proves the user actually scanned the QR and
+// their app is producing matching codes. Returns the otpauth:// URL a
+// client renders as a QR code (or shows as a manual-entry secret).
+func (s *Service) StartTOTPEnrollment(ctx context.Context, userID, email string) (otpauthURL string, err error) {
+	if s.totp == nil {
+		return "", ErrTOTPNotConfigured
+	}
+
+	secret, otpauthURL, err := s.totp.GenerateSecret(email)
+	if err != nil {
+		return "", err
+	}
+	encrypted, err := s.totp.Encrypt(secret)
+	if err != nil {
+		return "", err
+	}
+	if err := s.users.SetPendingTOTPSecret(ctx, userID, encrypted); err != nil {
+		return "", err
+	}
+	return otpauthURL, nil
+}
+
+// ConfirmTOTPEnrollment validates code against the pending secret set by
+// StartTOTPEnrollment and, on success, enables it — from then on,
+// LoginStep1 sends this account through the TOTP path instead of emailing
+// a code.
+func (s *Service) ConfirmTOTPEnrollment(ctx context.Context, userID, code string) error {
+	if s.totp == nil {
+		return ErrTOTPNotConfigured
+	}
+
+	encryptedSecret, _, err := s.users.GetTOTPSecret(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if encryptedSecret == "" {
+		return ErrInvalidTOTPCode
+	}
+	secret, err := s.totp.Decrypt(encryptedSecret)
+	if err != nil {
+		return err
+	}
+	if !s.totp.ValidateCode(secret, code) {
+		return ErrInvalidTOTPCode
+	}
+	return s.users.EnableTOTP(ctx, userID)
+}
+
+// DisableTOTP turns the TOTP second factor off — login falls back to the
+// email OTP flow. No code confirmation required, same bar as RevokeDevice:
+// a valid access token (already-authenticated session) is enough.
+func (s *Service) DisableTOTP(ctx context.Context, userID string) error {
+	return s.users.DisableTOTP(ctx, userID)
+}
 
 // ErrAccountBanned is returned by DeviceLogin when the account behind an
 // otherwise-valid device_token+pin has been deactivated (see

@@ -65,11 +65,11 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 			SET password_hash = EXCLUDED.password_hash, username = EXCLUDED.username, rut = EXCLUDED.rut,
 				email_verified = FALSE, updated_at = now()
 			WHERE users.email_verified = FALSE
-		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, created_at, updated_at`
+		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, created_at, updated_at`
 
 	u := &User{}
 	err := r.pool.QueryRow(ctx, q, apiClientID, email, passwordHash, username, rut).Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEmailTaken
@@ -83,12 +83,12 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 	return u, nil
 }
 
-const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, created_at, updated_at"
+const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, created_at, updated_at"
 
 func scanUser(row pgx.Row) (*User, error) {
 	u := &User{}
 	err := row.Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -181,6 +181,67 @@ func (r *Repository) SetActive(ctx context.Context, id string, active bool) erro
 	tag, err := r.pool.Exec(ctx, q, id, active)
 	if err != nil {
 		return fmt.Errorf("updating user active state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetPendingTOTPSecret stores a newly generated (encrypted) TOTP secret and
+// resets totp_enabled to FALSE — a fresh enrollment (or re-enrollment)
+// always has to be confirmed with a real code before it's trusted for
+// login, even if the account had a previously-confirmed secret.
+func (r *Repository) SetPendingTOTPSecret(ctx context.Context, id, encryptedSecret string) error {
+	const q = `UPDATE users SET totp_secret_enc = $2, totp_enabled = FALSE, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, encryptedSecret)
+	if err != nil {
+		return fmt.Errorf("storing pending totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetTOTPSecret returns the account's encrypted secret (empty if none) and
+// whether it's confirmed/enabled — used at login time to decide whether to
+// expect a TOTP code, and to actually validate one.
+func (r *Repository) GetTOTPSecret(ctx context.Context, id string) (encryptedSecret string, enabled bool, err error) {
+	const q = `SELECT COALESCE(totp_secret_enc, ''), totp_enabled FROM users WHERE id = $1`
+	err = r.pool.QueryRow(ctx, q, id).Scan(&encryptedSecret, &enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, ErrNotFound
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("querying totp secret: %w", err)
+	}
+	return encryptedSecret, enabled, nil
+}
+
+// EnableTOTP flips totp_enabled to TRUE — called once a freshly generated
+// secret's first code has been verified (see ConfirmTOTPEnrollment).
+func (r *Repository) EnableTOTP(ctx context.Context, id string) error {
+	const q = `UPDATE users SET totp_enabled = TRUE, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("enabling totp: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// DisableTOTP clears the stored secret entirely and turns totp_enabled
+// off — login falls back to the email OTP flow from then on. Clearing the
+// secret (not just the flag) means a stale encrypted value never lingers
+// for a later re-enrollment to accidentally trust.
+func (r *Repository) DisableTOTP(ctx context.Context, id string) error {
+	const q = `UPDATE users SET totp_secret_enc = NULL, totp_enabled = FALSE, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("disabling totp: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

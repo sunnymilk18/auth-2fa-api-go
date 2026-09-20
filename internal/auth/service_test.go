@@ -1,8 +1,11 @@
 package auth_test
 
 import (
+	"net/url"
 	"testing"
 	"time"
+
+	"github.com/pquerna/otp/totp"
 
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/device"
@@ -31,10 +34,20 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer = testutil.NewFakeMailer()
+	totpManager, err := auth.NewTOTPManager("test-issuer", testTOTPKey)
+	if err != nil {
+		t.Fatalf("NewTOTPManager: %v", err)
+	}
+	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin)
 	return svc, tokens, mailer, client.ID
 }
+
+// testTOTPKey is a fixed 32-byte AES-256 key used only in tests — real
+// deployments generate their own via TOTP_ENCRYPTION_KEY (see
+// config.Config's doc comment).
+var testTOTPKey = []byte("0123456789abcdef0123456789abcdef")
 
 // mustRegister creates a verified, ready-to-login user. Registering alone
 // isn't enough anymore — Register now requires confirming the emailed
@@ -397,7 +410,7 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer := testutil.NewFakeMailer()
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil)
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
@@ -486,5 +499,219 @@ func TestDeviceLogin_TooManyFailedPinsRevokesTrust(t *testing.T) {
 	// Trust was revoked — even the correct PIN is rejected now.
 	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("correct pin after revocation: err = %v, want %v", err, device.ErrDeviceNotTrusted)
+	}
+}
+
+// --- TOTP (authenticator app) ---
+
+// mustLoginFull does a full password+OTP login (mustRegister must already
+// have been called for email) and returns the resulting access/refresh
+// tokens plus the account's user id, parsed off the access token — the
+// starting point every TOTP enrollment test needs (enrollment requires an
+// already-authenticated session).
+func mustLoginFull(t *testing.T, svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID, email, password string) (userID, access, refresh string) {
+	t.Helper()
+	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, ok := mailer.Last()
+	if !ok {
+		t.Fatal("LoginStep1: no OTP email was sent")
+	}
+	code := testutil.ExtractOTPCode(sent.Body)
+	access, refresh, err = svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+	claims, err := tokens.ParseAccessToken(access)
+	if err != nil {
+		t.Fatalf("parsing access token: %v", err)
+	}
+	return claims.Subject, access, refresh
+}
+
+// totpCodeFromOTPAuthURL extracts the secret embedded in an otpauth:// URL
+// (what StartTOTPEnrollment returns, meant to be rendered as a QR code) and
+// computes the code currently valid for it — standing in for "the user's
+// authenticator app" in these tests.
+func totpCodeFromOTPAuthURL(t *testing.T, otpauthURL string) string {
+	t.Helper()
+	u, err := url.Parse(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url %q: %v", otpauthURL, err)
+	}
+	secret := u.Query().Get("secret")
+	if secret == "" {
+		t.Fatalf("otpauth url %q has no secret param", otpauthURL)
+	}
+	code, err := totp.GenerateCode(secret, time.Now())
+	if err != nil {
+		t.Fatalf("computing totp code: %v", err)
+	}
+	return code
+}
+
+func TestTOTPEnrollment_ThenLoginUsesTOTPInsteadOfEmail(t *testing.T) {
+	svc, tokens, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	otpauthURL, err := svc.StartTOTPEnrollment(t.Context(), userID, email)
+	if err != nil {
+		t.Fatalf("StartTOTPEnrollment: %v", err)
+	}
+	code := totpCodeFromOTPAuthURL(t, otpauthURL)
+
+	if err := svc.ConfirmTOTPEnrollment(t.Context(), userID, code); err != nil {
+		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
+	}
+
+	sentBefore := len(mailer.Sent())
+	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1 after enabling TOTP: %v", err)
+	}
+	if len(mailer.Sent()) != sentBefore {
+		t.Fatalf("LoginStep1 for a TOTP-enabled account sent an email (count %d -> %d) — it must not, that's the whole point of the TOTP path", sentBefore, len(mailer.Sent()))
+	}
+
+	// The client is expected to already have a fresh code from its
+	// authenticator app — recompute one the same way.
+	loginCode := totpCodeFromOTPAuthURL(t, otpauthURL)
+	access, refresh, err := svc.LoginStep2(t.Context(), loginToken, loginCode)
+	if err != nil {
+		t.Fatalf("LoginStep2 with a TOTP code: %v", err)
+	}
+	if access == "" || refresh == "" {
+		t.Fatal("LoginStep2: expected non-empty access and refresh tokens")
+	}
+
+	// Single-use, same as the email flow.
+	if _, _, err := svc.LoginStep2(t.Context(), loginToken, loginCode); err == nil {
+		t.Fatal("LoginStep2 a second time: want error (session already consumed), got nil")
+	}
+}
+
+func TestConfirmTOTPEnrollment_WrongCodeDoesNotEnable(t *testing.T) {
+	svc, tokens, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	if _, err := svc.StartTOTPEnrollment(t.Context(), userID, email); err != nil {
+		t.Fatalf("StartTOTPEnrollment: %v", err)
+	}
+
+	if err := svc.ConfirmTOTPEnrollment(t.Context(), userID, "000000"); err != auth.ErrInvalidTOTPCode {
+		t.Fatalf("ConfirmTOTPEnrollment with a wrong code: err = %v, want %v", err, auth.ErrInvalidTOTPCode)
+	}
+
+	// Never confirmed — login must still go through the email path.
+	sentBefore := len(mailer.Sent())
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	if len(mailer.Sent()) != sentBefore+1 {
+		t.Fatalf("LoginStep1 after an unconfirmed enrollment: want a new OTP email, got %d -> %d sent", sentBefore, len(mailer.Sent()))
+	}
+}
+
+func TestLoginStep2_TOTP_WrongCodeExhaustsAttempts(t *testing.T) {
+	svc, tokens, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	otpauthURL, err := svc.StartTOTPEnrollment(t.Context(), userID, email)
+	if err != nil {
+		t.Fatalf("StartTOTPEnrollment: %v", err)
+	}
+	if err := svc.ConfirmTOTPEnrollment(t.Context(), userID, totpCodeFromOTPAuthURL(t, otpauthURL)); err != nil {
+		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
+	}
+
+	loginToken, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+
+	// newTestService's loginAttempts limiter allows 3 failures before
+	// locking — same check-then-record shape as the password lockout (see
+	// TestLoginStep1_LocksOutAfterTooManyFailures): the lock is only
+	// enforced on the attempt AFTER the count reaches maxFails, not on the
+	// failure that makes it reach maxFails.
+	for i := 1; i <= 3; i++ {
+		if _, _, err := svc.LoginStep2(t.Context(), loginToken, "000000"); err != auth.ErrInvalidTOTPCode {
+			t.Fatalf("wrong-code attempt %d: err = %v, want %v", i, err, auth.ErrInvalidTOTPCode)
+		}
+	}
+	if _, _, err := svc.LoginStep2(t.Context(), loginToken, "000000"); err != auth.ErrTooManyAttempts {
+		t.Fatalf("wrong-code attempt 4: err = %v, want %v", err, auth.ErrTooManyAttempts)
+	}
+
+	// Locked out now — even the correct code is rejected, and the session
+	// itself was consumed by the lockout.
+	correctCode := totpCodeFromOTPAuthURL(t, otpauthURL)
+	if _, _, err := svc.LoginStep2(t.Context(), loginToken, correctCode); err == nil {
+		t.Fatal("LoginStep2 with the correct code after lockout: want an error, got nil")
+	}
+}
+
+func TestDisableTOTP_LoginFallsBackToEmail(t *testing.T) {
+	svc, tokens, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	otpauthURL, err := svc.StartTOTPEnrollment(t.Context(), userID, email)
+	if err != nil {
+		t.Fatalf("StartTOTPEnrollment: %v", err)
+	}
+	if err := svc.ConfirmTOTPEnrollment(t.Context(), userID, totpCodeFromOTPAuthURL(t, otpauthURL)); err != nil {
+		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
+	}
+
+	if err := svc.DisableTOTP(t.Context(), userID); err != nil {
+		t.Fatalf("DisableTOTP: %v", err)
+	}
+
+	sentBefore := len(mailer.Sent())
+	if _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("LoginStep1 after DisableTOTP: %v", err)
+	}
+	if len(mailer.Sent()) != sentBefore+1 {
+		t.Fatalf("LoginStep1 after DisableTOTP: want a new OTP email, got %d -> %d sent", sentBefore, len(mailer.Sent()))
+	}
+}
+
+// A Service built with a nil TOTPManager/TOTPLoginStore (TOTP_ENCRYPTION_KEY
+// unset) must fail closed with a clear error, not panic — see
+// TestDeviceLogin_BannedAccountIsRefused's Service construction for the
+// nil,nil case this exercises.
+func TestStartTOTPEnrollment_NotConfigured(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	client, _ := testutil.NewAPIClient(t, pool)
+	apiClientID := client.ID
+
+	users := user.NewService(user.NewRepository(pool))
+	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	refresh := auth.NewRefreshRepository(pool)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
+	mailer := testutil.NewFakeMailer()
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil)
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	if _, err := svc.StartTOTPEnrollment(t.Context(), userID, email); err != auth.ErrTOTPNotConfigured {
+		t.Fatalf("StartTOTPEnrollment with no TOTPManager configured: err = %v, want %v", err, auth.ErrTOTPNotConfigured)
 	}
 }

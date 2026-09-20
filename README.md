@@ -13,6 +13,7 @@ API independiente en Go para autenticación con doble factor por correo (email +
 - **Lista negra automática por IP** (`internal/middleware.Blacklist`): una IP que dispara cualquiera de los rate limits de arriba 3 veces separadas en 24h queda baneada del todo (no solo throttleada) — 24h la primera vez, 72h la segunda, 7 días de ahí en más. El nivel de escalada se olvida solo tras 30 días sin nuevas infracciones, para no castigar para siempre una IP compartida (biblioteca pública, wifi comunitario) mucho después de que el que abusó ya se fue. Un admin puede levantar un baneo a mano con `DELETE /admin/blacklist/{ip}` (mismo header `X-Admin-Token`).
 - **Bloqueo manual de cuentas**: `POST /admin/users/{id}/ban` desactiva una cuenta puntual (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut. Es una herramienta operativa, para cuando un caso de abuso se identifica puntualmente.
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
+- **Verificación por app autenticadora (TOTP)**: alternativa opcional al código por correo — cada cuenta la activa por su cuenta (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Requiere `TOTP_ENCRYPTION_KEY`; sin ella, `/auth/totp/*` no existe (mismo criterio que `ADMIN_API_TOKEN`).
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Identidad del usuario**: además de email + password, cada cuenta tiene `username` (8-32 caracteres, no único entre personas, sin forma de rut aunque tenga puntos/guiones, sin "@") y `rut` (documento chileno, único por sistema, validado con dígito verificador). El login acepta cualquiera de los tres — email, username o rut — en un único campo `identifier`, detectado automáticamente por su forma.
 - **CORS**: habilitado para cualquier origen (`*`), sin credenciales — la API se autentica por headers (`X-API-Key`, `Authorization`), no por cookies de sesión, así que no hay nada que filtrar abriendo el origen a todos. Cada sistema consumidor puede llamar desde su propio frontend sin que haga falta mantener una lista de dominios permitidos.
@@ -29,7 +30,7 @@ Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#m
    - `username`: 8-32 caracteres, no puede tener forma de rut (ni siquiera con puntos/guiones — `"1234.5678"` también se rechaza) ni contener "@" (ver por qué en el paso 2), y no tiene que ser único entre personas — si ya está tomado, el registro falla con `409` sugiriendo una alternativa libre (ej. `"el usuario 'juan.perez' ya está en uso, probá con 'juan.perez2'"`).
    - `rut`: documento de identidad chileno, único por sistema, validado con el dígito verificador (módulo 11) — acepta cualquier formato de entrada (`12.345.678-5`, `12345678-5`, `123456785`).
 2. `POST /auth/login` — valida `identifier` + `password`. `identifier` acepta el email, el username **o** el rut de la cuenta — el backend prueba las tres columnas en una sola consulta (`email = ? OR username = ? OR rut = ?`), sin adivinar antes cuál es cuál (nada que el cliente tenga que indicar aparte: un solo campo, sin selector de "con qué querés loguear"). Es justamente por esto que `username` no puede tener forma de rut ni contener "@": si se permitiera, el username de una persona podría coincidir con el rut o el email real de otra, y esa consulta ya no sería segura. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué. Si todo está en orden, genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve un `login_token` (no el código).
-3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`.
+3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`. El mismo endpoint sirve tanto si la cuenta usa el código por correo como si activó una app autenticadora (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional) más abajo) — el cliente no necesita saber cuál de los dos aplica, el paso 2 ya decide eso por dentro.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
 6. `GET /me` — ejemplo de endpoint protegido (requiere `Authorization: Bearer <access_token>`); devuelve `id`, `email`, `username` y `rut`.
@@ -58,6 +59,16 @@ La confianza dura 30 días desde el último uso (ventana deslizante, `DEVICE_TRU
 A diferencia de `/auth/password-reset/*`, estos dos endpoints no necesitan ocultar si la cuenta existe — `/auth/register` ya revela eso mismo con su propio error de "correo ya registrado".
 
 **Registrarse de nuevo con un correo que todavía no se verificó reclama esa cuenta en vez de rechazarla** (contraseña nueva, estado sin verificar de nuevo) — una cuenta nunca confirmada no probó que su dueño realmente controla ese correo, así que no hay nada legítimo que proteger rechazando el intento nuevo. Sin esto, un solo error de tipeo al registrarse dejaría ese correo ocupado para siempre por una cuenta zombi que nadie puede confirmar, bloqueando a su dueño real de registrarse alguna vez (el email es único por sistema, y nada más libera una cuenta sin verificar abandonada). Solo una cuenta ya **verificada** sigue bloqueando el registro duplicado con `409`.
+
+### Verificación por app autenticadora (TOTP, opcional)
+
+Alternativa al código por correo del paso 2/3 — cada cuenta la activa (o no) por su cuenta, no es algo que el sistema consumidor elija de antemano. Requiere `TOTP_ENCRYPTION_KEY` configurada (ver [Variables opcionales](#variables-opcionales)); si no está seteada, estas rutas ni siquiera existen (404, mismo criterio que `ADMIN_API_TOKEN`).
+
+15. `POST /auth/totp/enroll` (protegido, requiere un login completo previo) — genera un secreto nuevo para la cuenta y devuelve `otpauth_url`, para renderizar como código QR (Google Authenticator, Authy, etc. lo escanean directo) o mostrar como texto para carga manual. Todavía no queda activo para el login — ver el paso siguiente.
+16. `POST /auth/totp/confirm` (protegido) — recibe `code` (el que la app ya está mostrando tras escanear el QR). Si coincide, activa la app autenticadora como segundo factor de esa cuenta: de ahí en más, el login de esa cuenta salta el correo por completo y `/auth/verify-otp` valida contra la app en su lugar.
+17. `POST /auth/totp/disable` (protegido) — desactiva la app autenticadora; el login de esa cuenta vuelve a usar el código por correo. No pide el código de la app para desactivarla, mismo criterio que revocar un dispositivo de confianza — alcanza con una sesión ya autenticada.
+
+El secreto de cada cuenta se guarda cifrado (`AES-256-GCM`) en la base, nunca en texto plano — a diferencia de la contraseña (que se guarda hasheada, de un solo sentido), acá el servidor necesita poder recuperar el secreto real para calcular si un código es válido en este momento, así que un hash no alcanza.
 
 ## Requisitos previos
 
@@ -107,6 +118,8 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 ### Variables opcionales
 
 - **`ADMIN_API_TOKEN`**: habilita `/admin/clients/*` (gestionar API keys por HTTP en vez de solo por CLI — ver [Gestionar clientes existentes](#gestionar-clientes-existentes)). Sin setear, esas rutas ni siquiera existen (404, no "abiertas sin auth"). Generá un secreto fuerte igual que el del refresh token (`openssl rand -base64 48`) si la vas a usar.
+- **`TOTP_ENCRYPTION_KEY`**: habilita `/auth/totp/*` (verificación por app autenticadora — ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Sin setear, esas rutas ni siquiera existen (mismo criterio que `ADMIN_API_TOKEN`). Base64 de exactamente 32 bytes (`openssl rand -base64 32`) — a diferencia de otros secretos del proyecto, este tiene que ser de ese tamaño exacto porque se usa como clave AES-256, no como secreto HMAC de largo libre.
+- **`TOTP_ISSUER`**: nombre mostrado junto a la cuenta en la app autenticadora (default `auth-2fa-api`) — puramente cosmético, cambialo al nombre de tu propio sistema.
 - **`OTEL_EXPORTER_OTLP_ENDPOINT`**: habilita el envío de métricas y logs a un collector de OpenTelemetry — ver [Observabilidad](#observabilidad) más abajo. Sin setear, la API funciona igual, solo sin exportar telemetría (los logs siempre se ven por stdout de todas formas).
 
 ## Base de datos
@@ -295,6 +308,20 @@ curl -X POST http://localhost:8080/auth/devices/login \
   -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" \
   -d '{"device_id":"un-uuid-generado-por-tu-app","device_token":"<el del paso 6>","pin":"123456"}'
 # -> devuelve access_token + refresh_token + un device_token rotado (reemplaza al anterior)
+
+# 8. Activar la app autenticadora como alternativa al OTP por correo
+# (requiere TOTP_ENCRYPTION_KEY configurada — ver Variables opcionales).
+curl -X POST http://localhost:8080/auth/totp/enroll \
+  -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>"
+# -> devuelve { "otpauth_url": "otpauth://totp/...?secret=...&issuer=..." }
+# Renderizar esa URL como código QR (o pasar el "secret" a mano) y escanearla
+# con Google Authenticator/Authy antes del siguiente paso.
+
+curl -X POST http://localhost:8080/auth/totp/confirm \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>" \
+  -d '{"code":"<el que muestra la app>"}'
+# -> 204. De ahí en más, /auth/login para esta cuenta ya no manda OTP por
+# correo — /auth/verify-otp espera el código de la app en su lugar.
 ```
 
 ## Documentación de la API
@@ -368,7 +395,7 @@ Esta API en sí misma no depende de nada de esto para funcionar en desarrollo/pr
 
 - **HTTPS obligatorio, no opcional**: el dominio final necesita certificado válido y debería rechazar tráfico por HTTP plano (redirigir o cerrar el puerto), no solo "tenerlo disponible". Sin esto, credenciales y tokens viajan sin cifrar. Ver [Deploy en producción](#deploy-en-producción) — Dokploy/Traefik lo gestiona, pero hay que confirmar que quede forzado.
 - **Backups de PostgreSQL, con restore probado**: hoy no hay ninguna política de backup configurada. Un backup que nunca se probó restaurar no es un backup real — hace falta definir frecuencia, retención, y probar el restore al menos una vez antes de ir a producción.
-- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `RESEND_API_KEY`, la contraseña de Postgres — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan.
+- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `TOTP_ENCRYPTION_KEY` (si se usa), `RESEND_API_KEY`, la contraseña de Postgres — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan. `TOTP_ENCRYPTION_KEY` en particular no tiene hoy un procedimiento de rotación (a diferencia de las claves JWT — ver [Rotación de claves JWT](#rotación-de-claves-jwt)): rotarla sin migrar primero los secretos ya cifrados dejaría ilegibles los de todas las cuentas que ya activaron la app autenticadora.
 - **Alertas activas, no solo dashboards**: el stack de [Observabilidad](#observabilidad) ya expone todo lo necesario (métricas de error rate, latencia, salud del servicio) pero nadie recibe una notificación si algo se rompe fuera de horario — hoy hay que entrar a Grafana a mirar. Conviene conectar alertas (Grafana Alerting, o lo que ya usen) sobre esas mismas métricas.
 - **Redundancia / alta disponibilidad**: todo corre en un único VPS (ver [Producción (Dokploy)](#producción-dokploy)) — si esa máquina se cae, el sistema completo se cae con ella. Si el municipio requiere continuidad de servicio, esto necesita evaluarse aparte (más de una instancia, balanceo de carga, etc.).
 - **Protección a nivel de borde (WAF / anti-DDoS)**: el rate limiting de esta API (`internal/middleware.RateLimiter`/`Blacklist`, por IP y por cuenta, con escalada a baneo automático — ver [Arquitectura](#arquitectura)) protege contra fuerza bruta sobre credenciales y OTP, pero no contra un ataque volumétrico de verdad contra la infraestructura — eso se resuelve en la capa de red/proxy, no en la aplicación.

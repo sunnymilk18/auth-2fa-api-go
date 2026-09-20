@@ -27,6 +27,9 @@ import (
 	"auth-2fa-api/internal/user"
 )
 
+// testTOTPKey is a fixed 32-byte AES-256 key used only in tests.
+var testTOTPKey = []byte("0123456789abcdef0123456789abcdef")
+
 // testLogger discards output — these tests assert on HTTP behavior, not
 // on what gets logged; a real logger would just be test noise.
 func testLogger() *slog.Logger {
@@ -53,11 +56,16 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	totpManager, err := auth.NewTOTPManager("test-issuer", testTOTPKey)
+	if err != nil {
+		t.Fatalf("NewTOTPManager: %v", err)
+	}
+	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin)
 	handlers := auth.NewHandlers(svc)
 
-	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", testLogger())
+	r := httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
@@ -179,9 +187,9 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil,
 	))
-	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", testLogger())
+	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, testLogger())
 }
 
 func TestRouter_JWKSShape(t *testing.T) {
@@ -377,5 +385,69 @@ func TestRouter_EmailVerification_NoBearerNeeded(t *testing.T) {
 	_ = json.Unmarshal(confirmRec.Body.Bytes(), &resp)
 	if resp["error"] == "falta el header Authorization o tiene un formato inválido" {
 		t.Fatalf("/auth/verify-email/confirm incorrectly required a Bearer token: %v", resp)
+	}
+}
+
+// TOTP: enabled in newTestRouter (totpEnabled=true) — a logged-in user can
+// reach /auth/totp/enroll and get back an otpauth_url to render as a QR
+// code.
+func TestRouter_TOTPEnroll_WithBearerSucceeds(t *testing.T) {
+	r, apiKey, accessToken := newTestRouter(t)
+
+	rec := doRequest(r, http.MethodPost, "/auth/totp/enroll", apiKey, accessToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /auth/totp/enroll with a valid Bearer token: status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if resp["otpauth_url"] == "" {
+		t.Fatalf("response missing otpauth_url: %v", resp)
+	}
+}
+
+func TestRouter_TOTPEnroll_NoBearerRejected(t *testing.T) {
+	r, apiKey, _ := newTestRouter(t)
+
+	rec := doRequest(r, http.MethodPost, "/auth/totp/enroll", apiKey, "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("POST /auth/totp/enroll with no Bearer token: status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// When the server never configured TOTP_ENCRYPTION_KEY, /auth/totp/* must
+// not exist at all (404), not exist-but-fail — same reasoning as
+// /admin/clients with no ADMIN_API_TOKEN (see router_admin_test.go).
+func TestRouter_TOTPRoutes_UnregisteredWhenNotConfigured(t *testing.T) {
+	// Bypass newTestRouter (built with totpEnabled=true) — use
+	// brokenHealthRouter's own pool/rdb instead of a fresh one, since we
+	// need a router built with totpEnabled=false but still need a real
+	// logged-in user's api key + bearer token to get past
+	// RequireAPIKey/RequireAuth and actually reach chi's routing decision
+	// (an unmatched path under an authenticated group still runs that
+	// group's middleware before falling through to 404 — sending no
+	// credentials would report 401 from the middleware, not proving
+	// anything about whether the route itself exists).
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	client, apiKey := testutil.NewAPIClient(t, pool)
+	r := brokenHealthRouter(t, pool, rdb)
+
+	users := user.NewService(user.NewRepository(pool))
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	u, err := users.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	access, err := tokens.IssueAccessToken(u.ID, client.ID, email)
+	if err != nil {
+		t.Fatalf("issuing access token: %v", err)
+	}
+
+	rec := doRequest(r, http.MethodPost, "/auth/totp/enroll", apiKey, access, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("POST /auth/totp/enroll with TOTP not configured: status = %d, want %d (route should not exist), body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
 	}
 }
