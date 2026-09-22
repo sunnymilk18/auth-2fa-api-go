@@ -1,5 +1,5 @@
 # Local dev stack for auth-2fa-api: the API plus everything it needs to run
-# fully offline (Postgres, Redis), plus metrics + logs (OTel Collector ->
+# fully offline (SQL Server, Redis), plus metrics + logs (OTel Collector ->
 # Prometheus / Loki -> Grafana) so you can watch it while you use it.
 #
 # No mail server here on purpose: Resend is an HTTP API to Resend's own
@@ -22,8 +22,9 @@
 #   1. keys/private.pem + keys/public.pem generated (openssl genrsa ...),
 #      readable by the container's non-root user (chmod 644 if needed).
 #   2. A .env file in this directory with at least JWT_REFRESH_SECRET,
-#      RESEND_API_KEY (and RESEND_FROM if you verified a domain) — compose
-#      reads .env automatically for the ${VAR} substitutions below.
+#      RESEND_API_KEY (and RESEND_FROM if you verified a domain),
+#      MSSQL_SA_PASSWORD — compose reads .env automatically for the ${VAR}
+#      substitutions below.
 #
 # Usage:
 #   docker compose up --build
@@ -41,21 +42,48 @@
 #               nothing to click through to wire up)
 
 services:
-  postgres:
-    image: postgres:16-alpine
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: auth2fa
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+      # Free, no expiration, full feature set for non-production use — see
+      # README's "SQL Server" section. Swap for the real licensed edition's
+      # PID only once this same compose file is used for an actual
+      # production deployment, not for local dev.
+      MSSQL_PID: Developer
     ports:
-      - "5432:5432"
+      - "1433:1433"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - mssql_data:/var/opt/mssql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # sqlcmd ships inside this image itself (mssql-tools18) — same
+      # healthcheck approach as .github/workflows/ci.yml's service
+      # container, nothing extra needed in the image or on the host.
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -No -Q 'SELECT 1' -b -o /dev/null"]
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 20s
+
+  # One-shot: creates the `auth2fa` database if it doesn't exist yet, then
+  # exits. Unlike Postgres's image (POSTGRES_DB), mssql-server has no
+  # built-in "create this database on startup" option — `migrate` assumes
+  # the database already exists (see internal/config's MSSQL_DSN doc
+  # comment), so something has to create it first.
+  mssql-create-db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      MSSQL_SA_PASSWORD: ${MSSQL_SA_PASSWORD}
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >
+        /opt/mssql-tools18/bin/sqlcmd -S mssql -U sa -P "$$MSSQL_SA_PASSWORD" -No -Q
+        "IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = 'auth2fa') CREATE DATABASE auth2fa"
+    depends_on:
+      mssql:
+        condition: service_healthy
+    restart: "no"
 
   redis:
     image: redis:7-alpine
@@ -69,21 +97,21 @@ services:
       timeout: 5s
       retries: 10
 
-  # One-shot: applies every migrations/*.sql against `postgres`, then exits.
+  # One-shot: applies every migrations/*.sql against `mssql`, then exits.
   # `api` waits for this to finish successfully before it starts.
   migrate:
     build: .
     command: ["./migrate"]
     environment:
-      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/auth2fa?sslmode=disable
+      MSSQL_DSN: sqlserver://sa:${MSSQL_SA_PASSWORD}@mssql:1433?database=auth2fa
       # cmd/migrate calls the same config.Load() as cmd/api, which requires
       # JWT_REFRESH_SECRET to be set even though migrate itself never uses
       # it (it only applies .sql files) — has to be here or config.Load()
-      # fails before migrate ever touches Postgres.
+      # fails before migrate ever touches SQL Server.
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
     depends_on:
-      postgres:
-        condition: service_healthy
+      mssql-create-db:
+        condition: service_completed_successfully
     restart: "no"
 
   api:
@@ -96,7 +124,7 @@ services:
       # X-Forwarded-For here (same reasoning as .env.example).
       TRUST_PROXY_HEADERS: "false"
 
-      POSTGRES_DSN: postgres://postgres:postgres@postgres:5432/auth2fa?sslmode=disable
+      MSSQL_DSN: sqlserver://sa:${MSSQL_SA_PASSWORD}@mssql:1433?database=auth2fa
       REDIS_URL: redis://redis:6379/0
 
       # keys/ is bind-mounted below (it's gitignored, generated locally
@@ -155,7 +183,7 @@ services:
     volumes:
       - ./keys:/app/keys:ro
     depends_on:
-      postgres:
+      mssql:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -214,7 +242,7 @@ services:
       - loki
 
 volumes:
-  postgres_data:
+  mssql_data:
   redis_data:
   prometheus_data:
   grafana_data:
