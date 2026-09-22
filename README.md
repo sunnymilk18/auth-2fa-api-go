@@ -281,7 +281,7 @@ Aplica las migraciones a esa base automáticamente — no hace falta correr `cmd
 
 Flags útiles: `-v` (detalle de cada test, no solo el resumen), `-count=1` (ignora el caché de resultados), `-run <patrón>` (solo los tests cuyo nombre matchea), y limitar a un paquete con `go test ./internal/auth/...`.
 
-> **Pendiente de actualizar**: `.github/workflows/ci.yml` todavía corre contra un Postgres efímero — desactualizado tras esta migración, hace falta un paso de seguimiento para correr un SQL Server efímero en su lugar (o los tests DB-backed quedarán saltándose en CI hasta entonces). No tocado en este pase, deliberadamente local-only.
+**CI** (`.github/workflows/ci.yml`) corre contra un SQL Server efímero (contenedor de servicio, imagen `mcr.microsoft.com/mssql/server:2022-latest`) — sin `sqlcmd` ni ninguna herramienta extra instalada en el runner: la base `auth2fa_test` se crea con un programa Go descartable que usa el mismo driver (`github.com/microsoft/go-mssqldb`) del que ya depende el proyecto.
 
 ## Deploy en producción
 
