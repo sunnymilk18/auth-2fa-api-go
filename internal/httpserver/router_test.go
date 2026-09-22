@@ -7,6 +7,7 @@ package httpserver_test
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -16,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/microsoft/go-mssqldb"
 	"github.com/pquerna/otp/totp"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric/noop"
@@ -67,7 +68,7 @@ func testLogger() *slog.Logger {
 func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken string) {
 	t.Helper()
 
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, plaintextKey := testutil.NewAPIClient(t, pool)
 
@@ -115,7 +116,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 func newTestRouterWithChoice(t *testing.T) (router http.Handler, apiKey string, mailer *testutil.FakeMailer) {
 	t.Helper()
 
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	_, plaintextKey := testutil.NewAPIClient(t, pool)
 
@@ -205,43 +206,44 @@ func TestRouter_PublicRoutesNeedNoAuth(t *testing.T) {
 func TestRouter_HealthReportsDependencyOutage(t *testing.T) {
 	r, _, _ := newTestRouter(t)
 
-	// Healthy case: both Postgres and Redis are reachable in these tests.
+	// Healthy case: both SQL Server and Redis are reachable in these tests.
 	rec := doRequest(r, http.MethodGet, "/health", "", "", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("healthy: status = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	// Broken Postgres: point a pool at an address nothing listens on —
-	// pgxpool.New doesn't dial eagerly, so this only fails once /health
+	// Broken SQL Server: point a *sql.DB at an address nothing listens on —
+	// sql.Open doesn't dial eagerly, so this only fails once /health
 	// actually pings it.
-	brokenPool, err := pgxpool.New(t.Context(), "postgres://user:pass@127.0.0.1:1/nonexistent?connect_timeout=1")
+	brokenDB, err := sql.Open("sqlserver", "sqlserver://user:pass@127.0.0.1:1?database=nonexistent&dial+timeout=1")
 	if err != nil {
-		t.Fatalf("constructing a deliberately-unreachable pool: %v", err)
+		t.Fatalf("constructing a deliberately-unreachable db: %v", err)
 	}
-	t.Cleanup(brokenPool.Close)
+	t.Cleanup(func() { brokenDB.Close() })
 
-	rBroken := brokenHealthRouter(t, brokenPool, testutil.RedisClient(t))
+	rBroken := brokenHealthRouter(t, brokenDB, testutil.RedisClient(t))
 
 	brokenRec := doRequest(rBroken, http.MethodGet, "/health", "", "", nil)
 	if brokenRec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("broken postgres: status = %d, want %d, body=%s", brokenRec.Code, http.StatusServiceUnavailable, brokenRec.Body.String())
+		t.Fatalf("broken mssql: status = %d, want %d, body=%s", brokenRec.Code, http.StatusServiceUnavailable, brokenRec.Body.String())
 	}
 	var resp map[string]string
 	if err := json.Unmarshal(brokenRec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding response: %v", err)
 	}
-	if resp["status"] != "postgres unreachable" {
-		t.Fatalf("status field = %q, want %q", resp["status"], "postgres unreachable")
+	if resp["status"] != "mssql unreachable" {
+		t.Fatalf("status field = %q, want %q", resp["status"], "mssql unreachable")
 	}
 }
 
 // brokenHealthRouter builds just enough of a router to exercise /health
-// with a deliberately-broken Postgres pool — the other dependencies
+// with a deliberately-broken SQL Server *sql.DB — the other dependencies
 // (handlers, tokens, users, apiClients) aren't reachable through /health,
-// so they're wired minimally rather than duplicating newTestRouter's setup.
-func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) http.Handler {
+// so they're wired minimally (against a real, working pool) rather than
+// duplicating newTestRouter's setup.
+func brokenHealthRouter(t *testing.T, brokenDB *sql.DB, rdb *redis.Client) http.Handler {
 	t.Helper()
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	users := user.NewService(user.NewRepository(pool))
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
@@ -252,7 +254,7 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil,
 	))
-	return httpserver.NewRouter(handlers, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, testLogger())
+	return httpserver.NewRouter(handlers, tokens, users, brokenDB, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, testLogger())
 }
 
 func TestRouter_JWKSShape(t *testing.T) {
@@ -495,7 +497,7 @@ func TestRouter_TOTPRoutes_UnregisteredWhenNotConfigured(t *testing.T) {
 	// group's middleware before falling through to 404 — sending no
 	// credentials would report 401 from the middleware, not proving
 	// anything about whether the route itself exists).
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, apiKey := testutil.NewAPIClient(t, pool)
 	r := brokenHealthRouter(t, pool, rdb)

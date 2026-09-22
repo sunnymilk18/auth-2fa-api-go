@@ -12,7 +12,7 @@ import (
 )
 
 func TestRequireAPIKey_MissingHeader(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	svc := apiclient.NewService(apiclient.NewRepository(pool))
 
 	handler := RequireAPIKey(svc)(okHandler())
@@ -27,7 +27,7 @@ func TestRequireAPIKey_MissingHeader(t *testing.T) {
 }
 
 func TestRequireAPIKey_InvalidKey(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	svc := apiclient.NewService(apiclient.NewRepository(pool))
 
 	handler := RequireAPIKey(svc)(okHandler())
@@ -43,7 +43,7 @@ func TestRequireAPIKey_InvalidKey(t *testing.T) {
 }
 
 func TestRequireAPIKey_ValidKey(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	svc := apiclient.NewService(apiclient.NewRepository(pool))
 	client, plaintextKey := testutil.NewAPIClient(t, pool)
 
@@ -68,11 +68,11 @@ func TestRequireAPIKey_ValidKey(t *testing.T) {
 }
 
 func TestRequireAPIKey_InactiveClient(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	svc := apiclient.NewService(apiclient.NewRepository(pool))
 	client, plaintextKey := testutil.NewAPIClient(t, pool)
 
-	if _, err := pool.Exec(context.Background(), `UPDATE api_clients SET active = FALSE WHERE id = $1`, client.ID); err != nil {
+	if _, err := pool.ExecContext(context.Background(), `UPDATE api_clients SET active = 0 WHERE id = ?`, client.ID); err != nil {
 		t.Fatalf("deactivating test client: %v", err)
 	}
 

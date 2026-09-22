@@ -2,10 +2,9 @@ package apiclient_test
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/testutil"
@@ -13,13 +12,13 @@ import (
 
 func newTestService(t *testing.T) *apiclient.Service {
 	t.Helper()
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	return apiclient.NewService(apiclient.NewRepository(pool))
 }
 
-func newTestServiceAndPool(t *testing.T) (*apiclient.Service, *pgxpool.Pool) {
+func newTestServiceAndPool(t *testing.T) (*apiclient.Service, *sql.DB) {
 	t.Helper()
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	return apiclient.NewService(apiclient.NewRepository(pool)), pool
 }
 
@@ -27,14 +26,14 @@ func newTestServiceAndPool(t *testing.T) (*apiclient.Service, *pgxpool.Pool) {
 // goes through it) and registers its own cleanup — needed by tests that
 // specifically exercise Create/Authenticate rather than everything
 // testutil.NewAPIClient provisions.
-func mustCreate(t *testing.T, svc *apiclient.Service, pool *pgxpool.Pool) (*apiclient.APIClient, string) {
+func mustCreate(t *testing.T, svc *apiclient.Service, pool *sql.DB) (*apiclient.APIClient, string) {
 	t.Helper()
 	client, plaintextKey, err := svc.Create(t.Context(), "test-"+testutil.UniqueSuffix(t))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = pool.Exec(context.Background(), `DELETE FROM api_clients WHERE id = $1`, client.ID)
+		_, _ = pool.ExecContext(context.Background(), `DELETE FROM api_clients WHERE id = ?`, client.ID)
 	})
 	return client, plaintextKey
 }
@@ -95,11 +94,11 @@ func TestAuthenticate_UnknownKey(t *testing.T) {
 }
 
 func TestAuthenticate_InactiveClient(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	svc := apiclient.NewService(apiclient.NewRepository(pool))
 	client, plaintextKey := testutil.NewAPIClient(t, pool)
 
-	if _, err := pool.Exec(t.Context(), `UPDATE api_clients SET active = FALSE WHERE id = $1`, client.ID); err != nil {
+	if _, err := pool.ExecContext(t.Context(), `UPDATE api_clients SET active = 0 WHERE id = ?`, client.ID); err != nil {
 		t.Fatalf("deactivating test client: %v", err)
 	}
 

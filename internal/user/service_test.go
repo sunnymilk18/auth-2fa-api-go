@@ -10,7 +10,7 @@ import (
 
 func newTestUserService(t *testing.T) (*user.Service, string) {
 	t.Helper()
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 	return user.NewService(user.NewRepository(pool)), client.ID
 }

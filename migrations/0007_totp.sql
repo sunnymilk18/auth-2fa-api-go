@@ -16,15 +16,13 @@
 -- for an account that never finished setup.
 --
 -- Guarded on the column not existing yet — same idempotency requirement
--- every migration here has (testutil.PostgresPool re-applies every *.sql
--- file before each test).
-DO $$
+-- every migration here has (testutil.MSSQLPool re-applies every *.sql file
+-- before each test).
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('users') AND name = 'totp_secret_enc'
+)
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'users' AND column_name = 'totp_secret_enc'
-    ) THEN
-        ALTER TABLE users ADD COLUMN totp_secret_enc TEXT;
-        ALTER TABLE users ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE;
-    END IF;
-END $$;
+    ALTER TABLE users ADD totp_secret_enc NVARCHAR(MAX) NULL;
+    ALTER TABLE users ADD totp_enabled BIT NOT NULL DEFAULT 0;
+END
+GO

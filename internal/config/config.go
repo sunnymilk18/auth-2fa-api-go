@@ -13,7 +13,9 @@ import (
 type Config struct {
 	Port string
 
-	PostgresDSN string
+	// MSSQLDSN is the SQL Server connection string, e.g.
+	// sqlserver://user:password@host:port?database=dbname.
+	MSSQLDSN string
 
 	// RedisURL supports redis:// (plain) and rediss:// (TLS) schemes, e.g.
 	// rediss://default:<password>@<host>:<port> as provided by Upstash.
@@ -130,7 +132,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Port: getEnv("PORT", "8080"),
 
-		PostgresDSN: getEnv("POSTGRES_DSN", "postgres://postgres:postgres@localhost:5432/auth2fa?sslmode=disable"),
+		MSSQLDSN: getEnv("MSSQL_DSN", "sqlserver://sa:@localhost:1433?database=auth2fa"),
 
 		RedisURL: getEnv("REDIS_URL", "redis://localhost:6379/0"),
 

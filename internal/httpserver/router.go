@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -10,7 +11,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
 
@@ -30,7 +30,7 @@ import (
 // config.Config.TOTPEncryptionKeyBase64's doc comment: unset means the
 // feature doesn't exist here (404, not "exists but always fails"), same
 // pattern as adminToken == "" for /admin/*.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, sqlDB *sql.DB, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -75,8 +75,8 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 
 		status := "ok"
 		code := http.StatusOK
-		if err := pgPool.Ping(ctx); err != nil {
-			status = "postgres unreachable"
+		if err := sqlDB.PingContext(ctx); err != nil {
+			status = "mssql unreachable"
 			code = http.StatusServiceUnavailable
 		} else if err := rdb.Ping(ctx).Err(); err != nil {
 			status = "redis unreachable"

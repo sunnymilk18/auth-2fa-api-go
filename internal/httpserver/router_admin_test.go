@@ -27,7 +27,7 @@ const testAdminToken = "test-admin-token"
 func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	t.Helper()
 
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 
 	users := user.NewService(user.NewRepository(pool))

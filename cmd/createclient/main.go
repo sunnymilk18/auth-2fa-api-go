@@ -59,7 +59,7 @@ func usage() {
   createclient rotate -id <id>        Issue a new key for an existing client, invalidating the old one`)
 }
 
-// newService connects to Postgres and returns a ready-to-use Service plus
+// newService connects to SQL Server and returns a ready-to-use Service plus
 // a cleanup func the caller must defer.
 func newService() (*apiclient.Service, func(), error) {
 	cfg, err := config.Load()
@@ -67,12 +67,13 @@ func newService() (*apiclient.Service, func(), error) {
 		return nil, nil, err
 	}
 
-	pool, err := db.NewPostgres(context.Background(), cfg.PostgresDSN)
+	sqlDB, err := db.NewMSSQL(context.Background(), cfg.MSSQLDSN)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	return apiclient.NewService(apiclient.NewRepository(pool)), pool.Close, nil
+	closeFn := func() { sqlDB.Close() }
+	return apiclient.NewService(apiclient.NewRepository(sqlDB)), closeFn, nil
 }
 
 func runCreate(args []string) error {

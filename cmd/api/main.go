@@ -59,12 +59,12 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	pgPool, err := db.NewPostgres(ctx, cfg.PostgresDSN)
+	sqlDB, err := db.NewMSSQL(ctx, cfg.MSSQLDSN)
 	if err != nil {
 		return err
 	}
-	defer pgPool.Close()
-	logger.Info("connected to postgres")
+	defer sqlDB.Close()
+	logger.Info("connected to mssql")
 
 	rdb, err := db.NewRedis(ctx, cfg.RedisURL)
 	if err != nil {
@@ -74,7 +74,7 @@ func run(logger *slog.Logger) error {
 	logger.Info("connected to redis")
 
 	// Wiring: repositories -> services -> handlers.
-	userRepo := user.NewRepository(pgPool)
+	userRepo := user.NewRepository(sqlDB)
 	userSvc := user.NewService(userRepo)
 
 	privateKey, err := loadPrivateKey(cfg)
@@ -87,15 +87,15 @@ func run(logger *slog.Logger) error {
 	if err := addPreviousVerificationKey(tokenMgr, cfg); err != nil {
 		return err
 	}
-	refreshRepo := auth.NewRefreshRepository(pgPool)
+	refreshRepo := auth.NewRefreshRepository(sqlDB)
 	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL, cfg.PasswordResetMaxTries, cfg.PasswordResetCodeLength)
 	emailVerificationStore := auth.NewEmailVerificationStore(rdb, cfg.EmailVerificationTTL, cfg.EmailVerificationMaxTries, cfg.EmailVerificationCodeLength)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, cfg.LoginMaxFailedAttempts, cfg.LoginLockoutWindow)
 
-	deviceRepo := device.NewRepository(pgPool)
+	deviceRepo := device.NewRepository(sqlDB)
 	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL, cfg.DevicePinMaxTries)
 
-	apiClientRepo := apiclient.NewRepository(pgPool)
+	apiClientRepo := apiclient.NewRepository(sqlDB)
 	apiClientSvc := apiclient.NewService(apiClientRepo)
 
 	resendMailer := mailer.NewResendMailer(cfg.ResendAPIKey, cfg.ResendFrom)
@@ -123,7 +123,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, logger)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, sqlDB, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

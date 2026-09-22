@@ -10,7 +10,7 @@ import (
 
 func newTestDeviceService(t *testing.T, maxPinTries int) (*device.Service, string) {
 	t.Helper()
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 	u := testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
 	svc := device.NewService(device.NewRepository(pool), 30*24*time.Hour, maxPinTries)

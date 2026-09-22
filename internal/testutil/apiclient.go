@@ -2,9 +2,8 @@ package testutil
 
 import (
 	"context"
+	"database/sql"
 	"testing"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"auth-2fa-api/internal/apiclient"
 )
@@ -13,10 +12,10 @@ import (
 // most of the schema (users, devices, ...) hangs off one via a foreign key —
 // and registers a cleanup to delete it afterwards. Returns the client and
 // its plaintext API key.
-func NewAPIClient(t *testing.T, pool *pgxpool.Pool) (*apiclient.APIClient, string) {
+func NewAPIClient(t *testing.T, db *sql.DB) (*apiclient.APIClient, string) {
 	t.Helper()
 
-	svc := apiclient.NewService(apiclient.NewRepository(pool))
+	svc := apiclient.NewService(apiclient.NewRepository(db))
 	client, plaintextKey, err := svc.Create(context.Background(), "testclient-"+UniqueSuffix(t))
 	if err != nil {
 		t.Fatalf("creating test api client: %v", err)
@@ -30,8 +29,8 @@ func NewAPIClient(t *testing.T, pool *pgxpool.Pool) (*apiclient.APIClient, strin
 		// make the DELETE below silently no-op behind the FK and leave both
 		// orphaned forever. refresh_tokens/trusted_devices cascade off
 		// users(id) on their own (see migrations 0001/0002).
-		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE api_client_id = $1`, client.ID)
-		_, _ = pool.Exec(ctx, `DELETE FROM api_clients WHERE id = $1`, client.ID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM users WHERE api_client_id = ?`, client.ID)
+		_, _ = db.ExecContext(ctx, `DELETE FROM api_clients WHERE id = ?`, client.ID)
 	})
 
 	return client, plaintextKey

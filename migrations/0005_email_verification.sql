@@ -9,9 +9,36 @@
 -- genuinely new, not-yet-verified account. Backfilled to TRUE (pre-existing
 -- accounts predate this requirement, so they aren't retroactively locked
 -- out), then locked to NOT NULL DEFAULT FALSE for every row and future
--- insert alike. Safe to re-run: once no row is NULL, all three statements
--- below are no-ops.
-ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN;
-UPDATE users SET email_verified = TRUE WHERE email_verified IS NULL;
-ALTER TABLE users ALTER COLUMN email_verified SET NOT NULL;
-ALTER TABLE users ALTER COLUMN email_verified SET DEFAULT FALSE;
+-- insert alike. Safe to re-run: once no row is NULL, all statements below
+-- are no-ops.
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('users') AND name = 'email_verified'
+)
+BEGIN
+    ALTER TABLE users ADD email_verified BIT NULL;
+END
+GO
+
+UPDATE users SET email_verified = 1 WHERE email_verified IS NULL;
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('users') AND name = 'email_verified' AND is_nullable = 1
+)
+BEGIN
+    ALTER TABLE users ALTER COLUMN email_verified BIT NOT NULL;
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.default_constraints dc
+    JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+    WHERE dc.parent_object_id = OBJECT_ID('users') AND c.name = 'email_verified'
+)
+BEGIN
+    ALTER TABLE users ADD CONSTRAINT df_users_email_verified DEFAULT 0 FOR email_verified;
+END
+GO

@@ -4,15 +4,15 @@ API independiente en Go para autenticación con doble factor por correo (email +
 
 ## Arquitectura
 
-- **PostgreSQL**: datos persistentes de usuarios (`users`) y tokens de refresco (`refresh_tokens`).
-- **Redis**: códigos de corta duración (OTP de login, verificación de correo, reset de contraseña — todos expiran solos vía TTL, no se guardan en Postgres) y contadores de rate limiting.
+- **SQL Server**: datos persistentes de usuarios (`users`) y tokens de refresco (`refresh_tokens`). (Migrado desde PostgreSQL — mandato de infraestructura del municipio cliente; ver [Base de datos](#base-de-datos).)
+- **Redis**: códigos de corta duración (OTP de login, verificación de correo, reset de contraseña — todos expiran solos vía TTL, no se guardan en SQL Server) y contadores de rate limiting.
 - **JWT**:
   - Access token firmado con **RS256** (clave privada/pública) — cualquier sistema que reciba el token puede verificarlo por su cuenta usando la clave pública publicada en `/.well-known/jwks.json`, sin llamar de vuelta a esta API.
-  - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
+  - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde SQL Server.
 - **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login`, `/auth/password-reset/*` y `/auth/verify-email/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
 - **Lista negra automática por IP** (`internal/middleware.Blacklist`): una IP que dispara cualquiera de los rate limits de arriba 3 veces separadas en 24h queda baneada del todo (no solo throttleada) — 24h la primera vez, 72h la segunda, 7 días de ahí en más. El nivel de escalada se olvida solo tras 30 días sin nuevas infracciones, para no castigar para siempre una IP compartida (biblioteca pública, wifi comunitario) mucho después de que el que abusó ya se fue. Un admin puede levantar un baneo a mano con `DELETE /admin/blacklist/{ip}` (mismo header `X-Admin-Token`).
 - **Bloqueo manual de cuentas**: `POST /admin/users/{id}/ban` desactiva una cuenta puntual (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut. Es una herramienta operativa, para cuando un caso de abuso se identifica puntualmente.
-- **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
+- **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo SQL Server) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Verificación por app autenticadora (TOTP)**: alternativa opcional al código por correo — cada cuenta la activa por su cuenta (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Requiere `TOTP_ENCRYPTION_KEY`; sin ella, `/auth/totp/*` no existe (mismo criterio que `ADMIN_API_TOKEN`).
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Identidad del usuario**: además de email + password, cada cuenta tiene `username` (8-32 caracteres, no único entre personas, sin forma de rut aunque tenga puntos/guiones, sin "@") y `rut` (documento chileno, único por sistema, validado con dígito verificador). El login acepta cualquiera de los tres — email, username o rut — en un único campo `identifier`, detectado automáticamente por su forma.
@@ -92,15 +92,24 @@ El secreto de cada cuenta se guarda cifrado (`AES-256-GCM`) en la base, nunca en
 
 - Go 1.26+
 - Una cuenta en [Resend](https://resend.com) (gratis) con una API key generada — se usa para enviar los códigos OTP, de verificación de correo y de reset de contraseña
-- PostgreSQL y Redis — dos formas, elegí una:
-  - **Con Docker** (más simple si ya lo tenés instalado): `docker-compose.yml` levanta Postgres y Redis por vos — ver [Ejecutar con Docker Compose](#ejecutar-con-docker-compose) más abajo. No hace falta nada de lo que sigue en esta sección.
-  - **Sin Docker**, con capas gratuitas en la nube (no requiere instalar nada localmente):
+- SQL Server (instalación nativa — ver abajo) y Redis:
 
-### PostgreSQL con Neon (gratis)
+### SQL Server (instalación local nativa)
 
-1. Crea una cuenta en https://neon.tech
-2. Crea un proyecto → te da una **connection string** tipo `postgres://usuario:password@ep-xxxx.neon.tech/neondb?sslmode=require`
-3. Copia esa cadena a `POSTGRES_DSN` en tu `.env`
+Este proyecto corre contra **SQL Server** (no PostgreSQL — ver la nota de arquitectura arriba). Para desarrollo local:
+
+1. Instala [SQL Server 2022 Developer Edition](https://www.microsoft.com/sql-server/sql-server-downloads) (gratis, funcionalmente completa) — instalador nativo de Windows, no requiere Docker.
+2. Durante la instalación, anota la contraseña que le pongas al usuario `sa`.
+3. Crea la base de datos (con SSMS, Azure Data Studio, o `sqlcmd`):
+   ```sql
+   CREATE DATABASE auth2fa;
+   ```
+4. Copia la cadena de conexión a `MSSQL_DSN` en tu `.env`:
+   ```
+   MSSQL_DSN=sqlserver://sa:<tu-contraseña>@localhost:1433?database=auth2fa
+   ```
+
+> **Nota sobre `docker-compose.yml`**: el compose de este repo todavía levanta Postgres (no se tocó en esta migración) — está pendiente de actualizarse con un servicio `mssql` en un paso posterior. Por ahora, `docker compose up` **no** sirve para levantar la base de datos; usa una instalación nativa de SQL Server como se describe arriba.
 
 ### Redis con Upstash (gratis)
 
@@ -112,7 +121,7 @@ El secreto de cada cuenta se guarda cifrado (`AES-256-GCM`) en la base, nunca en
 
 ```bash
 cp .env.example .env
-# Edita .env: POSTGRES_DSN (Neon), REDIS_URL (Upstash), JWT_REFRESH_SECRET y RESEND_API_KEY
+# Edita .env: MSSQL_DSN (SQL Server local), REDIS_URL (Upstash), JWT_REFRESH_SECRET y RESEND_API_KEY
 ```
 
 Genera un secreto fuerte para el refresh token:
@@ -142,13 +151,13 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 
 ## Base de datos
 
-Con `POSTGRES_DSN` configurado en `.env`, aplica todas las migraciones (`migrations/*.sql`, en orden) con la herramienta incluida en el proyecto — no necesitas tener `psql` instalado:
+Con `MSSQL_DSN` configurado en `.env` (y la base ya creada — ver arriba), aplica todas las migraciones (`migrations/*.sql`, en orden) con la herramienta incluida en el proyecto — no necesitas tener `sqlcmd` instalado:
 
 ```bash
 go run ./cmd/migrate
 ```
 
-(Alternativa manual: pegar el contenido de cada archivo en el **SQL Editor** del dashboard de Neon.)
+Los archivos de migración son T-SQL, con statements separados por líneas `GO` cuando una sentencia necesita que la anterior ya haya surtido efecto (por ejemplo, un `ALTER TABLE ADD` seguido de un índice sobre esa misma columna) — `cmd/migrate` y el harness de tests interpretan ese separador ellos mismos (no es SQL real, es la misma convención que usan SSMS/sqlcmd), así que no hace falta ninguna herramienta externa para aplicarlos.
 
 Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
 
@@ -223,7 +232,9 @@ El servidor arranca en `http://localhost:8080`.
 
 ## Ejecutar con Docker Compose
 
-Alternativa a lo de arriba: `docker-compose.yml` levanta todo junto — Postgres, Redis, migraciones aplicadas automáticamente, la API, y el stack completo de observabilidad (ver [Observabilidad](#observabilidad)).
+> **Pendiente de actualizar**: `docker-compose.yml` todavía está armado para Postgres (de antes de la migración a SQL Server) — hoy no levanta una base de datos utilizable por la API. Hasta que se agregue un servicio `mssql` (seguimiento planeado, ver nota en [Base de datos](#base-de-datos)), usa el flujo de instalación nativa de SQL Server de arriba en vez de `docker compose up` para levantar la base.
+
+`docker-compose.yml` levanta el resto junto — Redis, la API, y el stack completo de observabilidad (ver [Observabilidad](#observabilidad)).
 
 **Antes de arrancar:**
 1. Par de claves RS256 generado (`keys/private.pem` + `keys/public.pem` — ver [Claves RS256](#claves-rs256-para-el-access-token) más arriba), legible por el usuario no-root del contenedor (`chmod 644 keys/*.pem` si hace falta).
@@ -251,15 +262,15 @@ No incluye un servidor de correo local a propósito: Resend es una API HTTP haci
 go test ./...
 ```
 
-Corre toda la suite. Los tests que necesitan Postgres (la mayoría) se **saltan** (no fallan) si no encuentran una base disponible — para que corran de verdad, apuntá `TEST_POSTGRES_DSN` a una base local descartable:
+Corre toda la suite. Los tests que necesitan SQL Server (la mayoría) se **saltan** (no fallan) si no encuentran una base disponible — para que corran de verdad, apuntá `TEST_MSSQL_DSN` a una base local descartable (misma instancia nativa de arriba, otra base):
 
 ```bash
 # Linux/macOS/Git Bash:
-TEST_POSTGRES_DSN="postgres://postgres:postgres@localhost:5432/auth2fa_test?sslmode=disable" go test ./...
+TEST_MSSQL_DSN="sqlserver://sa:<tu-contraseña>@localhost:1433?database=auth2fa_test" go test ./...
 ```
 ```powershell
 # PowerShell:
-$env:TEST_POSTGRES_DSN = "postgres://postgres:postgres@localhost:5432/auth2fa_test?sslmode=disable"
+$env:TEST_MSSQL_DSN = "sqlserver://sa:<tu-contraseña>@localhost:1433?database=auth2fa_test"
 go test ./...
 ```
 
@@ -267,7 +278,7 @@ Aplica las migraciones a esa base automáticamente — no hace falta correr `cmd
 
 Flags útiles: `-v` (detalle de cada test, no solo el resumen), `-count=1` (ignora el caché de resultados), `-run <patrón>` (solo los tests cuyo nombre matchea), y limitar a un paquete con `go test ./internal/auth/...`.
 
-El CI (`.github/workflows/ci.yml`) corre exactamente esto en cada push, contra un Postgres efímero — no hace falta correrlo a mano antes de subir cambios, pero es lo primero a probar localmente si el CI falla.
+> **Pendiente de actualizar**: `.github/workflows/ci.yml` todavía corre contra un Postgres efímero — desactualizado tras esta migración, hace falta un paso de seguimiento para correr un SQL Server efímero en su lugar (o los tests DB-backed quedarán saltándose en CI hasta entonces). No tocado en este pase, deliberadamente local-only.
 
 ## Deploy en producción
 

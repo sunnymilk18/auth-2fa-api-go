@@ -1,7 +1,8 @@
 // Command migrate applies every .sql file in ./migrations, in filename
-// order, against POSTGRES_DSN. Simple and idempotent as long as migration
-// files themselves use IF NOT EXISTS / ON CONFLICT — there's no tracking
-// table, this is meant for a small project, not a full migration framework.
+// order, against MSSQL_DSN. Simple and idempotent as long as migration
+// files themselves guard their own DDL (IF NOT EXISTS checks, MERGE) —
+// there's no tracking table, this is meant for a small project, not a full
+// migration framework.
 package main
 
 import (
@@ -29,11 +30,11 @@ func run() error {
 	}
 
 	ctx := context.Background()
-	pool, err := db.NewPostgres(ctx, cfg.PostgresDSN)
+	sqlDB, err := db.NewMSSQL(ctx, cfg.MSSQLDSN)
 	if err != nil {
 		return err
 	}
-	defer pool.Close()
+	defer sqlDB.Close()
 
 	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
@@ -48,7 +49,7 @@ func run() error {
 		}
 
 		log.Printf("applying %s ...", f)
-		if _, err := pool.Exec(ctx, string(sqlBytes)); err != nil {
+		if err := db.ApplyMigration(ctx, sqlDB, string(sqlBytes)); err != nil {
 			return fmt.Errorf("applying %s: %w", f, err)
 		}
 	}

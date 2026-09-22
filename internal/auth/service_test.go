@@ -21,7 +21,7 @@ import (
 func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID string) {
 	t.Helper()
 
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
@@ -61,7 +61,7 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 func newTestServiceWithChoice(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID string) {
 	t.Helper()
 
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
@@ -325,7 +325,7 @@ func TestLoginStep2_UnknownLoginToken(t *testing.T) {
 // credentials from one tenant must never authenticate against another.
 func TestMultiTenant_SameEmailDifferentClients(t *testing.T) {
 	svc, _, mailer, apiClientA := newTestService(t)
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	clientB, _ := testutil.NewAPIClient(t, pool)
 
 	email := "shared-" + testutil.UniqueSuffix(t) + "@example.com"
@@ -437,7 +437,7 @@ func TestDeviceLoginFlow(t *testing.T) {
 // entirely, so it never went through user.Service.VerifyPassword's
 // is_active check on its own before this.
 func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 	apiClientID := client.ID
@@ -732,7 +732,7 @@ func TestDisableTOTP_LoginFallsBackToEmail(t *testing.T) {
 // TestDeviceLogin_BannedAccountIsRefused's Service construction for the
 // nil,nil case this exercises.
 func TestStartTOTPEnrollment_NotConfigured(t *testing.T) {
-	pool := testutil.PostgresPool(t)
+	pool := testutil.MSSQLPool(t)
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 	apiClientID := client.ID
