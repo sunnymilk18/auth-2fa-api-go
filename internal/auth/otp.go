@@ -31,7 +31,7 @@ type loginSession struct {
 }
 
 // OTPStore manages short-lived login sessions and their one-time codes in
-// Redis. This is intentionally separate from the Postgres user store: OTPs
+// Redis. This is intentionally separate from the SQL Server user store: OTPs
 // are high-churn, short-lived data that don't belong in the durable DB.
 type OTPStore struct {
 	rdb      *redis.Client

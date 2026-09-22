@@ -62,7 +62,7 @@ func testLogger() *slog.Logger {
 }
 
 // newTestRouter wires a full router exactly like cmd/api does, against a
-// real (local) Postgres and an in-memory Redis. Returns the router, a
+// real (local) SQL Server and an in-memory Redis. Returns the router, a
 // working API key for the tenant, and a Bearer access token for a
 // registered, logged-in user under that same tenant.
 func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken string) {

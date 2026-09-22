@@ -70,7 +70,7 @@ func (m *TOTPManager) ValidateCode(secret, code string) bool {
 }
 
 // Encrypt returns secret sealed with AES-256-GCM under the manager's key, as
-// base64 (nonce || ciphertext) — the form actually stored in Postgres.
+// base64 (nonce || ciphertext) — the form actually stored in SQL Server.
 func (m *TOTPManager) Encrypt(secret string) (string, error) {
 	block, err := aes.NewCipher(m.key)
 	if err != nil {

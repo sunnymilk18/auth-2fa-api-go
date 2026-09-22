@@ -3,7 +3,7 @@ package auth_test
 // These tests hit auth.Handlers directly over HTTP (httptest), the same
 // contract the Flutter client's ApiClient depends on: status codes and the
 // exact JSON shape of each response. They wire a real Service (real
-// Postgres + in-memory Redis + a fake mailer) but skip the chi router and
+// SQL Server + in-memory Redis + a fake mailer) but skip the chi router and
 // its middleware — API-client/user identity is injected into the request
 // context directly, standing in for what RequireAPIKey/RequireAuth would
 // have set.

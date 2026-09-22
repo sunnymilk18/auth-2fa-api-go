@@ -5,9 +5,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 var ErrNotFound = errors.New("api client not found")
+
+// ErrNameTaken is returned by Create when name is already in use by
+// another client — name is the only unique column on this table (see
+// migration 0003's api_clients definition), so unlike internal/user's
+// uniqueViolationErr there's no need to parse which constraint fired out
+// of the error message: any 2601/2627 on this table can only mean this.
+var ErrNameTaken = errors.New("api client name already in use")
 
 type Repository struct {
 	db *sql.DB
@@ -28,6 +37,10 @@ func (r *Repository) Create(ctx context.Context, name, apiKeyHash string) (*APIC
 		&c.ID, &c.Name, &c.APIKeyHash, &c.Active, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err != nil {
+		var mssqlErr mssql.Error
+		if errors.As(err, &mssqlErr) && (mssqlErr.Number == 2601 || mssqlErr.Number == 2627) {
+			return nil, ErrNameTaken
+		}
 		return nil, fmt.Errorf("inserting api client: %w", err)
 	}
 	return c, nil

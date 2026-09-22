@@ -13,7 +13,7 @@ import (
 	"auth-2fa-api/internal/user"
 )
 
-// newTestService wires a full auth.Service against a real (local) Postgres
+// newTestService wires a full auth.Service against a real (local) SQL Server
 // and an in-memory Redis, with a fake mailer so no real email is ever sent.
 // Returns the service, its token manager (to parse access tokens in tests),
 // the fake mailer (to read OTP/verification/reset codes off "sent" emails),

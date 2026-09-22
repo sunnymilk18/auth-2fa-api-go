@@ -74,6 +74,10 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 
 	client, plaintextKey, err := h.svc.Create(r.Context(), req.Name)
 	if err != nil {
+		if errors.Is(err, ErrNameTaken) {
+			writeError(w, http.StatusConflict, "ya existe un cliente con ese nombre")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "no se pudo crear el cliente")
 		return
 	}

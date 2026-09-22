@@ -111,17 +111,20 @@ Este proyecto corre contra **SQL Server** (no PostgreSQL — ver la nota de arqu
 
 > **Nota sobre `docker-compose.yml`**: el compose de este repo todavía levanta Postgres (no se tocó en esta migración) — está pendiente de actualizarse con un servicio `mssql` en un paso posterior. Por ahora, `docker compose up` **no** sirve para levantar la base de datos; usa una instalación nativa de SQL Server como se describe arriba.
 
-### Redis con Upstash (gratis)
+### Redis
 
-1. Crea una cuenta en https://upstash.com
-2. Crea una base Redis → en el dashboard copia la URL que empieza con `rediss://` (con TLS)
-3. Copia esa URL a `REDIS_URL` en tu `.env`
+Dos opciones para desarrollo local — no hace falta elegir una sola, cualquiera funciona igual de bien con `REDIS_URL`:
+
+- **Docker Compose** (más simple si ya tenés Docker): `docker-compose.yml` en este repo ya incluye un servicio `redis` — solo necesitás `docker compose up redis` (o el stack completo, ver [Ejecutar con Docker Compose](#ejecutar-con-docker-compose)). Sin registrarte en nada, `REDIS_URL` queda `redis://localhost:6379/0` (el default en `.env.example`).
+- **[Upstash](https://upstash.com)** (gratis, sin instalar nada): crea una cuenta → una base Redis → copiá la URL `rediss://` (con TLS) del dashboard a `REDIS_URL`.
+
+Producción (Dokploy) usa su propio Redis autoalojado, no Upstash — ver [Producción (Dokploy)](#producción-dokploy).
 
 ## Configuración
 
 ```bash
 cp .env.example .env
-# Edita .env: MSSQL_DSN (SQL Server local), REDIS_URL (Upstash), JWT_REFRESH_SECRET y RESEND_API_KEY
+# Edita .env: MSSQL_DSN (SQL Server local), REDIS_URL (Docker Compose o Upstash), JWT_REFRESH_SECRET y RESEND_API_KEY
 ```
 
 Genera un secreto fuerte para el refresh token:
@@ -159,7 +162,7 @@ go run ./cmd/migrate
 
 Los archivos de migración son T-SQL, con statements separados por líneas `GO` cuando una sentencia necesita que la anterior ya haya surtido efecto (por ejemplo, un `ALTER TABLE ADD` seguido de un índice sobre esa misma columna) — `cmd/migrate` y el harness de tests interpretan ese separador ellos mismos (no es SQL real, es la misma convención que usan SSMS/sqlcmd), así que no hace falta ninguna herramienta externa para aplicarlos.
 
-Redis (Upstash) no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
+Redis no necesita migración — las claves OTP y de rate limiting se crean solas con TTL.
 
 **Nota sobre la migración `0004`**: agrega el aislamiento por sistema (multi-tenant) a la tabla `users`. En una base nueva se activa sola en este mismo paso, sin nada más que hacer. El único caso especial es una base que ya tenía usuarios *antes* de que existiera el aislamiento por tenant: ahí hay que crear primero un `api_client` (ver la sección siguiente) al que asignarles esos usuarios existentes, y volver a correr `go run ./cmd/migrate` para que los reasigne.
 
@@ -453,8 +456,8 @@ El access token se firma con una sola clave RSA a la vez, pero `/.well-known/jwk
 Esta API en sí misma no depende de nada de esto para funcionar en desarrollo/pruebas — pero antes de que la use gente real, hay una capa de infraestructura y operación que le corresponde a quien administre el entorno final, no al desarrollo de la API. Se las dejamos listadas acá para que no se pierdan en el traspaso.
 
 - **HTTPS obligatorio, no opcional**: el dominio final necesita certificado válido y debería rechazar tráfico por HTTP plano (redirigir o cerrar el puerto), no solo "tenerlo disponible". Sin esto, credenciales y tokens viajan sin cifrar. Ver [Deploy en producción](#deploy-en-producción) — Dokploy/Traefik lo gestiona, pero hay que confirmar que quede forzado.
-- **Backups de PostgreSQL, con restore probado**: hoy no hay ninguna política de backup configurada. Un backup que nunca se probó restaurar no es un backup real — hace falta definir frecuencia, retención, y probar el restore al menos una vez antes de ir a producción.
-- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `TOTP_ENCRYPTION_KEY` (si se usa), `RESEND_API_KEY`, la contraseña de Postgres — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan. `TOTP_ENCRYPTION_KEY` en particular no tiene hoy un procedimiento de rotación (a diferencia de las claves JWT — ver [Rotación de claves JWT](#rotación-de-claves-jwt)): rotarla sin migrar primero los secretos ya cifrados dejaría ilegibles los de todas las cuentas que ya activaron la app autenticadora.
+- **Backups de SQL Server, con restore probado**: hoy no hay ninguna política de backup configurada. Un backup que nunca se probó restaurar no es un backup real — hace falta definir frecuencia, retención, y probar el restore al menos una vez antes de ir a producción.
+- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `TOTP_ENCRYPTION_KEY` (si se usa), `RESEND_API_KEY`, la contraseña de `sa` (o del usuario de aplicación) de SQL Server — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan. `TOTP_ENCRYPTION_KEY` en particular no tiene hoy un procedimiento de rotación (a diferencia de las claves JWT — ver [Rotación de claves JWT](#rotación-de-claves-jwt)): rotarla sin migrar primero los secretos ya cifrados dejaría ilegibles los de todas las cuentas que ya activaron la app autenticadora.
 - **Alertas activas, no solo dashboards**: el stack de [Observabilidad](#observabilidad) ya expone todo lo necesario (métricas de error rate, latencia, salud del servicio) pero nadie recibe una notificación si algo se rompe fuera de horario — hoy hay que entrar a Grafana a mirar. Conviene conectar alertas (Grafana Alerting, o lo que ya usen) sobre esas mismas métricas.
 - **Redundancia / alta disponibilidad**: todo corre en un único VPS (ver [Producción (Dokploy)](#producción-dokploy)) — si esa máquina se cae, el sistema completo se cae con ella. Si el municipio requiere continuidad de servicio, esto necesita evaluarse aparte (más de una instancia, balanceo de carga, etc.).
 - **Protección a nivel de borde (WAF / anti-DDoS)**: el rate limiting de esta API (`internal/middleware.RateLimiter`/`Blacklist`, por IP y por cuenta, con escalada a baneo automático — ver [Arquitectura](#arquitectura)) protege contra fuerza bruta sobre credenciales y OTP, pero no contra un ataque volumétrico de verdad contra la infraestructura — eso se resuelve en la capa de red/proxy, no en la aplicación.

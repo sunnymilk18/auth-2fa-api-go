@@ -9,7 +9,7 @@ import (
 
 // retryConnect calls fn repeatedly with exponential backoff (starting at
 // 1s, doubling, capped at 5s between attempts) until it succeeds or maxWait
-// elapses. Smooths over a slow-to-start dependency — e.g. Postgres or Redis
+// elapses. Smooths over a slow-to-start dependency — e.g. SQL Server or Redis
 // still coming up in the same docker-compose stack (migrate/api can start
 // racing them) — instead of failing the whole service on one unlucky ping
 // at startup.

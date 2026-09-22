@@ -3,6 +3,7 @@ package apiclient_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -70,6 +71,15 @@ func TestCreate_StoresOnlyTheHash_NeverThePlaintext(t *testing.T) {
 	}
 	if client.APIKeyHash != apiclient.HashKey(plaintextKey) {
 		t.Fatalf("stored hash %q != HashKey(plaintext) %q", client.APIKeyHash, apiclient.HashKey(plaintextKey))
+	}
+}
+
+func TestCreate_DuplicateName(t *testing.T) {
+	svc, pool := newTestServiceAndPool(t)
+	client, _ := mustCreate(t, svc, pool)
+
+	if _, _, err := svc.Create(t.Context(), client.Name); !errors.Is(err, apiclient.ErrNameTaken) {
+		t.Fatalf("err = %v, want %v", err, apiclient.ErrNameTaken)
 	}
 }
 

@@ -1,5 +1,5 @@
 // Package testutil provides shared test helpers for spinning up the
-// dependencies the rest of the app needs (Redis, Postgres) without requiring
+// dependencies the rest of the app needs (Redis, SQL Server) without requiring
 // heavyweight infra like Docker.
 package testutil
 
