@@ -22,3 +22,7 @@ vendor/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local-only manual testing console — never meant to ship, see its own
+# header comment.
+/testconsole/

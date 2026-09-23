@@ -55,13 +55,13 @@ func (r *Repository) Upsert(ctx context.Context, userID, deviceID, deviceName, d
 func (r *Repository) FindByDeviceID(ctx context.Context, deviceID string) (*Device, error) {
 	const q = `
 		SELECT id, user_id, device_id, device_name, device_token_hash, pin_hash,
-			failed_pin_attempts, revoked, trusted_at, last_used_at, expires_at, created_at, updated_at
+			failed_pin_attempts, revoked, COALESCE(push_token, ''), trusted_at, last_used_at, expires_at, created_at, updated_at
 		FROM trusted_devices WHERE device_id = $1`
 
 	d := &Device{}
 	err := r.pool.QueryRow(ctx, q, deviceID).Scan(
 		&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash, &d.PinHash,
-		&d.FailedPinAttempts, &d.Revoked, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
+		&d.FailedPinAttempts, &d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -70,6 +70,55 @@ func (r *Repository) FindByDeviceID(ctx context.Context, deviceID string) (*Devi
 		return nil, fmt.Errorf("querying trusted device: %w", err)
 	}
 	return d, nil
+}
+
+// SetPushToken records deviceID's Firebase Cloud Messaging token — called
+// when its user opts in to push-notification login approval from an
+// already-authenticated session (see auth.Service.EnablePushApproval).
+// Scoped to userID so one user can't register a push token onto a device
+// they don't own by guessing its id.
+func (r *Repository) SetPushToken(ctx context.Context, id, userID, pushToken string) error {
+	const q = `UPDATE trusted_devices SET push_token = $3, updated_at = now() WHERE id = $1 AND user_id = $2`
+	tag, err := r.pool.Exec(ctx, q, id, userID, pushToken)
+	if err != nil {
+		return fmt.Errorf("setting device push token: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// FindPushCapableByUser returns every non-revoked, non-expired device for
+// userID that has opted in to push approval (push_token set) — usually one,
+// but nothing stops an account from enabling it on more than one device.
+// auth.Service.StartPushLogin notifies all of them and accepts whichever
+// answers first.
+func (r *Repository) FindPushCapableByUser(ctx context.Context, userID string) ([]Device, error) {
+	const q = `
+		SELECT id, user_id, device_id, device_name, device_token_hash, pin_hash,
+			failed_pin_attempts, revoked, push_token, trusted_at, last_used_at, expires_at, created_at, updated_at
+		FROM trusted_devices
+		WHERE user_id = $1 AND revoked = FALSE AND expires_at > now() AND push_token IS NOT NULL AND push_token != ''`
+
+	rows, err := r.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("listing push-capable devices: %w", err)
+	}
+	defer rows.Close()
+
+	var devices []Device
+	for rows.Next() {
+		var d Device
+		if err := rows.Scan(
+			&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash, &d.PinHash,
+			&d.FailedPinAttempts, &d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scanning push-capable device: %w", err)
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
 }
 
 func (r *Repository) ListByUser(ctx context.Context, userID string) ([]Info, error) {

@@ -219,6 +219,13 @@ type loginResponse struct {
 	// code, and call SendLoginEmailCode or EnrollTOTP/ConfirmTOTP with this
 	// same login_token depending on what's picked, not VerifyOTP directly.
 	NeedsTwoFactorSetup bool `json:"needs_2fa_setup"`
+	// PushApprovalOffered is true when this account also has a push-capable
+	// device already paired — the client can poll GET
+	// /auth/login/push-status with this same login_token and let the user
+	// approve from their phone instead of typing the code that's on its
+	// way regardless (see auth.Service.LoginStep1's doc comment). Always
+	// false alongside NeedsTwoFactorSetup.
+	PushApprovalOffered bool `json:"push_approval_offered"`
 }
 
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
@@ -234,7 +241,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, needsSetup, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
+	loginToken, needsSetup, pushOffered, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
@@ -253,13 +260,17 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := "código de verificación enviado por correo"
-	if needsSetup {
+	switch {
+	case needsSetup:
 		message = "elegí cómo proteger tu cuenta: correo o app autenticadora"
+	case pushOffered:
+		message = "código enviado por correo — o aprueba desde tu celular"
 	}
 	writeJSON(w, http.StatusOK, loginResponse{
 		LoginToken:          loginToken,
 		Message:             message,
 		NeedsTwoFactorSetup: needsSetup,
+		PushApprovalOffered: pushOffered,
 	})
 }
 
@@ -588,6 +599,145 @@ func (h *Handlers) RevokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Push notification login approval ---
+
+type enablePushRequest struct {
+	PushToken string `json:"push_token"`
+}
+
+// EnableDevicePush opts one of the caller's already-trusted devices into
+// push-notification login approval — called from the Security screen (or
+// the PIN-setup banner) after the device has registered itself for FCM and
+// obtained a token, never during registration/first login (see
+// Service.EnablePushApproval's doc comment).
+func (h *Handlers) EnableDevicePush(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+
+	var req enablePushRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.PushToken == "" {
+		writeError(w, http.StatusBadRequest, "push_token es obligatorio")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if err := h.svc.EnablePushApproval(r.Context(), userID, id, req.PushToken); err != nil {
+		switch {
+		case errors.Is(err, ErrPushNotConfigured):
+			writeError(w, http.StatusNotFound, "la aprobación por notificación push no está disponible en este servidor")
+		case errors.Is(err, device.ErrNotFound):
+			writeError(w, http.StatusNotFound, "dispositivo no encontrado")
+		default:
+			log.Printf("enable device push error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo activar la aprobación por notificación")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type pushStatusResponse struct {
+	Status       string `json:"status"`
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
+}
+
+// PushLoginStatus is polled from the PC side (~every 2s, see README's
+// design notes) while the phone hasn't answered yet — status is one of
+// "pending", "approved" or "rejected". Once "approved", the response also
+// carries a fresh token pair and the request is consumed: a second poll
+// after that gets ErrLoginSessionNotFound, same one-time-use rule as
+// /auth/verify-otp.
+func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
+	loginToken := r.URL.Query().Get("login_token")
+	if loginToken == "" {
+		writeError(w, http.StatusBadRequest, "login_token es obligatorio")
+		return
+	}
+
+	status, access, refresh, err := h.svc.PollPushLogin(r.Context(), loginToken)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPushNotConfigured):
+			writeError(w, http.StatusNotFound, "la aprobación por notificación push no está disponible en este servidor")
+		case errors.Is(err, ErrLoginSessionNotFound):
+			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
+		default:
+			log.Printf("push login status error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo consultar el estado")
+		}
+		return
+	}
+
+	resp := pushStatusResponse{Status: status}
+	if access != "" {
+		resp.AccessToken = access
+		resp.RefreshToken = refresh
+		resp.TokenType = "Bearer"
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type pushAnswerRequest struct {
+	LoginToken   string `json:"login_token"`
+	ChosenNumber int    `json:"chosen_number"`
+}
+
+type pushAnswerResponse struct {
+	// Status is "approved" or "rejected" — the phone's own UI needs to
+	// distinguish these (see Service.AnswerPushLogin's doc comment): a
+	// wrong tap should tell the user their session was rejected, not show
+	// the same generic confirmation a correct tap gets.
+	Status string `json:"status"`
+}
+
+// AnswerPushLogin records the phone's tap on the approval screen — called
+// from the phone's own already-authenticated session, never with the login
+// happening on the PC (see Service.AnswerPushLogin's doc comment on why
+// callerUserID always comes from the Bearer token, not the request body).
+func (h *Handlers) AnswerPushLogin(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+
+	var req pushAnswerRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.LoginToken == "" {
+		writeError(w, http.StatusBadRequest, "login_token es obligatorio")
+		return
+	}
+
+	status, err := h.svc.AnswerPushLogin(r.Context(), userID, req.LoginToken, req.ChosenNumber)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPushNotConfigured):
+			writeError(w, http.StatusNotFound, "la aprobación por notificación push no está disponible en este servidor")
+		case errors.Is(err, ErrLoginSessionNotFound):
+			writeError(w, http.StatusUnauthorized, "la solicitud de aprobación no existe, expiró, o ya fue respondida")
+		default:
+			log.Printf("answer push login error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo registrar la respuesta")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, pushAnswerResponse{Status: status})
 }
 
 const timeFormat = "2006-01-02T15:04:05Z07:00"

@@ -152,6 +152,17 @@ services:
       # second factor (see .env.example for how to generate one).
       TOTP_ENCRYPTION_KEY: ${TOTP_ENCRYPTION_KEY:-}
       TOTP_ISSUER: ${TOTP_ISSUER:-auth-2fa-api}
+
+      # Optional — leaves /auth/devices/{id}/push, /auth/login/push-status
+      # and /auth/login/push-answer unregistered entirely if unset. Set
+      # FIREBASE_CREDENTIALS_PATH in your .env to enable push-notification
+      # login approval; the service account JSON itself goes in keys/ (same
+      # ./keys bind mount as the JWT keys above), e.g.
+      # FIREBASE_CREDENTIALS_PATH=/app/keys/firebase-service-account.json.
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-}
+      PUSH_LOGIN_TTL: ${PUSH_LOGIN_TTL:-60s}
+      PUSH_MAX_REQUESTS: ${PUSH_MAX_REQUESTS:-5}
+      PUSH_REQUEST_WINDOW: ${PUSH_REQUEST_WINDOW:-15m}
     volumes:
       - ./keys:/app/keys:ro
     depends_on:
