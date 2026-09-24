@@ -43,6 +43,15 @@ tags:
       Verificación por app autenticadora (Google Authenticator, Authy, etc.)
       — alternativa opcional al código por correo, activada por cada cuenta.
       Solo existe si el servidor tiene TOTP_ENCRYPTION_KEY configurada.
+  - name: push
+    description: >
+      Aprobación de login por notificación push — tercer método opcional,
+      además de correo y TOTP: un login en un dispositivo se confirma con un
+      tap en un celular ya emparejado, en vez de tipear un código. Vía
+      Firebase Cloud Messaging (solo Android por ahora). Solo existe si el
+      servidor tiene FIREBASE_CREDENTIALS_PATH configurada, y solo se ofrece
+      a cuentas que ya tienen un dispositivo emparejado con push habilitado
+      (nunca en el primer login de una cuenta).
   - name: user
     description: Datos del usuario autenticado
   - name: system
@@ -150,7 +159,10 @@ paths:
         (y el servidor tiene TOTP_ENCRYPTION_KEY configurada), no manda
         ningún código todavía — la respuesta trae `needs_2fa_setup: true`
         en su lugar, ver `LoginResponse` y las rutas `/auth/login/send-email-code`
-        y `/auth/totp/enroll`/`confirm` (con `login_token`).
+        y `/auth/totp/enroll`/`confirm` (con `login_token`). Si la cuenta
+        además tiene un dispositivo con push habilitado (nunca junto con
+        `needs_2fa_setup: true`), la respuesta también trae
+        `push_approval_offered: true` — ver el tag `push`.
       security:
         - apiKeyAuth: []
       requestBody:
@@ -672,6 +684,162 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /auth/devices/{id}/push:
+    post:
+      tags: [push]
+      summary: Habilita la aprobación por notificación push en un dispositivo de confianza
+      description: >
+        El `id` es el de `trusted_devices` (ver GET /auth/devices), no el
+        device_id que el cliente genera — por eso push piggybackea sobre un
+        dispositivo YA registrado como confiable (POST /auth/devices/register)
+        en vez de ser un emparejamiento separado: hay que haber activado el
+        PIN de acceso rápido en este dispositivo antes de poder habilitar
+        push en él. push_token es el token FCM que el SDK de Firebase entrega
+        en el celular.
+      security:
+        - apiKeyAuth: []
+          bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnablePushRequest"
+      responses:
+        "204":
+          description: Push habilitado en el dispositivo
+        "400":
+          description: push_token faltante
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            La aprobación push no está habilitada en este servidor, o el
+            dispositivo no existe (o no pertenece a este usuario)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login/push-status:
+    get:
+      tags: [push]
+      summary: Consulta el estado de una solicitud de aprobación push pendiente
+      description: >
+        Pensado para polling (~cada 2s) desde el dispositivo que está
+        logueando, mientras el celular no respondió — mismo patrón que el
+        Device Authorization Grant de OAuth 2.0 (RFC 8628) para "esperar a
+        que un humano actúe en otro dispositivo". En `status: approved` la
+        respuesta también trae un par de tokens directo y la solicitud
+        queda consumida — un poll después de eso devuelve 401, igual que
+        reusar un código OTP ya verificado.
+      security:
+        - apiKeyAuth: []
+      parameters:
+        - name: login_token
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Estado actual de la solicitud
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushStatusResponse"
+        "400":
+          description: login_token faltante
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            La solicitud no existe, ya fue consumida, o expiró
+            (PUSH_LOGIN_TTL, 60s por default) — el cliente debe dejar de
+            hacer polling y seguir con el código por correo, que sigue
+            vigente por su propia ventana (OTP_TTL, independiente de esta)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: La aprobación push no está habilitada en este servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/login/push-answer:
+    post:
+      tags: [push]
+      summary: Registra la respuesta del celular a una solicitud de aprobación
+      description: >
+        Se llama con el Authorization Bearer del CELULAR (la cuenta ya
+        autenticada que recibió la notificación), nunca con el login_token
+        del dispositivo que está logueando — un celular solo puede
+        responder solicitudes dirigidas a su propia cuenta.
+        chosen_number es el número de 2 dígitos que el usuario tocó, de los
+        tres que le llegaron con la notificación (uno correcto, dos
+        señuelos, ya mezclados por el servidor). Un número equivocado
+        rechaza la sesión de forma PERMANENTE y sin reintentos — no hay
+        forma de volver a intentar con el número correcto después de fallar
+        una vez, misma mitigación anti-"MFA fatigue" que Microsoft
+        Authenticator agregó tras ataques reales de bombardeo de
+        notificaciones.
+      security:
+        - apiKeyAuth: []
+          bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PushAnswerRequest"
+      responses:
+        "200":
+          description: Respuesta registrada
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PushAnswerResponse"
+        "400":
+          description: login_token faltante
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: >
+            Token faltante/inválido, o la solicitud no existe/expiró/ya fue
+            respondida, o pertenece a otra cuenta
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: La aprobación push no está habilitada en este servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /me:
     get:
       tags: [user]
@@ -794,6 +962,15 @@ components:
             true solo en el primer login de la cuenta (y solo si el
             servidor tiene TOTP configurada) — el cliente debe mostrar la
             elección de método en vez de pedir un código.
+        push_approval_offered:
+          type: boolean
+          description: >
+            true si la cuenta tiene un dispositivo con aprobación push
+            habilitada — el cliente puede hacer polling de
+            GET /auth/login/push-status con este mismo login_token en
+            paralelo al código que ya está en camino por correo. Siempre
+            false junto con needs_2fa_setup: true, y siempre false si el
+            servidor no tiene FIREBASE_CREDENTIALS_PATH configurada.
 
     VerifyOTPRequest:
       type: object
@@ -1013,6 +1190,50 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/DeviceInfo"
+
+    EnablePushRequest:
+      type: object
+      required: [push_token]
+      properties:
+        push_token:
+          type: string
+          description: Token de registro FCM que el SDK de Firebase entrega en el celular.
+
+    PushStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        access_token:
+          type: string
+          description: Solo presente cuando status es "approved".
+        refresh_token:
+          type: string
+          description: Solo presente cuando status es "approved".
+        token_type:
+          type: string
+          example: Bearer
+          description: Solo presente cuando status es "approved".
+
+    PushAnswerRequest:
+      type: object
+      required: [login_token, chosen_number]
+      properties:
+        login_token:
+          type: string
+          description: El login_token de la solicitud que llegó en la notificación (request_id en el payload de datos FCM), no el de la propia sesión del celular.
+        chosen_number:
+          type: integer
+          description: El número de 2 dígitos que el usuario tocó, de los tres que le llegaron con la notificación.
+          example: 42
+
+    PushAnswerResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [approved, rejected]
 
     Error:
       type: object

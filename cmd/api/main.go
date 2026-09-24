@@ -19,6 +19,7 @@ import (
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/mailer"
+	"auth-2fa-api/internal/push"
 	"auth-2fa-api/internal/telemetry"
 	"auth-2fa-api/internal/user"
 
@@ -105,7 +106,19 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore)
+	pushClient, err := setupPush(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	var pushLoginStore *auth.PushLoginStore
+	var pushRequestLimiter *auth.PushRequestLimiter
+	if pushClient != nil {
+		pushLoginStore = auth.NewPushLoginStore(rdb, cfg.PushLoginTTL)
+		pushRequestLimiter = auth.NewPushRequestLimiter(rdb, cfg.PushMaxRequests, int(cfg.PushRequestWindow.Seconds()))
+		logger.Info("push approval configured")
+	}
+
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
@@ -123,7 +136,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, logger)
+	router := httpserver.NewRouter(authHandlers, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -212,4 +225,20 @@ func setupTOTP(cfg *config.Config, rdb *redis.Client) (*auth.TOTPManager, *auth.
 		return nil, nil, nil, fmt.Errorf("setting up totp: %w", err)
 	}
 	return totpManager, auth.NewTOTPLoginStore(rdb, cfg.OTPTTL), auth.NewTwoFactorSetupStore(rdb, cfg.OTPTTL), nil
+}
+
+// setupPush builds the Firebase Cloud Messaging client when
+// FIREBASE_CREDENTIALS_PATH is configured — see Config.FirebaseCredentialsPath's
+// doc comment for why this is opt-in rather than always-on. A nil, non-error
+// return means the feature isn't configured; auth.Service treats a nil push
+// client the same way it treats a nil totp/totpLogin.
+func setupPush(ctx context.Context, cfg *config.Config) (*push.Client, error) {
+	if cfg.FirebaseCredentialsPath == "" {
+		return nil, nil
+	}
+	client, err := push.NewClient(ctx, cfg.FirebaseCredentialsPath)
+	if err != nil {
+		return nil, fmt.Errorf("setting up push: %w", err)
+	}
+	return client, nil
 }

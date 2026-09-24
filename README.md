@@ -14,6 +14,7 @@ API independiente en Go para autenticación con doble factor por correo (email +
 - **Bloqueo manual de cuentas**: `POST /admin/users/{id}/ban` desactiva una cuenta puntual (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut. Es una herramienta operativa, para cuando un caso de abuso se identifica puntualmente.
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Verificación por app autenticadora (TOTP)**: alternativa opcional al código por correo — cada cuenta la activa por su cuenta (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Requiere `TOTP_ENCRYPTION_KEY`; sin ella, `/auth/totp/*` no existe (mismo criterio que `ADMIN_API_TOKEN`).
+- **Aprobación por notificación push**: tercer método opcional, además de correo y TOTP — un login en un dispositivo (típicamente PC) se confirma con un tap en un celular ya emparejado, en vez de tipear un código. Vía Firebase Cloud Messaging (Android). Requiere `FIREBASE_CREDENTIALS_PATH`; sin ella, `/auth/devices/{id}/push`, `/auth/login/push-status` y `/auth/login/push-answer` no existen (mismo criterio que `TOTP_ENCRYPTION_KEY`).
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas bajo dos API keys diferentes.
 - **Identidad del usuario**: además de email + password, cada cuenta tiene `username` (8-32 caracteres, no único entre personas, sin forma de rut aunque tenga puntos/guiones, sin "@") y `rut` (documento chileno, único por sistema, validado con dígito verificador). El login acepta cualquiera de los tres — email, username o rut — en un único campo `identifier`, detectado automáticamente por su forma.
 - **CORS**: habilitado para cualquier origen (`*`), sin credenciales — la API se autentica por headers (`X-API-Key`, `Authorization`), no por cookies de sesión, así que no hay nada que filtrar abriendo el origen a todos. Cada sistema consumidor puede llamar desde su propio frontend sin que haga falta mantener una lista de dominios permitidos.
@@ -32,6 +33,7 @@ Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#m
 2. `POST /auth/login` — valida `identifier` + `password`. `identifier` acepta el email, el username **o** el rut de la cuenta — el backend prueba las tres columnas en una sola consulta (`email = ? OR username = ? OR rut = ?`), sin adivinar antes cuál es cuál (nada que el cliente tenga que indicar aparte: un solo campo, sin selector de "con qué querés loguear"). Es justamente por esto que `username` no puede tener forma de rut ni contener "@": si se permitiera, el username de una persona podría coincidir con el rut o el email real de otra, y esa consulta ya no sería segura. Si son correctos pero el correo todavía no fue verificado, devuelve un error (403) en vez de continuar — ver más abajo por qué.
    - **Primer login de la cuenta** (y solo si el servidor tiene `TOTP_ENCRYPTION_KEY` configurada — ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)): no manda ningún código todavía. La respuesta trae `needs_2fa_setup: true` + un `login_token` — el cliente le muestra al usuario la elección ("¿correo o app autenticadora?") y sigue por uno de los dos caminos descritos ahí. Esto pasa una sola vez por cuenta.
    - **Cualquier otro caso** (ya eligió método antes, o el servidor no tiene TOTP configurada): genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve `login_token` (`needs_2fa_setup: false`) — el comportamiento de siempre.
+   - **Además**, si la cuenta tiene un dispositivo con aprobación por notificación push habilitada (ver [Aprobación por notificación push](#aprobación-por-notificación-push-opcional) más abajo), la respuesta también trae `push_approval_offered: true` — el cliente puede, en paralelo al código que ya está en camino por correo, hacer polling de `GET /auth/login/push-status` con ese mismo `login_token` y dejar que el usuario apruebe desde el celular en vez de tipear el código. Nunca junto con `needs_2fa_setup: true` — recién en el primer login no hay ningún dispositivo emparejado todavía.
 3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`. El mismo endpoint sirve tanto si la cuenta usa el código por correo como si activó una app autenticadora (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional) más abajo) — el cliente no necesita saber cuál de los dos aplica, el paso 2 ya decide eso por dentro.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
@@ -88,6 +90,25 @@ El secreto de cada cuenta se guarda cifrado (`AES-256-GCM`) en la base, nunca en
 
 **Cuentas que ya existían antes de activar esta función**: la migración que agrega la elección de método marca automáticamente como "ya elegida" (correo) a toda cuenta que ya existiera en ese momento — nadie que ya usaba la API antes ve la pantalla de elección de golpe en su próximo login. Solo las cuentas registradas después empiezan a verla.
 
+### Aprobación por notificación push (opcional)
+
+Tercer método, además de correo y TOTP — un login en un dispositivo (típicamente una PC) se confirma con un tap en un celular ya emparejado, en vez de tipear ningún código. Requiere `FIREBASE_CREDENTIALS_PATH` configurada (ver [Variables opcionales](#variables-opcionales)); si no está seteada, `/auth/devices/{id}/push`, `/auth/login/push-status` y `/auth/login/push-answer` ni siquiera existen (404, mismo criterio que `TOTP_ENCRYPTION_KEY`). Solo Android por ahora — vía [Firebase Cloud Messaging](https://firebase.google.com/docs/cloud-messaging).
+
+A diferencia de TOTP, esto **nunca se ofrece en el primer login** de una cuenta — necesita, además del servidor configurado, un dispositivo ya emparejado con push habilitado, y en el primer login todavía no existe ninguno. Push tampoco reemplaza al correo/TOTP: siempre corre en paralelo a la sesión OTP/TOTP normal que `POST /auth/login` ya inició — cualquiera de los dos caminos (código tipeado, o aprobado desde el celular) completa el mismo `login_token`.
+
+**Emparejar un dispositivo** (protegido, ya logueado — normalmente desde una pantalla de "Seguridad de mi cuenta"):
+
+22. `POST /auth/devices/{id}/push` — recibe `{"push_token": "..."}` (el token FCM que el celular obtiene del SDK de Firebase) y lo asocia al dispositivo `{id}` (el id de `trusted_devices`, no el `device_id` del cliente — ver `GET /auth/devices`). Por eso push **piggybackea sobre el mismo dispositivo de confianza + PIN** en vez de ser un emparejamiento separado: el dispositivo tiene que estar ya registrado como confiable (paso 7 más arriba) antes de poder habilitar push en él.
+
+**Login con push disponible** (siguiendo del paso 2 de arriba, cuando la respuesta trae `push_approval_offered: true`):
+
+23. `GET /auth/login/push-status?login_token=...` — la PC hace polling acá cada ~2s (mismo patrón que el *Device Authorization Grant* de OAuth 2.0, RFC 8628, para "esperar a que un humano actúe en otro dispositivo") mientras el celular no respondió. `status` es `"pending"`, `"approved"` o `"rejected"`. En `"approved"` la respuesta también trae `access_token` + `refresh_token` directo y la solicitud queda consumida — un poll después de eso devuelve `401` (mismo criterio que reusar un OTP ya verificado). Pasado `PUSH_LOGIN_TTL` (60s por default) sin respuesta, también devuelve `401` — el cliente debe dejar de hacer polling y seguir con el código por correo, que sigue vigente por su propia ventana (`OTP_TTL`, independiente de la de push).
+24. `POST /auth/login/push-answer` (protegido — con el `Authorization: Bearer` del celular, **no** del `login_token` de la PC) — recibe `{"login_token": "...", "chosen_number": NN}`. El celular recibe, junto a la notificación push, tres números de 2 dígitos (uno correcto, dos señuelos, ya mezclados por el servidor); debe tocar el que coincide con el que la PC muestra en pantalla. Devuelve `{"status": "approved"}` o `{"status": "rejected"}` — un número equivocado **rechaza la sesión de forma permanente y sin reintentos** (misma mitigación anti-"MFA fatigue" que Microsoft Authenticator agregó tras ataques reales de bombardeo de notificaciones) — no hay forma de volver a intentar con el número correcto después de fallar una vez.
+
+**Límite de solicitudes por cuenta** (`PUSH_MAX_REQUESTS`/`PUSH_REQUEST_WINDOW`, default 5 cada 15 minutos): la defensa real contra ese mismo bombardeo — alguien que ya sabe la contraseña de una cuenta puede loguear exitosamente todas las veces que quiera, y cada login exitoso dispararía una notificación nueva si no fuera por este límite, independiente de `LOGIN_MAX_FAILED_ATTEMPTS` (que solo cuenta contraseñas *fallidas*).
+
+**Notificaciones fallidas por dispositivo no interrumpen el login**: enviar el push es best-effort — si `startPushLogin` falla por cualquier motivo (Redis, límite de solicitudes alcanzado, un token FCM que quedó obsoleto), simplemente no se ofrece la opción push y el login sigue normal por correo/TOTP; nunca se propaga un error al cliente por esto. Esos fallos sí quedan registrados en los logs estructurados del servidor (ver [Observabilidad](#observabilidad)) para poder diagnosticarlos.
+
 ## Requisitos previos
 
 - Go 1.26+
@@ -138,6 +159,9 @@ openssl rsa -in keys/private.pem -pubout -out keys/public.pem
 - **`ADMIN_API_TOKEN`**: habilita `/admin/clients/*` (gestionar API keys por HTTP en vez de solo por CLI — ver [Gestionar clientes existentes](#gestionar-clientes-existentes)). Sin setear, esas rutas ni siquiera existen (404, no "abiertas sin auth"). Generá un secreto fuerte igual que el del refresh token (`openssl rand -base64 48`) si la vas a usar.
 - **`TOTP_ENCRYPTION_KEY`**: habilita `/auth/totp/*` (verificación por app autenticadora — ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Sin setear, esas rutas ni siquiera existen (mismo criterio que `ADMIN_API_TOKEN`). Base64 de exactamente 32 bytes (`openssl rand -base64 32`) — a diferencia de otros secretos del proyecto, este tiene que ser de ese tamaño exacto porque se usa como clave AES-256, no como secreto HMAC de largo libre.
 - **`TOTP_ISSUER`**: nombre mostrado junto a la cuenta en la app autenticadora (default `auth-2fa-api`) — puramente cosmético, cambialo al nombre de tu propio sistema.
+- **`FIREBASE_CREDENTIALS_PATH`**: habilita `/auth/devices/{id}/push`, `/auth/login/push-status` y `/auth/login/push-answer` (aprobación de login por notificación push). Sin setear, esas rutas ni siquiera existen (mismo criterio que `TOTP_ENCRYPTION_KEY`). Ruta a un archivo JSON de cuenta de servicio de Firebase (consola de Firebase → Configuración del proyecto → Cuentas de servicio → Generar nueva clave privada) — igual que las claves JWT, este archivo va en `keys/` y nunca se sube al repo.
+- **`PUSH_LOGIN_TTL`**: cuánto dura pendiente una solicitud de aprobación push antes de expirar sin respuesta (default `60s`). La PC hace polling durante esta ventana.
+- **`PUSH_MAX_REQUESTS`** / **`PUSH_REQUEST_WINDOW`**: tope de solicitudes push por cuenta dentro de una ventana (default `5` cada `15m`) — la defensa real contra "MFA fatigue" (alguien que ya sabe la contraseña bombardeando notificaciones esperando un tap por error). Independiente de `LOGIN_MAX_FAILED_ATTEMPTS`, que solo cuenta contraseñas fallidas.
 - **`OTEL_EXPORTER_OTLP_ENDPOINT`**: habilita el envío de métricas y logs a un collector de OpenTelemetry — ver [Observabilidad](#observabilidad) más abajo. Sin setear, la API funciona igual, solo sin exportar telemetría (los logs siempre se ven por stdout de todas formas).
 
 ## Base de datos
@@ -370,6 +394,32 @@ curl -X POST http://localhost:8080/auth/totp/confirm \
   -d '{"code":"<el que muestra la app>"}'
 # -> 204. De ahí en más, /auth/login para esta cuenta ya no manda OTP por
 # correo — /auth/verify-otp espera el código de la app en su lugar.
+
+# --- Aprobación por notificación push (opcional, requiere
+# FIREBASE_CREDENTIALS_PATH configurada) — ver "Aprobación por notificación
+# push" más arriba. El push_token real solo lo obtiene el SDK de Firebase
+# desde una app de verdad (no hay forma de simular esto con curl solo),
+# así que estos dos últimos pasos son ilustrativos de la forma de la
+# petición/respuesta, no un flujo que se pueda correr de punta a punta acá. ---
+
+# 9. Habilitar push en un dispositivo ya de confianza (el {id} es el de
+# "trusted_devices" — ver GET /auth/devices, no el device_id del paso 6).
+curl -X POST http://localhost:8080/auth/devices/<id>/push \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token>" \
+  -d '{"push_token":"<token FCM que entrega el SDK de Firebase en el celular>"}'
+
+# 10. Con push habilitado, /auth/login (paso 3) también devuelve
+# "push_approval_offered": true. La PC hace polling:
+curl http://localhost:8080/auth/login/push-status?login_token=<el del paso 3> \
+  -H "X-API-Key: $API_KEY"
+# -> { "status": "pending" }  (o "approved" con access_token/refresh_token, o "rejected")
+
+# ...mientras el celular, al tocar uno de los tres números que le llegó en
+# la notificación, responde:
+curl -X POST http://localhost:8080/auth/login/push-answer \
+  -H "Content-Type: application/json" -H "X-API-Key: $API_KEY" -H "Authorization: Bearer <access_token del celular>" \
+  -d '{"login_token":"<el del paso 3>","chosen_number":42}'
+# -> { "status": "approved" }  o  { "status": "rejected" } (sin reintentos)
 ```
 
 ## Documentación de la API
@@ -443,7 +493,7 @@ Esta API en sí misma no depende de nada de esto para funcionar en desarrollo/pr
 
 - **HTTPS obligatorio, no opcional**: el dominio final necesita certificado válido y debería rechazar tráfico por HTTP plano (redirigir o cerrar el puerto), no solo "tenerlo disponible". Sin esto, credenciales y tokens viajan sin cifrar. Ver [Deploy en producción](#deploy-en-producción) — Dokploy/Traefik lo gestiona, pero hay que confirmar que quede forzado.
 - **Backups de PostgreSQL, con restore probado**: hoy no hay ninguna política de backup configurada. Un backup que nunca se probó restaurar no es un backup real — hace falta definir frecuencia, retención, y probar el restore al menos una vez antes de ir a producción.
-- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `TOTP_ENCRYPTION_KEY` (si se usa), `RESEND_API_KEY`, la contraseña de Postgres — hoy viven como variables de entorno en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan. `TOTP_ENCRYPTION_KEY` en particular no tiene hoy un procedimiento de rotación (a diferencia de las claves JWT — ver [Rotación de claves JWT](#rotación-de-claves-jwt)): rotarla sin migrar primero los secretos ya cifrados dejaría ilegibles los de todas las cuentas que ya activaron la app autenticadora.
+- **Gestión de secretos**: `JWT_REFRESH_SECRET`, `JWT_PRIVATE_KEY_PATH`/`JWT_PRIVATE_KEY_PEM_BASE64`, `ADMIN_API_TOKEN`, `TOTP_ENCRYPTION_KEY` (si se usa), `RESEND_API_KEY`, el archivo de cuenta de servicio de `FIREBASE_CREDENTIALS_PATH` (si se usa push), la contraseña de Postgres — hoy viven como variables de entorno (o archivos en `keys/`) en el panel de Dokploy. Funciona, pero para un ente público conviene evaluar algo más auditable (quién puede verlas, cuándo se rotaron, registro de acceso), según la política interna que ya tengan. `TOTP_ENCRYPTION_KEY` en particular no tiene hoy un procedimiento de rotación (a diferencia de las claves JWT — ver [Rotación de claves JWT](#rotación-de-claves-jwt)): rotarla sin migrar primero los secretos ya cifrados dejaría ilegibles los de todas las cuentas que ya activaron la app autenticadora.
 - **Alertas activas, no solo dashboards**: el stack de [Observabilidad](#observabilidad) ya expone todo lo necesario (métricas de error rate, latencia, salud del servicio) pero nadie recibe una notificación si algo se rompe fuera de horario — hoy hay que entrar a Grafana a mirar. Conviene conectar alertas (Grafana Alerting, o lo que ya usen) sobre esas mismas métricas.
 - **Redundancia / alta disponibilidad**: todo corre en un único VPS (ver [Producción (Dokploy)](#producción-dokploy)) — si esa máquina se cae, el sistema completo se cae con ella. Si el municipio requiere continuidad de servicio, esto necesita evaluarse aparte (más de una instancia, balanceo de carga, etc.).
 - **Protección a nivel de borde (WAF / anti-DDoS)**: el rate limiting de esta API (`internal/middleware.RateLimiter`/`Blacklist`, por IP y por cuenta, con escalada a baneo automático — ver [Arquitectura](#arquitectura)) protege contra fuerza bruta sobre credenciales y OTP, pero no contra un ataque volumétrico de verdad contra la infraestructura — eso se resuelve en la capa de red/proxy, no en la aplicación.

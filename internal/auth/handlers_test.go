@@ -408,7 +408,7 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

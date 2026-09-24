@@ -5,10 +5,12 @@ import (
 	"crypto/rsa"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/mailer"
+	"auth-2fa-api/internal/push"
 	"auth-2fa-api/internal/user"
 )
 
@@ -48,6 +50,26 @@ type Service struct {
 	// choose between if TOTP isn't available on this deployment), and just
 	// behaves exactly as it did before this feature existed.
 	twoFactorSetup *TwoFactorSetupStore
+
+	// push/pushLogin/pushRequestLimiter are all nil when
+	// FIREBASE_CREDENTIALS_PATH isn't configured (see cmd/api/main.go) —
+	// same opt-in-at-the-deployment-level reasoning as totp/totpLogin.
+	// Unlike TOTP, push is never offered at first login even when
+	// configured (see startPushLogin's doc comment) — there's a third
+	// condition beyond "deployment has it configured": the specific
+	// account also needs an already-paired push-capable device.
+	push               *push.Client
+	pushLogin          *PushLoginStore
+	pushRequestLimiter *PushRequestLimiter
+
+	// logger records the push failures startPushLogin otherwise swallows
+	// silently (Redis errors, FCM send failures, a stale/unregistered
+	// device token) — that fan-out is deliberately best-effort and must
+	// never fail a login (see startPushLogin's doc comment), but silent
+	// forever makes "why doesn't push ever arrive" undebuggable in
+	// production. Never nil — NewService falls back to slog.Default() —
+	// so every call site here can log unconditionally.
+	logger *slog.Logger
 }
 
 func NewService(
@@ -67,7 +89,14 @@ func NewService(
 	totpManager *TOTPManager,
 	totpLogin *TOTPLoginStore,
 	twoFactorSetup *TwoFactorSetupStore,
+	pushClient *push.Client,
+	pushLogin *PushLoginStore,
+	pushRequestLimiter *PushRequestLimiter,
+	logger *slog.Logger,
 ) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		users:                users,
 		otp:                  otp,
@@ -85,6 +114,10 @@ func NewService(
 		totp:                 totpManager,
 		totpLogin:            totpLogin,
 		twoFactorSetup:       twoFactorSetup,
+		push:                 pushClient,
+		pushLogin:            pushLogin,
+		pushRequestLimiter:   pushRequestLimiter,
+		logger:               logger,
 	}
 }
 
@@ -204,7 +237,16 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // the raw identifier string — same as every attempt worked before this,
 // and still throttles guessing against nonexistent accounts the same way
 // as a real one, which matters for the same enumeration reasons.
-func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, err error) {
+//
+// pushOffered is true when, on top of whichever base method above, this
+// account also has a push-capable device already paired (see
+// EnablePushApproval) — the client can poll PollPushLogin with the same
+// loginToken and let the user approve from their phone instead of typing
+// the code that's already on its way regardless. Always false alongside
+// needsSetup==true (see startPushLogin's doc comment for why push can
+// never be offered on a first-ever login) and always false when this
+// deployment has no FIREBASE_CREDENTIALS_PATH configured at all.
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, pushOffered bool, err error) {
 	lockoutKey := identifier
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
 		lockoutKey = resolved.ID
@@ -212,10 +254,10 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 
 	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	if locked {
-		return "", false, ErrTooManyFailedLogins
+		return "", false, false, ErrTooManyFailedLogins
 	}
 
 	u, err := s.users.VerifyPassword(ctx, apiClientID, identifier, password)
@@ -225,7 +267,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// wrong-password response into a 500.
 			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, lockoutKey)
 		}
-		return "", false, err
+		return "", false, false, err
 	}
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
@@ -240,19 +282,22 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	// otherwise logs in exactly as normal, emailing that real owner an OTP
 	// code on every attempt they never asked for.
 	if !u.EmailVerified {
-		return "", false, ErrEmailNotVerified
+		return "", false, false, ErrEmailNotVerified
 	}
 
 	// First login ever, and there's actually something to choose between —
 	// hand back a pending-choice token instead of defaulting to email. See
 	// this method's doc comment for the full shape of what happens next.
+	// Push is never offered here — see startPushLogin's doc comment.
 	if !u.TwoFactorMethodChosen && s.twoFactorSetup != nil {
 		token, err := s.twoFactorSetup.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 		if err != nil {
-			return "", false, err
+			return "", false, false, err
 		}
-		return token, true, nil
+		return token, true, false, nil
 	}
+
+	candidate := pushLoginCandidate{ID: u.ID, APIClientID: u.APIClientID, Email: u.Email}
 
 	// Accounts that confirmed an authenticator app (see
 	// ConfirmTOTPEnrollment) skip the emailed code entirely — VerifyOTP
@@ -266,15 +311,18 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// deployment after some accounts already enrolled — not a
 			// normal state, but worth a clear error over a nil-pointer
 			// panic or silently falling back to a weaker factor.
-			return "", false, ErrTOTPNotConfigured
+			return "", false, false, ErrTOTPNotConfigured
 		}
 		token, err := s.totpLogin.StartSession(ctx, u.ID, u.APIClientID, u.Email)
-		return token, false, err
+		if err != nil {
+			return "", false, false, err
+		}
+		return token, false, s.startPushLogin(ctx, token, candidate), nil
 	}
 
 	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 
 	// Idempotent, and only actually writes for the (rare) case of an
@@ -292,10 +340,15 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		code, s.otpTTL.String(),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
-		return "", false, fmt.Errorf("sending otp email: %w", err)
+		return "", false, false, fmt.Errorf("sending otp email: %w", err)
 	}
 
-	return loginToken, false, nil
+	// Started AFTER the email actually sends, deliberately: if push somehow
+	// offers before the email send fails above, the caller would have
+	// already returned an error with a push session dangling with nothing
+	// email-side backing it up — the fallback path ("usar otro método")
+	// depends on that email having genuinely gone out.
+	return loginToken, false, s.startPushLogin(ctx, loginToken, candidate), nil
 }
 
 // LoginStep2 verifies the code — emailed OTP or, for accounts with an

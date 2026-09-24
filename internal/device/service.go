@@ -105,6 +105,20 @@ func (s *Service) List(ctx context.Context, userID string) ([]Info, error) {
 	return s.repo.ListByUser(ctx, userID)
 }
 
+// EnablePush records id's Firebase Cloud Messaging token, opting an already
+// trusted device into push-notification login approval. id must already be
+// a trusted device belonging to userID (see Register) — push rides on the
+// same pairing as PIN unlock, not a separate registration step.
+func (s *Service) EnablePush(ctx context.Context, userID, id, pushToken string) error {
+	return s.repo.SetPushToken(ctx, id, userID, pushToken)
+}
+
+// PushCapableDevices returns userID's trusted devices that have opted in to
+// push approval — see Repository.FindPushCapableByUser.
+func (s *Service) PushCapableDevices(ctx context.Context, userID string) ([]Device, error) {
+	return s.repo.FindPushCapableByUser(ctx, userID)
+}
+
 func (s *Service) Revoke(ctx context.Context, userID, id string) error {
 	return s.repo.RevokeOwned(ctx, id, userID)
 }

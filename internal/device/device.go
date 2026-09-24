@@ -14,11 +14,16 @@ type Device struct {
 	PinHash           string
 	FailedPinAttempts int
 	Revoked           bool
-	TrustedAt         time.Time
-	LastUsedAt        time.Time
-	ExpiresAt         time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	// PushToken is the Firebase Cloud Messaging token for this device, set
+	// only once its user opts in to push-notification login approval from
+	// an already-authenticated session — nil/empty until then, and for any
+	// device that never opts in at all. See auth.Service.StartPushLogin.
+	PushToken  string
+	TrustedAt  time.Time
+	LastUsedAt time.Time
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // Info is the safe-to-expose subset returned by the "list my devices" endpoint.

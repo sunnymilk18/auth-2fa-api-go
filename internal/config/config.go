@@ -120,6 +120,28 @@ type Config struct {
 	// TOTPIssuer is the label shown next to the account name in the
 	// authenticator app (e.g. "Auth2FA — Acme Inc"). Purely cosmetic.
 	TOTPIssuer string
+
+	// FirebaseCredentialsPath enables push-notification login approval — a
+	// third alternative to the email OTP / TOTP second factor, for accounts
+	// that opted a trusted device into it. Path to a Firebase service
+	// account JSON key file (see README's "Configurar Firebase Cloud
+	// Messaging" section for how to generate one).
+	//
+	// Empty (the default) disables /auth/devices/{id}/push and the
+	// push-login endpoints entirely, same reasoning as TOTPEncryptionKeyBase64.
+	FirebaseCredentialsPath string
+	// PushLoginTTL is how long a push-approval request stays answerable
+	// before it expires — long enough to notice the notification and pick
+	// up the phone, short enough that a stale request isn't hanging around
+	// for an attacker to still be trying when the real user finally checks.
+	PushLoginTTL time.Duration
+	// PushMaxRequests/PushRequestWindow cap how many push-approval requests
+	// one account can trigger in a rolling window — see
+	// auth.PushRequestLimiter's doc comment for why this (not just the
+	// number-matching challenge) is the actual defense against someone with
+	// a stolen password spamming approval prompts hoping for a blind tap.
+	PushMaxRequests   int
+	PushRequestWindow time.Duration
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -150,6 +172,8 @@ func Load() (*Config, error) {
 
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),
+
+		FirebaseCredentialsPath: getEnv("FIREBASE_CREDENTIALS_PATH", ""),
 	}
 
 	var err error
@@ -199,6 +223,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.TrustProxyHeaders, err = getEnvBool("TRUST_PROXY_HEADERS", false); err != nil {
+		return nil, err
+	}
+	if cfg.PushLoginTTL, err = getEnvDuration("PUSH_LOGIN_TTL", 60*time.Second); err != nil {
+		return nil, err
+	}
+	if cfg.PushMaxRequests, err = getEnvInt("PUSH_MAX_REQUESTS", 5); err != nil {
+		return nil, err
+	}
+	if cfg.PushRequestWindow, err = getEnvDuration("PUSH_REQUEST_WINDOW", 15*time.Minute); err != nil {
 		return nil, err
 	}
 

@@ -30,7 +30,11 @@ import (
 // config.Config.TOTPEncryptionKeyBase64's doc comment: unset means the
 // feature doesn't exist here (404, not "exists but always fails"), same
 // pattern as adminToken == "" for /admin/*.
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, logger *slog.Logger) http.Handler {
+// pushEnabled controls whether the push-notification login-approval routes
+// are registered at all — same opt-in-at-deployment pattern as totpEnabled
+// (see config.Config.FirebaseCredentialsPath's doc comment): unset means
+// 404, not "exists but always fails".
+func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -127,6 +131,13 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		// must go through the flow above first.
 		r.With(deviceLoginLimiter.Middleware).Post("/devices/login", authHandlers.DeviceLogin)
 
+		if pushEnabled {
+			// Polled by the PC (~every 2s) while the phone hasn't answered
+			// yet — identified only by login_token, same as /auth/verify-otp:
+			// no Bearer token exists on the PC side of a push login either.
+			r.With(otpLimiter.Middleware).Get("/login/push-status", authHandlers.PushLoginStatus)
+		}
+
 		r.With(passwordResetRequestLimiter.Middleware).Post("/password-reset/request", authHandlers.RequestPasswordReset)
 		r.With(passwordResetConfirmLimiter.Middleware).Post("/password-reset/confirm", authHandlers.ConfirmPasswordReset)
 
@@ -160,6 +171,15 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Post("/devices/register", authHandlers.RegisterDevice)
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
+
+			if pushEnabled {
+				// Opting a trusted device into push approval, and the
+				// phone's own "I tapped this number" answer — both require
+				// the caller's own Bearer token (see Handlers.EnableDevicePush
+				// / Handlers.AnswerPushLogin doc comments).
+				r.Post("/devices/{id}/push", authHandlers.EnableDevicePush)
+				r.Post("/login/push-answer", authHandlers.AnswerPushLogin)
+			}
 
 			// Disabling only ever makes sense from an already-authenticated
 			// settings screen — there's no first-login equivalent of "turn

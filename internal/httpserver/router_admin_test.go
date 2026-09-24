@@ -38,10 +38,10 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(),
 	))
 
-	return httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, testLogger())
+	return httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
