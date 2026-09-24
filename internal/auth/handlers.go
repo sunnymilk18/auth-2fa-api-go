@@ -647,7 +647,13 @@ func (h *Handlers) EnableDevicePush(w http.ResponseWriter, r *http.Request) {
 }
 
 type pushStatusResponse struct {
-	Status       string `json:"status"`
+	Status string `json:"status"`
+	// Number is the same 2-digit number (0-99) that was designated correct
+	// among the three the phone got with its notification — the PC has to
+	// display this for the person to compare, or the number-matching
+	// challenge has nothing to match against. No omitempty: 0 is a valid
+	// number, not "absent".
+	Number       int    `json:"number"`
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	TokenType    string `json:"token_type,omitempty"`
@@ -666,7 +672,7 @@ func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, access, refresh, err := h.svc.PollPushLogin(r.Context(), loginToken)
+	status, number, access, refresh, err := h.svc.PollPushLogin(r.Context(), loginToken)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPushNotConfigured):
@@ -680,7 +686,7 @@ func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := pushStatusResponse{Status: status}
+	resp := pushStatusResponse{Status: status, Number: number}
 	if access != "" {
 		resp.AccessToken = access
 		resp.RefreshToken = refresh

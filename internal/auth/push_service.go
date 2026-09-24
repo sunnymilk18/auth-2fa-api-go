@@ -182,31 +182,40 @@ func randInt(n int) (int, error) {
 // fresh token pair and consumes the request — a second poll after that
 // returns ErrLoginSessionNotFound, same one-time-use rule as
 // /auth/verify-otp.
-func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status string, accessToken, refreshToken string, err error) {
+//
+// displayNumber is the SAME number startPushLogin designated as correct —
+// this is the PC's only way to ever learn it, and it has to: the whole
+// number-matching mechanism only works if the human can compare what's on
+// the PC's screen against the three choices the phone got. Handing it back
+// here to whoever already holds loginToken isn't a downgrade — an attacker
+// impersonating "the PC" necessarily already has that token (they're the
+// one who triggered the login), and still can't act on it without the real
+// phone owner independently choosing the same number on their own device.
+func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status string, displayNumber int, accessToken, refreshToken string, err error) {
 	if s.pushLogin == nil {
-		return "", "", "", ErrPushNotConfigured
+		return "", 0, "", "", ErrPushNotConfigured
 	}
 
 	sess, found, err := s.pushLogin.Peek(ctx, loginToken)
 	if err != nil {
-		return "", "", "", err
+		return "", 0, "", "", err
 	}
 	if !found {
-		return "", "", "", ErrLoginSessionNotFound
+		return "", 0, "", "", ErrLoginSessionNotFound
 	}
 
 	if sess.Status != pushLoginApproved {
-		return string(sess.Status), "", "", nil
+		return string(sess.Status), sess.CorrectNumber, "", "", nil
 	}
 
 	if err := s.pushLogin.Consume(ctx, loginToken); err != nil {
-		return "", "", "", err
+		return "", 0, "", "", err
 	}
 	accessToken, refreshToken, err = s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
 	if err != nil {
-		return "", "", "", err
+		return "", 0, "", "", err
 	}
-	return string(pushLoginApproved), accessToken, refreshToken, nil
+	return string(pushLoginApproved), sess.CorrectNumber, accessToken, refreshToken, nil
 }
 
 // AnswerPushLogin records the phone's tap. Unlike PollPushLogin (called by

@@ -1205,6 +1205,14 @@ components:
         status:
           type: string
           enum: [pending, approved, rejected]
+        number:
+          type: integer
+          description: >
+            El número de 2 dígitos (0-99) que hay que mostrarle a la persona
+            para que lo compare contra los tres que le llegaron al celular —
+            sin esto, no hay nada contra qué comparar. Presente siempre,
+            no solo en "pending".
+          example: 42
         access_token:
           type: string
           description: Solo presente cuando status es "approved".
