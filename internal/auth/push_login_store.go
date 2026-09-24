@@ -46,6 +46,14 @@ func NewPushLoginStore(rdb *redis.Client, ttl time.Duration) *PushLoginStore {
 	return &PushLoginStore{rdb: rdb, ttl: ttl, prefix: "push-login:"}
 }
 
+// TTL is how long a request this store creates stays answerable — exposed
+// so startPushLogin can tell the phone's push notification when the
+// request it's about to show actually expires, instead of the phone having
+// no idea and just failing opaquely if the person takes too long to decide.
+func (s *PushLoginStore) TTL() time.Duration {
+	return s.ttl
+}
+
 func (s *PushLoginStore) key(requestID string) string {
 	return s.prefix + requestID
 }

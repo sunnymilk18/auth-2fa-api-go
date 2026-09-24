@@ -119,8 +119,9 @@ func (s *Service) startPushLogin(ctx context.Context, loginToken string, u pushL
 	// rejects as stale doesn't block the others — logged (not returned),
 	// since one bad token among several devices shouldn't look like the
 	// whole push offer failed.
+	expiresAt := time.Now().Add(s.pushLogin.TTL())
 	for _, d := range devices {
-		if err := s.push.SendLoginApproval(ctx, d.PushToken, loginToken, numbers); err != nil {
+		if err := s.push.SendLoginApproval(ctx, d.PushToken, loginToken, numbers, expiresAt); err != nil {
 			s.logger.Warn("push: sending login approval to device failed", "user_id", u.ID, "device_id", d.ID, "error", err)
 		}
 	}

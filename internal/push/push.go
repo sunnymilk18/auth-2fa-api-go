@@ -10,7 +10,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	firebase "firebase.google.com/go/v4"
 	"firebase.google.com/go/v4/messaging"
@@ -69,11 +71,18 @@ func NewClient(ctx context.Context, credentialsJSON []byte) (*Client, error) {
 // SendLoginApproval notifies deviceToken that requestID is waiting for a
 // decision, carrying the three numbers (one correct, two decoys, already
 // shuffled by the caller — see auth.Service.StartPushLogin) for the app to
-// show as tap targets. The notification text alone is enough for a user to
-// know something needs their attention even before opening the app; the
-// data payload is what the app itself reads to render the actual approve
-// screen with the right requestID and numbers.
-func (c *Client) SendLoginApproval(ctx context.Context, deviceToken, requestID string, numbers [3]int) error {
+// show as tap targets, plus expiresAt so the app can show a countdown
+// instead of the request just going stale with no warning. The
+// notification text alone is enough for a user to know something needs
+// their attention even before opening the app; the data payload is what
+// the app itself reads to render the actual approve screen with the right
+// requestID, numbers and deadline.
+//
+// expiresAt is sent as an absolute Unix timestamp, not a "seconds
+// remaining" duration — FCM delivery isn't instant, and a relative value
+// would already be wrong by however long the message sat in transit before
+// the app received it.
+func (c *Client) SendLoginApproval(ctx context.Context, deviceToken, requestID string, numbers [3]int, expiresAt time.Time) error {
 	strs := make([]string, len(numbers))
 	for i, n := range numbers {
 		strs[i] = fmt.Sprintf("%02d", n)
@@ -89,6 +98,7 @@ func (c *Client) SendLoginApproval(ctx context.Context, deviceToken, requestID s
 			"type":       "push_login_approval",
 			"request_id": requestID,
 			"numbers":    strings.Join(strs, ","),
+			"expires_at": strconv.FormatInt(expiresAt.Unix(), 10),
 		},
 		Android: &messaging.AndroidConfig{
 			// High priority wakes the device out of Doze/battery-saver
