@@ -236,6 +236,10 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
+	if req.Identifier == "" || req.Password == "" {
+		writeError(w, http.StatusBadRequest, "identifier y password son obligatorios")
+		return
+	}
 
 	apiClientID, ok := APIClientIDFromContext(r.Context())
 	if !ok {
@@ -519,6 +523,10 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 	var req deviceLoginRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.DeviceID == "" || req.DeviceToken == "" || req.Pin == "" {
+		writeError(w, http.StatusBadRequest, "device_id, device_token y pin son obligatorios")
 		return
 	}
 

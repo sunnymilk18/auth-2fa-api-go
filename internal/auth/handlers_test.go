@@ -326,6 +326,20 @@ func TestHandler_ResendEmailVerification_AlreadyVerified(t *testing.T) {
 
 // --- Login (step 1) ---
 
+func TestHandler_Login_MissingFields(t *testing.T) {
+	h, _, _, _, apiClientID := newTestHandlers(t)
+
+	body := jsonBody(t, map[string]string{"identifier": "", "password": ""})
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", body), apiClientID)
+	rec := httptest.NewRecorder()
+
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestHandler_Login_WrongPassword(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
@@ -617,6 +631,20 @@ func TestHandler_RegisterDevice_InvalidPinFormat(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestHandler_DeviceLogin_MissingFields(t *testing.T) {
+	h, _, _, _, _ := newTestHandlers(t)
+
+	body := jsonBody(t, map[string]string{"device_id": "", "device_token": "", "pin": ""})
+	req := httptest.NewRequest(http.MethodPost, "/auth/devices/login", body)
+	rec := httptest.NewRecorder()
+
+	h.DeviceLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
