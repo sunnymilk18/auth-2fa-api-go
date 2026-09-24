@@ -840,6 +840,61 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /auth/login/request-email-code:
+    post:
+      tags: [push]
+      summary: >
+        Pide el código por correo para un login que solo ofreció push
+        ("usar otro método")
+      description: >
+        Solo aplica cuando /auth/login devolvió push_approval_offered:
+        true — en ese caso el código NO se manda por correo automáticamente
+        (a diferencia del caso sin push, donde sí). Llamar acá lo manda
+        recién en este momento, bajo el mismo login_token — de ahí en más
+        el flujo sigue normal con /auth/verify-otp, sin un login_token
+        distinto. Se puede llamar más de una vez (reenviar código), cada
+        llamada invalida el código anterior.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [login_token]
+              properties:
+                login_token:
+                  type: string
+      responses:
+        "200":
+          description: Código enviado por correo
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        "400":
+          description: login_token faltante
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: La sesión de login no existe o expiró
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: La aprobación push no está habilitada en este servidor
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /me:
     get:
       tags: [user]
@@ -967,10 +1022,15 @@ components:
           description: >
             true si la cuenta tiene un dispositivo con aprobación push
             habilitada — el cliente puede hacer polling de
-            GET /auth/login/push-status con este mismo login_token en
-            paralelo al código que ya está en camino por correo. Siempre
-            false junto con needs_2fa_setup: true, y siempre false si el
-            servidor no tiene FIREBASE_CREDENTIALS_PATH configurada.
+            GET /auth/login/push-status con este mismo login_token. A
+            diferencia de TOTP, el código NO se manda por correo todavía en
+            este caso — mismo criterio que sistemas como Microsoft
+            Authenticator o Duo: push es el desafío por defecto, el correo
+            es un respaldo bajo demanda. Si la persona no puede usar push,
+            el cliente llama a POST /auth/login/request-email-code con este
+            mismo login_token para pedirlo recién ahí. Siempre false junto
+            con needs_2fa_setup: true, y siempre false si el servidor no
+            tiene FIREBASE_CREDENTIALS_PATH configurada.
 
     VerifyOTPRequest:
       type: object

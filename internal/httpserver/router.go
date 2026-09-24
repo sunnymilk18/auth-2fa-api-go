@@ -114,6 +114,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
 	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	requestLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-request-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -136,6 +137,12 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			// yet — identified only by login_token, same as /auth/verify-otp:
 			// no Bearer token exists on the PC side of a push login either.
 			r.With(otpLimiter.Middleware).Get("/login/push-status", authHandlers.PushLoginStatus)
+
+			// The "usar otro método" fallback for a login that only offered
+			// push (see auth.Service.LoginStep1's doc comment: the OTP isn't
+			// emailed up front in that case) — only meaningful when push is
+			// actually enabled, same reasoning as push-status above.
+			r.With(requestLoginEmailCodeLimiter.Middleware).Post("/login/request-email-code", authHandlers.RequestLoginEmailCode)
 		}
 
 		r.With(passwordResetRequestLimiter.Middleware).Post("/password-reset/request", authHandlers.RequestPasswordReset)

@@ -222,9 +222,11 @@ type loginResponse struct {
 	// PushApprovalOffered is true when this account also has a push-capable
 	// device already paired — the client can poll GET
 	// /auth/login/push-status with this same login_token and let the user
-	// approve from their phone instead of typing the code that's on its
-	// way regardless (see auth.Service.LoginStep1's doc comment). Always
-	// false alongside NeedsTwoFactorSetup.
+	// approve from their phone. Unlike TOTP, no code is emailed yet in this
+	// case (see auth.Service.LoginStep1's doc comment) — if the person can't
+	// use push, the client calls POST /auth/login/request-email-code with
+	// this same login_token to fall back to the emailed code. Always false
+	// alongside NeedsTwoFactorSetup.
 	PushApprovalOffered bool `json:"push_approval_offered"`
 }
 
@@ -264,7 +266,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	case needsSetup:
 		message = "elegí cómo proteger tu cuenta: correo o app autenticadora"
 	case pushOffered:
-		message = "código enviado por correo — o aprueba desde tu celular"
+		message = "aprueba desde tu celular, o pedí el código por correo"
 	}
 	writeJSON(w, http.StatusOK, loginResponse{
 		LoginToken:          loginToken,
@@ -744,6 +746,42 @@ func (h *Handlers) AnswerPushLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, pushAnswerResponse{Status: status})
+}
+
+type requestLoginEmailCodeRequest struct {
+	LoginToken string `json:"login_token"`
+}
+
+// RequestLoginEmailCode is the "usar otro método" fallback for a login that
+// only offered push — the client calls this to fall back to the emailed
+// code when the person can't use (or didn't get) the push notification. See
+// Service.RequestLoginEmailCode's doc comment for why the code isn't
+// already on its way by the time this is called.
+func (h *Handlers) RequestLoginEmailCode(w http.ResponseWriter, r *http.Request) {
+	var req requestLoginEmailCodeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.LoginToken == "" {
+		writeError(w, http.StatusBadRequest, "login_token es obligatorio")
+		return
+	}
+
+	if err := h.svc.RequestLoginEmailCode(r.Context(), req.LoginToken); err != nil {
+		switch {
+		case errors.Is(err, ErrPushNotConfigured):
+			writeError(w, http.StatusNotFound, "esta función no está disponible en este servidor")
+		case errors.Is(err, ErrLoginSessionNotFound):
+			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
+		default:
+			log.Printf("request login email code error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo enviar el código")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "código de verificación enviado por correo"})
 }
 
 const timeFormat = "2006-01-02T15:04:05Z07:00"

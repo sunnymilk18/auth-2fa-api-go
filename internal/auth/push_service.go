@@ -253,3 +253,41 @@ func (s *Service) AnswerPushLogin(ctx context.Context, callerUserID, loginToken 
 	}
 	return string(resolved), nil
 }
+
+// RequestLoginEmailCode is the "usar otro método" / "no me llegó el push"
+// escape hatch for a login that only offered push — see LoginStep1's doc
+// comment for why the OTP isn't emailed automatically in that case. Sends
+// it now, under the SAME loginToken: LoginStep2/VerifyOTP works against it
+// exactly like any other email login from here on, no second token to
+// juggle. Safe to call more than once (e.g. "reenviar código") — each call
+// just overwrites the pending code, same as ResendEmailVerification.
+//
+// Reads the account's identity off the pending push session rather than
+// looking the user up again — loginToken only ever reaches here because
+// startPushLogin already resolved and stored it there.
+func (s *Service) RequestLoginEmailCode(ctx context.Context, loginToken string) error {
+	if s.pushLogin == nil {
+		return ErrPushNotConfigured
+	}
+
+	sess, found, err := s.pushLogin.Peek(ctx, loginToken)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrLoginSessionNotFound
+	}
+
+	code, err := s.otp.StartSessionWithToken(ctx, loginToken, sess.UserID, sess.APIClientID, sess.Email)
+	if err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
+		code, s.otpTTL.String(),
+	)
+	if err := s.mailer.Send(ctx, sess.Email, "Tu código de verificación", body); err != nil {
+		return fmt.Errorf("sending otp email: %w", err)
+	}
+	return nil
+}

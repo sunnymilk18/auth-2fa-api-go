@@ -241,11 +241,20 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // pushOffered is true when, on top of whichever base method above, this
 // account also has a push-capable device already paired (see
 // EnablePushApproval) — the client can poll PollPushLogin with the same
-// loginToken and let the user approve from their phone instead of typing
-// the code that's already on its way regardless. Always false alongside
-// needsSetup==true (see startPushLogin's doc comment for why push can
-// never be offered on a first-ever login) and always false when this
+// loginToken and let the user approve from their phone. Always false
+// alongside needsSetup==true (see startPushLogin's doc comment for why push
+// can never be offered on a first-ever login) and always false when this
 // deployment has no FIREBASE_CREDENTIALS_PATH configured at all.
+//
+// When pushOffered is true AND the account's base method is email, the OTP
+// is deliberately NOT sent here — same pattern as every push-capable system
+// in the wild (Microsoft Authenticator, Duo, Google prompt): push is the
+// default challenge, and the emailed code is an on-demand fallback the
+// client has to explicitly request via RequestLoginEmailCode, not something
+// that goes out on every single login whether or not it ends up used. TOTP
+// accounts aren't affected by this either way — that code was never
+// server-sent to begin with, it comes from the account's own authenticator
+// app.
 func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, pushOffered bool, err error) {
 	lockoutKey := identifier
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
@@ -320,9 +329,34 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		return token, false, s.startPushLogin(ctx, token, candidate), nil
 	}
 
-	loginToken, code, err := s.otp.StartSession(ctx, u.ID, u.APIClientID, u.Email)
+	loginToken, err = generateToken(32)
 	if err != nil {
-		return "", false, false, err
+		return "", false, false, fmt.Errorf("generating login token: %w", err)
+	}
+
+	// Push is checked BEFORE the OTP email, deliberately, and the email is
+	// skipped entirely when push is offered — matching how push-capable
+	// systems in the wild (Microsoft Authenticator, Duo, Google prompt)
+	// actually behave: push is the default challenge, and other factors are
+	// an on-demand fallback the person has to explicitly ask for (see
+	// RequestLoginEmailCode), not something sent on every single login
+	// regardless of whether it ends up getting used. Emailing an OTP nobody
+	// asked for on every login the account ever makes is exactly the kind
+	// of unnecessary email volume this avoids.
+	pushOffered = s.startPushLogin(ctx, loginToken, candidate)
+
+	if !pushOffered {
+		code, err := s.otp.StartSessionWithToken(ctx, loginToken, u.ID, u.APIClientID, u.Email)
+		if err != nil {
+			return "", false, false, err
+		}
+		body := fmt.Sprintf(
+			"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
+			code, s.otpTTL.String(),
+		)
+		if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
+			return "", false, false, fmt.Errorf("sending otp email: %w", err)
+		}
 	}
 
 	// Idempotent, and only actually writes for the (rare) case of an
@@ -335,20 +369,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		_ = s.users.MarkTwoFactorMethodChosen(ctx, u.ID)
 	}
 
-	body := fmt.Sprintf(
-		"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
-		code, s.otpTTL.String(),
-	)
-	if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
-		return "", false, false, fmt.Errorf("sending otp email: %w", err)
-	}
-
-	// Started AFTER the email actually sends, deliberately: if push somehow
-	// offers before the email send fails above, the caller would have
-	// already returned an error with a push session dangling with nothing
-	// email-side backing it up — the fallback path ("usar otro método")
-	// depends on that email having genuinely gone out.
-	return loginToken, false, s.startPushLogin(ctx, loginToken, candidate), nil
+	return loginToken, false, pushOffered, nil
 }
 
 // LoginStep2 verifies the code — emailed OTP or, for accounts with an
