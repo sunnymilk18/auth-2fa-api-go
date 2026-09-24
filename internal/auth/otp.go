@@ -18,6 +18,10 @@ var (
 	ErrLoginSessionNotFound = errors.New("login session not found or expired")
 	ErrInvalidCode          = errors.New("invalid code")
 	ErrTooManyAttempts      = errors.New("too many attempts, request a new code")
+	// ErrTOTPCodeNotResendable is ResendLoginOTP's error for a TOTP-based
+	// login: there's no emailed code to resend, only the one the person's
+	// own authenticator app is already generating.
+	ErrTOTPCodeNotResendable = errors.New("totp codes can't be resent, check your authenticator app")
 )
 
 // loginSession is what we keep in Redis between "password verified" and
@@ -88,6 +92,24 @@ func (s *OTPStore) StartSessionWithToken(ctx context.Context, loginToken, userID
 	}
 
 	return code, nil
+}
+
+// Peek returns the session without consuming it — used by ResendLoginOTP to
+// find out who a login_token belongs to before re-issuing a fresh code
+// under the same token, without touching the attempt counter or expiring
+// the session the way VerifyCode's atomic script would.
+func (s *OTPStore) Peek(ctx context.Context, loginToken string) (sess loginSession, found bool, err error) {
+	raw, err := s.rdb.Get(ctx, sessionKey(loginToken)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return loginSession{}, false, nil
+	}
+	if err != nil {
+		return loginSession{}, false, fmt.Errorf("reading login session: %w", err)
+	}
+	if err := json.Unmarshal(raw, &sess); err != nil {
+		return loginSession{}, false, fmt.Errorf("decoding login session: %w", err)
+	}
+	return sess, true, nil
 }
 
 // verifyCodeScript does the whole read-compare-increment-write in one

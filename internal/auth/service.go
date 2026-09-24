@@ -396,6 +396,50 @@ func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (acce
 	return s.issueTokenPair(ctx, userID, apiClientID, email)
 }
 
+// ResendLoginOTP re-issues a fresh code under the same login_token for a
+// plain email-OTP login already in progress (LoginStep1's !pushOffered
+// branch, where the code is emailed automatically) — the "I didn't get the
+// code" recovery a normal login has no other way to trigger, since
+// LoginStep1 only ever sends the first one. Unlike RequestLoginEmailCode
+// (the push fallback), this doesn't need a push session: it works straight
+// off the OTP session LoginStep1 already created, so it requires no
+// feature flag and works with push disabled entirely.
+//
+// A TOTP-enabled account's loginToken lives in totpLogin, not otp — that's
+// checked first so that case gets its own clear error
+// (ErrTOTPCodeNotResendable) instead of the generic "session expired"
+// ErrLoginSessionNotFound, since the account itself hasn't gone anywhere;
+// there's just nothing here to resend, the code comes from the person's
+// own authenticator app.
+func (s *Service) ResendLoginOTP(ctx context.Context, loginToken string) error {
+	if s.totpLogin != nil {
+		if _, found, err := s.totpLogin.Peek(ctx, loginToken); err == nil && found {
+			return ErrTOTPCodeNotResendable
+		}
+	}
+
+	sess, found, err := s.otp.Peek(ctx, loginToken)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrLoginSessionNotFound
+	}
+
+	code, err := s.otp.StartSessionWithToken(ctx, loginToken, sess.UserID, sess.APIClientID, sess.Email)
+	if err != nil {
+		return err
+	}
+	body := fmt.Sprintf(
+		"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
+		code, s.otpTTL.String(),
+	)
+	if err := s.mailer.Send(ctx, sess.Email, "Tu código de verificación", body); err != nil {
+		return fmt.Errorf("sending otp email: %w", err)
+	}
+	return nil
+}
+
 // issueTokenPair mints an access+refresh token pair for an already-verified
 // user and persists the refresh token. Shared by every login path (password
 // + OTP, device + PIN, and refresh rotation).

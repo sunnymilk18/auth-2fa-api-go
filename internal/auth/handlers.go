@@ -818,4 +818,38 @@ func (h *Handlers) RequestLoginEmailCode(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "código de verificación enviado por correo"})
 }
 
+type resendLoginCodeRequest struct {
+	LoginToken string `json:"login_token"`
+}
+
+// ResendLoginCode is the "no recibí el código" recovery for a plain email
+// login already in progress — see Service.ResendLoginOTP's doc comment for
+// why this exists separately from RequestLoginEmailCode.
+func (h *Handlers) ResendLoginCode(w http.ResponseWriter, r *http.Request) {
+	var req resendLoginCodeRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.LoginToken == "" {
+		writeError(w, http.StatusBadRequest, "login_token es obligatorio")
+		return
+	}
+
+	if err := h.svc.ResendLoginOTP(r.Context(), req.LoginToken); err != nil {
+		switch {
+		case errors.Is(err, ErrLoginSessionNotFound):
+			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
+		case errors.Is(err, ErrTOTPCodeNotResendable):
+			writeError(w, http.StatusConflict, "el código de tu app autenticadora no se puede reenviar, ábrela para ver el código actual")
+		default:
+			log.Printf("resend login code error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo enviar el código")
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"message": "código de verificación enviado por correo"})
+}
+
 const timeFormat = "2006-01-02T15:04:05Z07:00"

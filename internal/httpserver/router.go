@@ -115,6 +115,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	requestLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-request-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	resendLoginCodeLimiter := middleware.NewRateLimiter(rdb, "login-resend-code", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -131,6 +132,12 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		// instead of password+OTP. A brand new device always fails here and
 		// must go through the flow above first.
 		r.With(deviceLoginLimiter.Middleware).Post("/devices/login", authHandlers.DeviceLogin)
+
+		// "No recibí el código" recovery for a plain email login already in
+		// progress (see auth.Service.ResendLoginOTP's doc comment) — always
+		// available, unlike request-email-code, since the emailed OTP is the
+		// core login path, not an opt-in feature.
+		r.With(resendLoginCodeLimiter.Middleware).Post("/login/resend-code", authHandlers.ResendLoginCode)
 
 		if pushEnabled {
 			// Polled by the PC (~every 2s) while the phone hasn't answered
