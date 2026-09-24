@@ -130,6 +130,13 @@ type Config struct {
 	// Empty (the default) disables /auth/devices/{id}/push and the
 	// push-login endpoints entirely, same reasoning as TOTPEncryptionKeyBase64.
 	FirebaseCredentialsPath string
+	// FirebaseCredentialsJSONBase64 is FirebaseCredentialsPath's alternative
+	// for a platform with no persistent/writable filesystem to put the key
+	// file on — same reasoning, and same pattern, as
+	// JWTPrivateKeyPEMBase64/JWTPrivateKeyPath. Takes priority over
+	// FirebaseCredentialsPath when set (see cmd/api/main.go's setupPush).
+	// Base64 of the service account JSON file's raw contents.
+	FirebaseCredentialsJSONBase64 string
 	// PushLoginTTL is how long a push-approval request stays answerable
 	// before it expires — long enough to notice the notification and pick
 	// up the phone, short enough that a stale request isn't hanging around
@@ -173,7 +180,8 @@ func Load() (*Config, error) {
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),
 
-		FirebaseCredentialsPath: getEnv("FIREBASE_CREDENTIALS_PATH", ""),
+		FirebaseCredentialsPath:       getEnv("FIREBASE_CREDENTIALS_PATH", ""),
+		FirebaseCredentialsJSONBase64: getEnv("FIREBASE_CREDENTIALS_JSON_BASE64", ""),
 	}
 
 	var err error

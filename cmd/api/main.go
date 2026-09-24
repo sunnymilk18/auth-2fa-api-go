@@ -227,18 +227,49 @@ func setupTOTP(cfg *config.Config, rdb *redis.Client) (*auth.TOTPManager, *auth.
 	return totpManager, auth.NewTOTPLoginStore(rdb, cfg.OTPTTL), auth.NewTwoFactorSetupStore(rdb, cfg.OTPTTL), nil
 }
 
-// setupPush builds the Firebase Cloud Messaging client when
-// FIREBASE_CREDENTIALS_PATH is configured — see Config.FirebaseCredentialsPath's
-// doc comment for why this is opt-in rather than always-on. A nil, non-error
-// return means the feature isn't configured; auth.Service treats a nil push
-// client the same way it treats a nil totp/totpLogin.
+// setupPush builds the Firebase Cloud Messaging client when either
+// FIREBASE_CREDENTIALS_PATH or FIREBASE_CREDENTIALS_JSON_BASE64 is
+// configured — see Config.FirebaseCredentialsPath's doc comment for why
+// this is opt-in rather than always-on. A nil, non-error return means the
+// feature isn't configured; auth.Service treats a nil push client the same
+// way it treats a nil totp/totpLogin.
 func setupPush(ctx context.Context, cfg *config.Config) (*push.Client, error) {
-	if cfg.FirebaseCredentialsPath == "" {
+	credentialsJSON, err := loadFirebaseCredentials(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("setting up push: %w", err)
+	}
+	if credentialsJSON == nil {
 		return nil, nil
 	}
-	client, err := push.NewClient(ctx, cfg.FirebaseCredentialsPath)
+	client, err := push.NewClient(ctx, credentialsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("setting up push: %w", err)
 	}
 	return client, nil
+}
+
+// loadFirebaseCredentials prefers FirebaseCredentialsJSONBase64 (a platform
+// env var) over FirebaseCredentialsPath (a file on disk) when both are set
+// — same precedence, and the same reasoning, as loadPrivateKey above: a
+// deploy target with no persistent/writable filesystem (or, as it turned
+// out here, one where the configured bind mount silently isn't what the
+// running container actually sees) needs the env-var form. Returns a nil
+// slice (not an error) when neither is set — the caller treats that as
+// "push not configured", not "misconfigured".
+func loadFirebaseCredentials(cfg *config.Config) ([]byte, error) {
+	if cfg.FirebaseCredentialsJSONBase64 != "" {
+		raw, err := base64.StdEncoding.DecodeString(cfg.FirebaseCredentialsJSONBase64)
+		if err != nil {
+			return nil, fmt.Errorf("decoding FIREBASE_CREDENTIALS_JSON_BASE64: %w", err)
+		}
+		return raw, nil
+	}
+	if cfg.FirebaseCredentialsPath == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(cfg.FirebaseCredentialsPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading FIREBASE_CREDENTIALS_PATH: %w", err)
+	}
+	return raw, nil
 }

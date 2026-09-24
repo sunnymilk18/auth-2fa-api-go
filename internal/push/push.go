@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	firebase "firebase.google.com/go/v4"
@@ -25,36 +24,38 @@ type Client struct {
 	fcm *messaging.Client
 }
 
-// NewClient authenticates against Firebase using a service account key
-// file (see README's "Configurar Firebase Cloud Messaging" section for how
-// to generate one) and returns a ready-to-use Client.
+// NewClient authenticates against Firebase using a service account key's
+// raw JSON contents (see README's "Configurar Firebase Cloud Messaging"
+// section for how to generate one) and returns a ready-to-use Client.
+// Takes the JSON directly, not a file path — see cmd/api/main.go's
+// setupPush for why: this project supports both a file
+// (FIREBASE_CREDENTIALS_PATH, for a host with a persistent filesystem) and
+// a base64 env var (FIREBASE_CREDENTIALS_JSON_BASE64, for one without —
+// same reasoning as JWT_PRIVATE_KEY_PEM_BASE64), and resolving that choice
+// is main.go's job, not this package's.
 //
-// The project ID is read from the credentials file and passed explicitly
-// via firebase.Config — passing nil there (the more obvious-looking call)
+// The project ID is read from the credentials and passed explicitly via
+// firebase.Config — passing nil there (the more obvious-looking call)
 // works in some environments only by accident: the Admin SDK's Messaging
-// client doesn't parse the credentials file for the project ID itself, it
-// falls back to the GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT env vars, which
-// happened to be set on one developer's machine (from an unrelated gcloud
-// install) but not on a clean deploy target, where it failed with "project
-// ID is required to access Firebase Cloud Messaging client" despite a
-// perfectly valid credentials file. Reading it ourselves removes that
-// hidden environment dependency entirely.
-func NewClient(ctx context.Context, credentialsPath string) (*Client, error) {
-	raw, err := os.ReadFile(credentialsPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading firebase credentials file: %w", err)
-	}
+// client doesn't parse the credentials for the project ID itself, it falls
+// back to the GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT env vars, which happened
+// to be set on one developer's machine (from an unrelated gcloud install)
+// but not on a clean deploy target, where it failed with "project ID is
+// required to access Firebase Cloud Messaging client" despite perfectly
+// valid credentials. Reading it ourselves removes that hidden environment
+// dependency entirely.
+func NewClient(ctx context.Context, credentialsJSON []byte) (*Client, error) {
 	var creds struct {
 		ProjectID string `json:"project_id"`
 	}
-	if err := json.Unmarshal(raw, &creds); err != nil {
-		return nil, fmt.Errorf("parsing firebase credentials file: %w", err)
+	if err := json.Unmarshal(credentialsJSON, &creds); err != nil {
+		return nil, fmt.Errorf("parsing firebase credentials: %w", err)
 	}
 	if creds.ProjectID == "" {
-		return nil, fmt.Errorf("firebase credentials file %s has no project_id", credentialsPath)
+		return nil, fmt.Errorf("firebase credentials have no project_id")
 	}
 
-	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: creds.ProjectID}, option.WithCredentialsFile(credentialsPath))
+	app, err := firebase.NewApp(ctx, &firebase.Config{ProjectID: creds.ProjectID}, option.WithCredentialsJSON(credentialsJSON))
 	if err != nil {
 		return nil, fmt.Errorf("initializing firebase app: %w", err)
 	}
