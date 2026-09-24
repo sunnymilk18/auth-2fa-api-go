@@ -246,9 +246,6 @@ func Load() (*Config, error) {
 	if cfg.JWTRefreshSecret == "" {
 		return nil, fmt.Errorf("JWT_REFRESH_SECRET must be set")
 	}
-	if cfg.JWTPrivateKeyPath == "" {
-		return nil, fmt.Errorf("JWT_PRIVATE_KEY_PATH must be set")
-	}
 
 	return cfg, nil
 }

@@ -295,6 +295,10 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
 		return
 	}
+	if req.LoginToken == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "login_token y code son obligatorios")
+		return
+	}
 
 	access, refresh, err := h.svc.LoginStep2(r.Context(), req.LoginToken, req.Code)
 	if err != nil {

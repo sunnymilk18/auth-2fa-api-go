@@ -390,6 +390,19 @@ func TestHandler_Login_Success(t *testing.T) {
 
 // --- VerifyOTP (step 2) ---
 
+func TestHandler_VerifyOTP_MissingFields(t *testing.T) {
+	h, _, _, _, _ := newTestHandlers(t)
+	body := jsonBody(t, map[string]string{"login_token": "", "code": ""})
+	req := httptest.NewRequest(http.MethodPost, "/auth/verify-otp", body)
+	rec := httptest.NewRecorder()
+
+	h.VerifyOTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestHandler_VerifyOTP_UnknownLoginToken(t *testing.T) {
 	h, _, _, _, _ := newTestHandlers(t)
 	body := jsonBody(t, map[string]string{"login_token": "does-not-exist", "code": "123456"})
