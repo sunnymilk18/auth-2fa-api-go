@@ -69,6 +69,18 @@ func (s *Service) EnablePushApproval(ctx context.Context, userID, deviceRowID, p
 	return s.devices.EnablePush(ctx, userID, deviceRowID, pushToken)
 }
 
+// DisablePushApproval turns push back off for deviceRowID — the device
+// itself (PIN unlock, trust) is untouched, this is the "turn it back off"
+// counterpart to EnablePushApproval, letting someone opt out of push
+// without losing their PIN shortcut the way revoking the whole device
+// would.
+func (s *Service) DisablePushApproval(ctx context.Context, userID, deviceRowID string) error {
+	if s.push == nil {
+		return ErrPushNotConfigured
+	}
+	return s.devices.DisablePush(ctx, userID, deviceRowID)
+}
+
 // startPushLogin is called from LoginStep1, after it already has a
 // verified, TwoFactorMethodChosen account and has started its normal
 // email-OTP or TOTP session — never on its own, and never for a first-ever

@@ -113,6 +113,15 @@ func (s *Service) EnablePush(ctx context.Context, userID, id, pushToken string) 
 	return s.repo.SetPushToken(ctx, id, userID, pushToken)
 }
 
+// DisablePush clears id's push token, opting it back out of push-notification
+// login approval — the device itself (PIN unlock, trust) is untouched;
+// this only ever turns push off, never revokes the device the way Revoke
+// does. Lets someone turn push off without losing their PIN shortcut, the
+// same way EnablePush lets them turn it on without a separate pairing step.
+func (s *Service) DisablePush(ctx context.Context, userID, id string) error {
+	return s.repo.SetPushToken(ctx, id, userID, "")
+}
+
 // PushCapableDevices returns userID's trusted devices that have opted in to
 // push approval — see Repository.FindPushCapableByUser.
 func (s *Service) PushCapableDevices(ctx context.Context, userID string) ([]Device, error) {

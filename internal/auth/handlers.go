@@ -654,6 +654,34 @@ func (h *Handlers) EnableDevicePush(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// DisableDevicePush turns push back off for one of the caller's trusted
+// devices — the device itself (PIN unlock, trust) is untouched, only push
+// approval. The "turn it back off" counterpart to EnableDevicePush; see
+// Service.DisablePushApproval's doc comment.
+func (h *Handlers) DisableDevicePush(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if err := h.svc.DisablePushApproval(r.Context(), userID, id); err != nil {
+		switch {
+		case errors.Is(err, ErrPushNotConfigured):
+			writeError(w, http.StatusNotFound, "la aprobación por notificación push no está disponible en este servidor")
+		case errors.Is(err, device.ErrNotFound):
+			writeError(w, http.StatusNotFound, "dispositivo no encontrado")
+		default:
+			log.Printf("disable device push error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo desactivar la aprobación por notificación")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type pushStatusResponse struct {
 	Status string `json:"status"`
 	// Number is the same 2-digit number (0-99) that was designated correct

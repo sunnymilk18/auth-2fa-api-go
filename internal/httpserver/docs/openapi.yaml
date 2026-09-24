@@ -735,6 +735,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+    delete:
+      tags: [push]
+      summary: Desactiva la aprobación por notificación push en un dispositivo
+      description: >
+        La contraparte de "apagar" de POST en esta misma ruta — borra el
+        token FCM guardado. El dispositivo en sí (PIN, confianza) no se
+        toca, a diferencia de DELETE /auth/devices/{id} (que revoca el
+        dispositivo entero); esto solo apaga push, dejando el acceso
+        rápido con PIN intacto.
+      security:
+        - apiKeyAuth: []
+          bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Push desactivado en el dispositivo
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            La aprobación push no está habilitada en este servidor, o el
+            dispositivo no existe (o no pertenece a este usuario)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /auth/login/push-status:
     get:

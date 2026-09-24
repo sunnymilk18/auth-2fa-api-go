@@ -180,11 +180,13 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
 
 			if pushEnabled {
-				// Opting a trusted device into push approval, and the
-				// phone's own "I tapped this number" answer — both require
-				// the caller's own Bearer token (see Handlers.EnableDevicePush
-				// / Handlers.AnswerPushLogin doc comments).
+				// Opting a trusted device into push approval (and back out
+				// of it), and the phone's own "I tapped this number" answer
+				// — all three require the caller's own Bearer token (see
+				// Handlers.EnableDevicePush / DisableDevicePush /
+				// AnswerPushLogin doc comments).
 				r.Post("/devices/{id}/push", authHandlers.EnableDevicePush)
+				r.Delete("/devices/{id}/push", authHandlers.DisableDevicePush)
 				r.Post("/login/push-answer", authHandlers.AnswerPushLogin)
 			}
 
