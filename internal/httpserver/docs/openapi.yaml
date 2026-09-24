@@ -1233,6 +1233,12 @@ components:
           format: uuid
         device_name:
           type: string
+        push_enabled:
+          type: boolean
+          description: >
+            Si este dispositivo tiene la aprobación por notificación push
+            habilitada — estado real del servidor, no algo que el cliente
+            deba cachear localmente.
         trusted_at:
           type: string
           format: date-time

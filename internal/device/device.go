@@ -26,11 +26,18 @@ type Device struct {
 	UpdatedAt  time.Time
 }
 
-// Info is the safe-to-expose subset returned by the "list my devices" endpoint.
+// Info is the safe-to-expose subset returned by the "list my devices"
+// endpoint — never the token/pin hashes themselves, but PushEnabled (unlike
+// PushToken on Device) is safe to expose: it's just a bool, not the secret
+// FCM token underneath it. Lets a client show accurate "push is on/off for
+// this device" state pulled from the server, instead of a locally cached
+// flag that could go stale if push got disabled from elsewhere (another
+// install of the app, or an admin action).
 type Info struct {
-	ID         string
-	DeviceName string
-	TrustedAt  time.Time
-	LastUsedAt time.Time
-	ExpiresAt  time.Time
+	ID          string
+	DeviceName  string
+	PushEnabled bool
+	TrustedAt   time.Time
+	LastUsedAt  time.Time
+	ExpiresAt   time.Time
 }

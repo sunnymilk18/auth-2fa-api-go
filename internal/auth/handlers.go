@@ -547,9 +547,14 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 type deviceInfoResponse struct {
 	ID         string `json:"id"`
 	DeviceName string `json:"device_name"`
-	TrustedAt  string `json:"trusted_at"`
-	LastUsedAt string `json:"last_used_at"`
-	ExpiresAt  string `json:"expires_at"`
+	// PushEnabled reflects the server's own record, not anything the client
+	// tracks locally — lets Security screens show accurate state instead of
+	// a cached flag that could go stale if push got disabled from
+	// elsewhere (another install of the app, or an admin action).
+	PushEnabled bool   `json:"push_enabled"`
+	TrustedAt   string `json:"trusted_at"`
+	LastUsedAt  string `json:"last_used_at"`
+	ExpiresAt   string `json:"expires_at"`
 }
 
 // ListDevices returns the authenticated user's trusted devices.
@@ -570,11 +575,12 @@ func (h *Handlers) ListDevices(w http.ResponseWriter, r *http.Request) {
 	resp := make([]deviceInfoResponse, 0, len(devices))
 	for _, d := range devices {
 		resp = append(resp, deviceInfoResponse{
-			ID:         d.ID,
-			DeviceName: d.DeviceName,
-			TrustedAt:  d.TrustedAt.Format(timeFormat),
-			LastUsedAt: d.LastUsedAt.Format(timeFormat),
-			ExpiresAt:  d.ExpiresAt.Format(timeFormat),
+			ID:          d.ID,
+			DeviceName:  d.DeviceName,
+			PushEnabled: d.PushEnabled,
+			TrustedAt:   d.TrustedAt.Format(timeFormat),
+			LastUsedAt:  d.LastUsedAt.Format(timeFormat),
+			ExpiresAt:   d.ExpiresAt.Format(timeFormat),
 		})
 	}
 

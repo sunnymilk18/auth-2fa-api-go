@@ -123,7 +123,7 @@ func (r *Repository) FindPushCapableByUser(ctx context.Context, userID string) (
 
 func (r *Repository) ListByUser(ctx context.Context, userID string) ([]Info, error) {
 	const q = `
-		SELECT id, device_name, trusted_at, last_used_at, expires_at
+		SELECT id, device_name, (push_token IS NOT NULL AND push_token != ''), trusted_at, last_used_at, expires_at
 		FROM trusted_devices
 		WHERE user_id = $1 AND revoked = FALSE
 		ORDER BY last_used_at DESC`
@@ -137,7 +137,7 @@ func (r *Repository) ListByUser(ctx context.Context, userID string) ([]Info, err
 	var infos []Info
 	for rows.Next() {
 		var i Info
-		if err := rows.Scan(&i.ID, &i.DeviceName, &i.TrustedAt, &i.LastUsedAt, &i.ExpiresAt); err != nil {
+		if err := rows.Scan(&i.ID, &i.DeviceName, &i.PushEnabled, &i.TrustedAt, &i.LastUsedAt, &i.ExpiresAt); err != nil {
 			return nil, fmt.Errorf("scanning trusted device: %w", err)
 		}
 		infos = append(infos, i)
