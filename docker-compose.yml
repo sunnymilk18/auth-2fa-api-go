@@ -207,6 +207,21 @@ services:
       - "3100:3100" # only for manual poking; otel-collector reaches it over the compose network regardless.
 
   grafana:
+    # NOTE for local `docker compose up`: this bind mount works fine here.
+    # It does NOT work on the production Dokploy deploy — relative
+    # bind-mount paths aren't honored there (same root cause as the
+    # earlier Firebase-credentials incident). Production's actual grafana
+    # service is a hand-maintained "Raw" Docker Compose file pasted
+    # directly into Dokploy's own UI, using top-level `configs:` with
+    # inline `content:` instead of a bind mount — completely disconnected
+    # from this file. Any change to grafana/provisioning/ made here has to
+    # be manually re-pasted into that Dokploy compose to reach prod, with
+    # every literal `$` escaped as `$$` (Compose interpolates the whole
+    # file, including config content, and Grafana's own `$__range` etc.
+    # look like undefined Compose vars to it) — and the config's name has
+    # to be bumped (e.g. `_v3` -> `_v4`) on every content change, since
+    # Compose caches a `configs:` entry by name and won't pick up new
+    # content under an unchanged name even on redeploy/restart/rebuild.
     image: grafana/grafana:11.2.0
     ports:
       - "3000:3000"
