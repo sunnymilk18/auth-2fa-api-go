@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -379,6 +380,12 @@ func TestHandler_Login_TooManyFailedAttempts(t *testing.T) {
 	rec := doLogin("correcthorsebattery")
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("locked out (even with the correct password): status = %d, want %d, body=%s", rec.Code, http.StatusTooManyRequests, rec.Body.String())
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("locked out: missing Retry-After header")
+	}
+	if body := decodeJSON(t, rec); !strings.Contains(body["error"].(string), "minuto") {
+		t.Fatalf("locked out: error message %q doesn't tell the user how long to wait", body["error"])
 	}
 }
 

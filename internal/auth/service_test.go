@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"net/url"
 	"testing"
 	"time"
@@ -206,7 +207,7 @@ func TestLoginStep1_LocksOutAfterTooManyFailures(t *testing.T) {
 	}
 
 	// Locked out now — even the CORRECT password is rejected.
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrTooManyFailedLogins {
+	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("correct password after lockout: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }
@@ -232,7 +233,7 @@ func TestLoginStep1_LockoutSharedAcrossIdentifiers(t *testing.T) {
 	// Locked out now, even via a fourth identifier (email again) with the
 	// CORRECT password — if this were still three separate counters, each
 	// would only be at 1 failure and none would be locked.
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != auth.ErrTooManyFailedLogins {
+	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("correct password after 3 failures spread across identifiers: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }
@@ -250,7 +251,7 @@ func TestLoginStep1_LockoutAppliesEvenToUnknownAccounts(t *testing.T) {
 			t.Fatalf("attempt %d against unknown account: err = %v, want %v", i, err, user.ErrInvalidCredentials)
 		}
 	}
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); err != auth.ErrTooManyFailedLogins {
+	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }

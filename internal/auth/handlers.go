@@ -6,12 +6,32 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/user"
 )
+
+// formatWait renders a retry-after duration as a short Spanish phrase for
+// user-facing error messages — rounded up to whole minutes (so 90s reads
+// as "2 minutos", never "1 minuto" when there's really some of a second
+// one left), with the under-a-minute case worded separately rather than
+// as "0 minutos".
+func formatWait(d time.Duration) string {
+	minutes := int(d / time.Minute)
+	if d%time.Minute != 0 {
+		minutes++
+	}
+	if minutes < 1 {
+		return "menos de un minuto"
+	}
+	if minutes == 1 {
+		return "1 minuto"
+	}
+	return fmt.Sprintf("%d minutos", minutes)
+}
 
 type Handlers struct {
 	svc *Service
@@ -249,13 +269,16 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 
 	loginToken, needsSetup, pushOffered, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
 	if err != nil {
+		var lockedErr *LockedOutError
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "correo, usuario, rut o contraseña incorrectos")
 		case errors.Is(err, ErrEmailNotVerified):
 			writeError(w, http.StatusForbidden, "confirma tu correo antes de iniciar sesión")
-		case errors.Is(err, ErrTooManyFailedLogins):
-			writeError(w, http.StatusTooManyRequests, "demasiados intentos fallidos para esta cuenta, intenta de nuevo más tarde")
+		case errors.As(err, &lockedErr):
+			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", lockedErr.RetryAfter.Seconds()))
+			writeError(w, http.StatusTooManyRequests,
+				fmt.Sprintf("demasiados intentos fallidos para esta cuenta, intenta de nuevo en %s", formatWait(lockedErr.RetryAfter)))
 		case errors.Is(err, ErrTOTPNotConfigured):
 			writeError(w, http.StatusInternalServerError, "la verificación por app autenticadora ya no está disponible en el servidor, contacta al soporte")
 		default:

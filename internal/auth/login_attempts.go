@@ -12,6 +12,18 @@ import (
 
 var ErrTooManyFailedLogins = errors.New("too many failed login attempts, try again later")
 
+// LockedOutError wraps ErrTooManyFailedLogins with how long the account
+// actually has left before RecordFailure's window expires — callers that
+// only care whether it's ErrTooManyFailedLogins can keep using errors.Is
+// (Unwrap makes that still match); callers that want to tell the user a
+// real wait time use errors.As to get RetryAfter.
+type LockedOutError struct {
+	RetryAfter time.Duration
+}
+
+func (e *LockedOutError) Error() string { return ErrTooManyFailedLogins.Error() }
+func (e *LockedOutError) Unwrap() error { return ErrTooManyFailedLogins }
+
 // LoginAttemptLimiter tracks failed password attempts per (api client, key)
 // in Redis — distinct from the per-IP rate limiter already on /auth/login
 // (internal/middleware.RateLimiter): that one bounds total request volume
@@ -40,16 +52,33 @@ func NewLoginAttemptLimiter(rdb *redis.Client, maxFails int, window time.Duratio
 }
 
 // IsLocked reports whether apiClientID/lockoutKey currently has too many
-// recorded failures to allow another attempt.
-func (l *LoginAttemptLimiter) IsLocked(ctx context.Context, apiClientID, lockoutKey string) (bool, error) {
-	count, err := l.rdb.Get(ctx, l.redisKey(apiClientID, lockoutKey)).Int64()
+// recorded failures to allow another attempt, and if so, how much longer
+// the lockout actually has left (read from the key's real Redis TTL, not
+// just the configured window — the window started on the first failure,
+// which is usually already some minutes in the past by the time this is
+// checked again).
+func (l *LoginAttemptLimiter) IsLocked(ctx context.Context, apiClientID, lockoutKey string) (locked bool, retryAfter time.Duration, err error) {
+	redisKey := l.redisKey(apiClientID, lockoutKey)
+
+	count, err := l.rdb.Get(ctx, redisKey).Int64()
 	if errors.Is(err, redis.Nil) {
-		return false, nil
+		return false, 0, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("checking login attempts: %w", err)
+		return false, 0, fmt.Errorf("checking login attempts: %w", err)
 	}
-	return count >= l.maxFails, nil
+	if count < l.maxFails {
+		return false, 0, nil
+	}
+
+	ttl, err := l.rdb.TTL(ctx, redisKey).Result()
+	if err != nil || ttl < 0 {
+		// Fall back to the full configured window if the real TTL can't be
+		// read for some reason — still correct, just less precise than the
+		// real remaining time.
+		ttl = l.window
+	}
+	return true, ttl, nil
 }
 
 // RecordFailure increments the failure count, starting its TTL on the

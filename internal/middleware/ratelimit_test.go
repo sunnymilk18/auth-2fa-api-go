@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +18,7 @@ func TestRateLimiter_Allow(t *testing.T) {
 	ctx := t.Context()
 
 	for i := 1; i <= 3; i++ {
-		allowed, err := rl.Allow(ctx, "key")
+		allowed, _, err := rl.Allow(ctx, "key")
 		if err != nil {
 			t.Fatalf("Allow() error: %v", err)
 		}
@@ -26,7 +27,7 @@ func TestRateLimiter_Allow(t *testing.T) {
 		}
 	}
 
-	allowed, err := rl.Allow(ctx, "key")
+	allowed, _, err := rl.Allow(ctx, "key")
 	if err != nil {
 		t.Fatalf("Allow() error: %v", err)
 	}
@@ -35,7 +36,7 @@ func TestRateLimiter_Allow(t *testing.T) {
 	}
 
 	// A different key has its own independent counter.
-	allowed, err = rl.Allow(ctx, "other-key")
+	allowed, _, err = rl.Allow(ctx, "other-key")
 	if err != nil {
 		t.Fatalf("Allow() error: %v", err)
 	}
@@ -52,22 +53,29 @@ func TestRateLimiter_Middleware_BlocksOverLimit(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	do := func() int {
+	do := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/", nil)
 		req.RemoteAddr = "203.0.113.5:12345"
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
-		return rec.Code
+		return rec
 	}
 
-	if code := do(); code != http.StatusOK {
-		t.Fatalf("request 1: want 200, got %d", code)
+	if rec := do(); rec.Code != http.StatusOK {
+		t.Fatalf("request 1: want 200, got %d", rec.Code)
 	}
-	if code := do(); code != http.StatusOK {
-		t.Fatalf("request 2: want 200, got %d", code)
+	if rec := do(); rec.Code != http.StatusOK {
+		t.Fatalf("request 2: want 200, got %d", rec.Code)
 	}
-	if code := do(); code != http.StatusTooManyRequests {
-		t.Fatalf("request 3: want 429, got %d", code)
+	rec := do()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("request 3: want 429, got %d", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("request 3 (blocked): missing Retry-After header")
+	}
+	if !strings.Contains(rec.Body.String(), "minuto") {
+		t.Fatalf("request 3 (blocked): error message %q doesn't tell the caller how long to wait", rec.Body.String())
 	}
 }
 
@@ -135,16 +143,40 @@ func TestRateLimiter_UsesXForwardedForWhenTrusted(t *testing.T) {
 	}
 }
 
+// Allow's retryAfter must reflect how much of the window is actually left,
+// not always the full configured window — see the analogous
+// auth.TestLoginAttemptLimiter_IsLocked_ReturnsRealRemainingTime.
+func TestRateLimiter_Allow_ReturnsRealRemainingTime(t *testing.T) {
+	rdb, mr := testutil.RedisClientAndServer(t)
+	rl := NewRateLimiter(rdb, "test", 1, 10*time.Minute, false)
+	ctx := t.Context()
+
+	if _, _, err := rl.Allow(ctx, "key"); err != nil {
+		t.Fatalf("Allow (first, under limit): %v", err)
+	}
+
+	// 6 of the 10 minutes have already passed — at most 4 should remain.
+	mr.FastForward(6 * time.Minute)
+
+	allowed, retryAfter, err := rl.Allow(ctx, "key")
+	if err != nil || allowed {
+		t.Fatalf("Allow (over limit): allowed=%v err=%v, want false, nil", allowed, err)
+	}
+	if retryAfter <= 0 || retryAfter > 4*time.Minute {
+		t.Fatalf("retryAfter = %v, want something in (0, 4m] (real remaining time, not the full 10m window)", retryAfter)
+	}
+}
+
 func TestRateLimiter_WindowResets(t *testing.T) {
 	rdb, mr := testutil.RedisClientAndServer(t)
 	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
 	ctx := t.Context()
 
-	allowed, err := rl.Allow(ctx, "key")
+	allowed, _, err := rl.Allow(ctx, "key")
 	if err != nil || !allowed {
 		t.Fatalf("first call: allowed=%v err=%v, want true, nil", allowed, err)
 	}
-	allowed, err = rl.Allow(ctx, "key")
+	allowed, _, err = rl.Allow(ctx, "key")
 	if err != nil || allowed {
 		t.Fatalf("second call within window: allowed=%v err=%v, want false, nil", allowed, err)
 	}
@@ -153,7 +185,7 @@ func TestRateLimiter_WindowResets(t *testing.T) {
 	// window instead of sleeping in real time.
 	mr.FastForward(time.Minute + time.Second)
 
-	allowed, err = rl.Allow(ctx, "key")
+	allowed, _, err = rl.Allow(ctx, "key")
 	if err != nil || !allowed {
 		t.Fatalf("call after window reset: allowed=%v err=%v, want true, nil", allowed, err)
 	}
@@ -176,7 +208,7 @@ func TestRateLimiter_FailsOpenWhenRedisIsDown(t *testing.T) {
 	t.Cleanup(func() { _ = rdb.Close() })
 	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
 
-	allowed, err := rl.Allow(t.Context(), "key")
+	allowed, _, err := rl.Allow(t.Context(), "key")
 	if err == nil {
 		t.Fatal("Allow() with Redis down: want an error, got nil")
 	}

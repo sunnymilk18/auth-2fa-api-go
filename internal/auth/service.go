@@ -261,12 +261,12 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		lockoutKey = resolved.ID
 	}
 
-	locked, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
+	locked, retryAfter, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
 	if err != nil {
 		return "", false, false, err
 	}
 	if locked {
-		return "", false, false, ErrTooManyFailedLogins
+		return "", false, false, &LockedOutError{RetryAfter: retryAfter}
 	}
 
 	u, err := s.users.VerifyPassword(ctx, apiClientID, identifier, password)

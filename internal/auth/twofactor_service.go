@@ -75,7 +75,7 @@ func (s *Service) SendLoginEmailCode(ctx context.Context, loginToken string) err
 func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess pendingLoginSession, code string) (accessToken, refreshToken string, err error) {
 	lockoutKey := "totp:" + loginToken
 
-	locked, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
+	locked, _, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
 	if err != nil {
 		return "", "", err
 	}
