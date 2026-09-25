@@ -10,7 +10,7 @@
   "editable": true,
   "graphTooltip": 1,
   "schemaVersion": 39,
-  "version": 3,
+  "version": 6,
   "refresh": "30s",
   "time": {
     "from": "now-6h",
@@ -638,11 +638,11 @@
     {
       "id": 8,
       "type": "logs",
-      "title": "Recent logs",
+      "title": "Recent logs (sin /health)",
       "gridPos": {
         "x": 0,
         "y": 21,
-        "w": 24,
+        "w": 18,
         "h": 8
       },
       "datasource": {
@@ -651,7 +651,43 @@
       },
       "targets": [
         {
-          "expr": "{service_name=\"auth-2fa-api\"}",
+          "expr": "{service_name=\"auth-2fa-api\"} | path != \"/health\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki-ds"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "sortOrder": "Descending",
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Health checks",
+      "description": "Solo /health — separado acá para no tapar el resto de los logs, ya que se dispara constantemente por chequeos automáticos (Docker/Dokploy), no por tráfico real.",
+      "gridPos": {
+        "x": 18,
+        "y": 21,
+        "w": 6,
+        "h": 8
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki-ds"
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"auth-2fa-api\"} | path = \"/health\"",
           "refId": "A",
           "datasource": {
             "type": "loki",
