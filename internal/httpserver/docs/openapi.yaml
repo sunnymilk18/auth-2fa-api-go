@@ -1059,7 +1059,10 @@ components:
             puede tener forma de RUT (ni siquiera con puntos/guiones — ej.
             "1234.5678" también se rechaza) ni contener "@" — eso evita que
             se confunda con un RUT o un email, respectivamente, al loguear
-            (ver `LoginRequest.identifier`).
+            (ver `LoginRequest.identifier`). Requiere al menos una letra —
+            no exige también un número, así que "juanperez" es válido; solo
+            rechaza un username puramente numérico, que se lee como un
+            número de cuenta en vez de un nombre elegido.
           example: juan.perez
         rut:
           type: string

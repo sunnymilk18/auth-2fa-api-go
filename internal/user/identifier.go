@@ -52,17 +52,25 @@ func NormalizeUsername(username string) string {
 
 // ValidateUsername enforces 8-32 characters (checked after
 // NormalizeUsername, so surrounding whitespace doesn't count either way),
-// no "@", and nothing looksLikeRUT would accept. Neither rule is
-// arbitrary — both keep findByIdentifier's single OR-query lookup
+// no "@", nothing looksLikeRUT would accept, and at least one letter. The
+// first three rules keep findByIdentifier's single OR-query lookup
 // (email = ? OR username = ? OR rut = ?) unambiguous: without them, one
-// person's username could collide with a stranger's real email or rut,
-// and the query could resolve to the wrong account entirely. Delegating
-// to looksLikeRUT directly (rather than reimplementing "looks numeric"
-// here) is deliberate too — an earlier version of this function only
-// rejected *purely numeric* usernames, which missed digits-plus-separators
-// like "1234.5678": no letters, so it passed, but looksLikeRUT still
-// strips the dot and sees a bare 8-digit RUT shape underneath. Calling it
-// directly means the two can't drift apart again.
+// person's username could collide with a stranger's real email or rut, and
+// the query could resolve to the wrong account entirely. Delegating to
+// looksLikeRUT directly (rather than reimplementing "looks numeric" here)
+// is deliberate too — an earlier version of this function only rejected
+// *purely numeric* usernames, which missed digits-plus-separators like
+// "1234.5678": no letters, so it passed, but looksLikeRUT still strips the
+// dot and sees a bare 8-digit RUT shape underneath. Calling it directly
+// means the two can't drift apart again.
+//
+// The letter requirement is different in kind from the other three — it's
+// not needed to keep the OR-query unambiguous (looksLikeRUT already rules
+// out every string that could pass for a rut), it's just a quality bar: a
+// username that's nothing but digits reads like a phone number or an
+// account number, not a name someone chose. Deliberately not requiring a
+// digit too — a plain name like "juanperez" is a perfectly good username,
+// and there's no ambiguity risk being closed by forcing one in.
 func ValidateUsername(username string) bool {
 	if len(username) < 8 || len(username) > maxUsernameLen {
 		return false
@@ -73,5 +81,17 @@ func ValidateUsername(username string) bool {
 	if looksLikeRUT(username) {
 		return false
 	}
+	if !hasLetter(username) {
+		return false
+	}
 	return true
+}
+
+func hasLetter(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return true
+		}
+	}
+	return false
 }

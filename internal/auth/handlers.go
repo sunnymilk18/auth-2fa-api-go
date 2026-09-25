@@ -115,7 +115,7 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 				"el usuario %q ya está en uso, probá con %q", usernameTaken.Requested, usernameTaken.Suggested,
 			))
 		case errors.Is(err, user.ErrInvalidUsername):
-			writeError(w, http.StatusBadRequest, "el usuario debe tener entre 8 y 32 caracteres, no puede tener forma de rut ni contener \"@\"")
+			writeError(w, http.StatusBadRequest, "el usuario debe tener entre 8 y 32 caracteres, al menos una letra, no puede tener forma de rut ni contener \"@\"")
 		case errors.Is(err, user.ErrInvalidRUT):
 			writeError(w, http.StatusBadRequest, "el rut no es válido")
 		case errors.Is(err, user.ErrInvalidEmail):
