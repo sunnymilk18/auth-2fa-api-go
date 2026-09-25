@@ -154,12 +154,48 @@ func run(logger *slog.Logger) error {
 		}
 	}()
 
+	go cleanupExpiredRefreshTokens(ctx, refreshRepo, logger)
+
 	<-ctx.Done()
 	logger.Info("shutting down...")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// cleanupExpiredRefreshTokens runs once at startup (so a fresh deploy
+// doesn't wait a full day for the first sweep) and then once every 24h
+// until ctx is cancelled, deleting refresh_tokens rows past their
+// expires_at — see RefreshRepository.DeleteExpired's doc comment for why
+// this exists: IsValid rejects expired tokens but never removes them, so
+// the table grows unbounded without a periodic sweep. Safe to run from
+// more than one instance at once (each run is just a DELETE ... WHERE, no
+// coordination needed) if this ever moves to a multi-replica deployment.
+func cleanupExpiredRefreshTokens(ctx context.Context, refreshRepo *auth.RefreshRepository, logger *slog.Logger) {
+	sweep := func() {
+		n, err := refreshRepo.DeleteExpired(ctx)
+		if err != nil {
+			logger.Error("refresh token cleanup failed", "error", err)
+			return
+		}
+		if n > 0 {
+			logger.Info("refresh token cleanup", "deleted", n)
+		}
+	}
+
+	sweep()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
 }
 
 // loadPrivateKey prefers JWTPrivateKeyPEMBase64 (a platform env var) over

@@ -4,7 +4,7 @@ API independiente en Go para autenticación con doble factor por correo (email +
 
 ## Arquitectura
 
-- **PostgreSQL**: datos persistentes de usuarios (`users`) y tokens de refresco (`refresh_tokens`).
+- **PostgreSQL**: datos persistentes de usuarios (`users`) y tokens de refresco (`refresh_tokens`). Las filas de `refresh_tokens` ya expiradas (`expires_at` pasado) se borran solas: un job en segundo plano dentro del propio proceso de la API corre una vez al iniciar y luego cada 24h (`cleanupExpiredRefreshTokens` en `cmd/api/main.go`) — sin esto la tabla crecería sin límite, ya que `IsValid` solo rechaza un token expirado, no lo borra. Seguro de correr desde más de una instancia a la vez si en algún momento se despliega con réplicas (cada corrida es solo un `DELETE ... WHERE`, sin coordinación necesaria).
 - **Redis**: códigos de corta duración (OTP de login, verificación de correo, reset de contraseña — todos expiran solos vía TTL, no se guardan en Postgres) y contadores de rate limiting.
 - **JWT**:
   - Access token firmado con **RS256** (clave privada/pública) — cualquier sistema que reciba el token puede verificarlo por su cuenta usando la clave pública publicada en `/.well-known/jwks.json`, sin llamar de vuelta a esta API.

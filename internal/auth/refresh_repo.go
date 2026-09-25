@@ -77,6 +77,22 @@ func (r *RefreshRepository) RevokeAllForUser(ctx context.Context, userID string)
 	return nil
 }
 
+// DeleteExpired removes every refresh token row whose expires_at has
+// already passed — expired rows are otherwise never removed (IsValid just
+// rejects them, it doesn't clean up), so without this the table grows
+// forever. Returns how many rows were deleted, for logging. Revoked-but-
+// not-yet-expired rows are left alone; they get swept once their own
+// expires_at passes too, same as any other row — no separate cleanup path
+// needed for them.
+func (r *RefreshRepository) DeleteExpired(ctx context.Context) (int64, error) {
+	const q = `DELETE FROM refresh_tokens WHERE expires_at < now()`
+	tag, err := r.pool.Exec(ctx, q)
+	if err != nil {
+		return 0, fmt.Errorf("deleting expired refresh tokens: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 func hashToken(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
