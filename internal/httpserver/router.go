@@ -25,7 +25,10 @@ import (
 // routes. meter is a no-op if telemetry.SetupMetrics was never called (or
 // ran with no OTLP endpoint configured) — callers never need to check.
 // adminToken == "" leaves /admin/* unregistered entirely (404, not "open
-// with no auth") — see middleware.RequireAdminToken.
+// with no auth") — see middleware.RequireAdminToken. /system-admin/* is
+// unaffected by adminToken: it's always registered, gated per-client by
+// whether that client has its own scoped key provisioned (see
+// middleware.RequireSystemAdminToken).
 // totpEnabled controls whether /auth/totp/* is registered at all — see
 // config.Config.TOTPEncryptionKeyBase64's doc comment: unset means the
 // feature doesn't exist here (404, not "exists but always fails"), same
@@ -34,7 +37,7 @@ import (
 // are registered at all — same opt-in-at-deployment pattern as totpEnabled
 // (see config.Config.FirebaseCredentialsPath's doc comment): unset means
 // 404, not "exists but always fails".
-func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -44,7 +47,7 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "X-Admin-Token"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-API-Key", "X-Admin-Token", "X-System-Admin-Token"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
@@ -206,6 +209,13 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 		})
 	})
 
+	// Account-level moderation — same four handlers back both /admin/users
+	// (the operator's own X-Admin-Token, unscoped) and /system-admin/users
+	// (a tenant's own scoped X-System-Admin-Token) below; see
+	// auth.AdminHandlers' doc comment. See user.Service.Ban's doc comment
+	// for why banning is never triggered automatically.
+	adminUserHandlers := auth.NewAdminHandlers(authSvc)
+
 	if adminToken != "" {
 		adminHandlers := apiclient.NewHandlers(apiClients)
 		r.Route("/admin/clients", func(r chi.Router) {
@@ -216,16 +226,21 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			r.Post("/{id}/deactivate", adminHandlers.Deactivate)
 			r.Post("/{id}/activate", adminHandlers.Activate)
 			r.Post("/{id}/rotate", adminHandlers.Rotate)
+
+			// Provisions/revokes the credential a client's own operators
+			// use against /system-admin/users below — an operator-only
+			// action, never something a tenant can do to itself.
+			r.Post("/{id}/system-admin-key/rotate", adminHandlers.RotateSystemAdminKey)
+			r.Delete("/{id}/system-admin-key", adminHandlers.RevokeSystemAdminKey)
 		})
 
-		// Manual, account-level moderation — see user.Service.Ban's doc
-		// comment for why this is never triggered automatically.
-		userAdminHandlers := user.NewAdminHandlers(users)
 		r.Route("/admin/users", func(r chi.Router) {
 			r.Use(middleware.RequireAdminToken(adminToken))
 
-			r.Post("/{id}/ban", userAdminHandlers.Ban)
-			r.Post("/{id}/unban", userAdminHandlers.Unban)
+			r.Post("/{id}/ban", adminUserHandlers.Ban)
+			r.Post("/{id}/unban", adminUserHandlers.Unban)
+			r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
+			r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a
@@ -245,6 +260,23 @@ func NewRouter(authHandlers *auth.Handlers, tokens *auth.TokenManager, users *us
 			})
 		})
 	}
+
+	// A tenant's own scoped moderation, gated by its own X-System-Admin-Token
+	// rather than the operator's global one — registered unconditionally
+	// (unlike /admin/*, which needs ADMIN_API_TOKEN set at all): whether
+	// any given request can actually authenticate depends on whether that
+	// specific client has ever had a key provisioned via
+	// POST /admin/clients/{id}/system-admin-key/rotate, not on a
+	// deployment-wide flag. A client with no key provisioned gets the same
+	// 401 as a wrong key — see middleware.RequireSystemAdminToken.
+	r.Route("/system-admin/users", func(r chi.Router) {
+		r.Use(middleware.RequireSystemAdminToken(apiClients))
+
+		r.Post("/{id}/ban", adminUserHandlers.Ban)
+		r.Post("/{id}/unban", adminUserHandlers.Unban)
+		r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
+		r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
+	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequireAuth(tokens))

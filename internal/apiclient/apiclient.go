@@ -11,4 +11,13 @@ type APIClient struct {
 	Active     bool
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+
+	// SystemAdminKeyHash is nil until an operator provisions a scoped
+	// admin credential for this client (see Service.RotateSystemAdminKey)
+	// — most clients never get one. Distinct from APIKeyHash: that one
+	// authenticates the tenant's regular users at /auth/*, this one
+	// authenticates the tenant's own operators at /system-admin/*, scoped
+	// to only ever act on this client's own users.
+	SystemAdminKeyHash     *string
+	SystemAdminKeyLastUsed *time.Time
 }

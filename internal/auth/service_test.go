@@ -378,6 +378,186 @@ func TestRefreshAndLogout(t *testing.T) {
 	}
 }
 
+// TestRefresh_BannedAccountIsRefused covers the gap identified alongside
+// AdminBanUser: even if a session was already open before the ban (its
+// refresh token issued, not yet revoked by whatever revoked it), Refresh
+// itself must still refuse to renew it once the account is inactive — a
+// second layer of defense on top of AdminBanUser's own revocation, not a
+// replacement for it.
+func TestRefresh_BannedAccountIsRefused(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractOTPCode(sent.Body)
+	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	u, err := users.FindByEmail(t.Context(), apiClientID, email)
+	if err != nil {
+		t.Fatalf("FindByEmail: %v", err)
+	}
+	// Ban directly through user.Service, deliberately bypassing
+	// AdminBanUser's own token revocation — isolates Refresh's own
+	// IsActive check from the revocation it's a backstop for.
+	if err := users.Ban(t.Context(), u.ID); err != nil {
+		t.Fatalf("Ban: %v", err)
+	}
+
+	if _, _, err := svc.Refresh(t.Context(), refreshTok); err != auth.ErrAccountBanned {
+		t.Fatalf("Refresh for a banned account: err = %v, want %v", err, auth.ErrAccountBanned)
+	}
+}
+
+// TestAdminBanUser_ScopedToOwnTenant covers the core invariant a scoped
+// system-admin credential relies on: acting on a user that belongs to a
+// different api client must behave exactly like acting on an id that
+// doesn't exist at all (user.ErrNotFound), never a distinct "forbidden" —
+// see Service.checkUserScope's doc comment for why.
+func TestAdminBanUser_ScopedToOwnTenant(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	otherClient, _ := testutil.NewAPIClient(t, testutil.PostgresPool(t))
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	u, err := users.FindByEmail(t.Context(), apiClientID, email)
+	if err != nil {
+		t.Fatalf("FindByEmail: %v", err)
+	}
+
+	// A different tenant's scoped token must not be able to ban this user.
+	if err := svc.AdminBanUser(t.Context(), otherClient.ID, u.ID); err != user.ErrNotFound {
+		t.Fatalf("AdminBanUser across tenants: err = %v, want %v", err, user.ErrNotFound)
+	}
+	if _, err := users.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("account should be untouched by the cross-tenant attempt: %v", err)
+	}
+
+	// The user's own tenant can ban it.
+	if err := svc.AdminBanUser(t.Context(), apiClientID, u.ID); err != nil {
+		t.Fatalf("AdminBanUser within the same tenant: %v", err)
+	}
+	if _, err := users.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != user.ErrInvalidCredentials {
+		t.Fatalf("VerifyPassword after AdminBanUser: err = %v, want %v", err, user.ErrInvalidCredentials)
+	}
+
+	// The operator's own unscoped token (apiClientID == "") can act on
+	// anyone, same as before this feature existed.
+	if err := svc.AdminUnbanUser(t.Context(), "", u.ID); err != nil {
+		t.Fatalf("AdminUnbanUser unscoped: %v", err)
+	}
+	if _, err := users.VerifyPassword(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+		t.Fatalf("VerifyPassword after AdminUnbanUser: unexpected error %v", err)
+	}
+}
+
+// TestAdminBanUser_RevokesSessions closes the gap TestRefresh_BannedAccountIsRefused
+// covers as a backstop for: AdminBanUser (unlike a bare user.Service.Ban)
+// must itself revoke every refresh token and trusted device the account
+// has, not rely solely on Refresh's own IsActive check.
+func TestAdminBanUser_RevokesSessions(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractOTPCode(sent.Body)
+	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	u, err := users.FindByEmail(t.Context(), apiClientID, email)
+	if err != nil {
+		t.Fatalf("FindByEmail: %v", err)
+	}
+
+	if err := svc.AdminBanUser(t.Context(), apiClientID, u.ID); err != nil {
+		t.Fatalf("AdminBanUser: %v", err)
+	}
+
+	if _, _, err := svc.Refresh(t.Context(), refreshTok); err != auth.ErrRefreshTokenInvalid {
+		t.Fatalf("Refresh after AdminBanUser: err = %v, want %v (the token itself should be revoked, not just rejected for IsActive)", err, auth.ErrRefreshTokenInvalid)
+	}
+}
+
+// TestAdminDisableTOTP_ScopedToOwnTenant and
+// TestAdminRevokeAllSessions_ScopedToOwnTenant only need to cover the
+// cross-tenant rejection — the underlying behavior (DisableTOTP,
+// RevokeAllForUser) already has its own direct coverage; AdminBanUser's
+// tests above already cover the same-tenant success path this scoping
+// wraps around for every one of these methods.
+func TestAdminDisableTOTP_ScopedToOwnTenant(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	otherClient, _ := testutil.NewAPIClient(t, testutil.PostgresPool(t))
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	u, err := users.FindByEmail(t.Context(), apiClientID, email)
+	if err != nil {
+		t.Fatalf("FindByEmail: %v", err)
+	}
+
+	if err := svc.AdminDisableTOTP(t.Context(), otherClient.ID, u.ID); err != user.ErrNotFound {
+		t.Fatalf("AdminDisableTOTP across tenants: err = %v, want %v", err, user.ErrNotFound)
+	}
+	if err := svc.AdminDisableTOTP(t.Context(), apiClientID, u.ID); err != nil {
+		t.Fatalf("AdminDisableTOTP within the same tenant: %v", err)
+	}
+}
+
+func TestAdminRevokeAllSessions_ScopedToOwnTenant(t *testing.T) {
+	svc, _, mailer, apiClientID := newTestService(t)
+	otherClient, _ := testutil.NewAPIClient(t, testutil.PostgresPool(t))
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractOTPCode(sent.Body)
+	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	u, err := users.FindByEmail(t.Context(), apiClientID, email)
+	if err != nil {
+		t.Fatalf("FindByEmail: %v", err)
+	}
+
+	if err := svc.AdminRevokeAllSessions(t.Context(), otherClient.ID, u.ID); err != user.ErrNotFound {
+		t.Fatalf("AdminRevokeAllSessions across tenants: err = %v, want %v", err, user.ErrNotFound)
+	}
+	// Cross-tenant attempt must not have revoked anything.
+	if _, _, err := svc.Refresh(t.Context(), refreshTok); err != nil {
+		t.Fatalf("Refresh after cross-tenant AdminRevokeAllSessions: unexpected error %v", err)
+	}
+
+	if err := svc.AdminRevokeAllSessions(t.Context(), apiClientID, u.ID); err != nil {
+		t.Fatalf("AdminRevokeAllSessions within the same tenant: %v", err)
+	}
+}
+
 func TestDeviceLoginFlow(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"

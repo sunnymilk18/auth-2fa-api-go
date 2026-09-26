@@ -134,6 +134,37 @@ func (h *Handlers) Rotate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rotateResponse{APIKey: plaintextKey})
 }
 
+// --- System admin key (scoped, per-client) ---
+
+type systemAdminKeyResponse struct {
+	// Same one-time-visibility rule as createResponse/rotateResponse.
+	SystemAdminKey string `json:"system_admin_key"`
+}
+
+// RotateSystemAdminKey provisions (or replaces) the scoped credential a
+// client's own operators use against /system-admin/* — see
+// middleware.RequireSystemAdminToken.
+func (h *Handlers) RotateSystemAdminKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	plaintextKey, err := h.svc.RotateSystemAdminKey(r.Context(), id)
+	if err != nil {
+		writeClientActionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, systemAdminKeyResponse{SystemAdminKey: plaintextKey})
+}
+
+// RevokeSystemAdminKey removes a client's scoped admin credential
+// entirely — its /system-admin/* access stops immediately.
+func (h *Handlers) RevokeSystemAdminKey(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := h.svc.RevokeSystemAdminKey(r.Context(), id); err != nil {
+		writeClientActionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func writeClientActionError(w http.ResponseWriter, err error) {
 	if errors.Is(err, ErrNotFound) {
 		writeError(w, http.StatusNotFound, "cliente no encontrado")

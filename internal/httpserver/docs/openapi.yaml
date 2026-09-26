@@ -56,6 +56,12 @@ tags:
     description: Datos del usuario autenticado
   - name: system
     description: Endpoints de infraestructura (salud, claves públicas)
+  - name: system-admin
+    description: >
+      Moderación de cuentas, scoped al propio sistema consumidor —
+      X-System-Admin-Token, distinto del X-Admin-Token global del operador
+      de la API. Contra un usuario que pertenece a otro sistema responde
+      404, nunca 403.
 
 paths:
   /health:
@@ -1004,6 +1010,145 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /system-admin/users/{id}/ban:
+    post:
+      tags: [system-admin]
+      summary: Bloquea una cuenta de tu propio sistema
+      description: >
+        Desactiva la cuenta y revoca todos sus refresh tokens y
+        dispositivos de confianza — una sesión ya abierta no puede seguir
+        renovándose después de esto. Se revierte con
+        /system-admin/users/{id}/unban.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Cuenta bloqueada
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/users/{id}/unban:
+    post:
+      tags: [system-admin]
+      summary: Revierte un bloqueo previo
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Cuenta desbloqueada
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/users/{id}/disable-totp:
+    post:
+      tags: [system-admin]
+      summary: Desactiva la app autenticadora de una cuenta de tu propio sistema
+      description: >
+        El login de esa cuenta vuelve a usar el código por correo. Pensado
+        para cuando la cuenta no puede loguear en absoluto para hacerlo por
+        sí misma (por ejemplo, perdió el celular) — la contraparte
+        self-service es POST /auth/totp/disable, que sí requiere una sesión
+        ya autenticada.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: App autenticadora desactivada
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/users/{id}/revoke-sessions:
+    post:
+      tags: [system-admin]
+      summary: Cierra todas las sesiones de una cuenta de tu propio sistema
+      description: >
+        Revoca todos sus refresh tokens y dispositivos de confianza, sin
+        bloquear la cuenta — fuerza reautenticación en todos lados sin
+        impedir que vuelva a loguear.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Sesiones cerradas
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1030,6 +1175,24 @@ components:
         extraíble. El patrón correcto: tu propio backend llama a esta
         API con la key; tu frontend/app le habla a tu backend, nunca
         directo acá.
+
+    systemAdminTokenAuth:
+      type: apiKey
+      in: header
+      name: X-System-Admin-Token
+      description: >
+        Credencial de administración scoped a tu propio sistema —
+        distinta de X-API-Key (identifica al sistema para tus usuarios
+        finales) y de X-Admin-Token (el operador de toda la
+        infraestructura, no de tu sistema). Se provisiona con
+        POST /admin/clients/{id}/system-admin-key/rotate (requiere
+        X-Admin-Token, la pide el operador por vos). Contra un usuario de
+        otro sistema, todo endpoint bajo /system-admin/* responde 404.
+
+
+        Mismo criterio que X-API-Key sobre dónde NO ponerla: es un
+        secreto de servidor, nunca algo embebido en código que corre en
+        el dispositivo del usuario final.
 
   schemas:
     RegisterRequest:

@@ -33,15 +33,16 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	users := user.NewService(user.NewRepository(pool))
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
-	handlers := auth.NewHandlers(auth.NewService(
+	svc := auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(),
-	))
+	)
+	handlers := auth.NewHandlers(svc)
 
-	return httpserver.NewRouter(handlers, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
@@ -166,4 +167,121 @@ func TestAdminClients_CreateListDeactivateActivateRotate(t *testing.T) {
 	if notFoundRec.Code != http.StatusNotFound {
 		t.Fatalf("deactivate unknown id: status = %d, want %d", notFoundRec.Code, http.StatusNotFound)
 	}
+}
+
+// TestSystemAdminKey_RotateThenScopedUserModeration covers the full path
+// this feature exists for: the operator provisions a client's scoped admin
+// key over /admin/clients (its own global token), and that key then works
+// against /system-admin/users but only for that client's own users — a
+// second client's scoped key gets 404 against the first client's user.
+func TestSystemAdminKey_RotateThenScopedUserModeration(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+
+	// Two tenants, one user each.
+	clientA := createTestClient(t, r, "system-admin-a")
+	clientB := createTestClient(t, r, "system-admin-b")
+
+	rotateRec := adminRequest(r, http.MethodPost, "/admin/clients/"+clientA.ID+"/system-admin-key/rotate", testAdminToken, nil)
+	if rotateRec.Code != http.StatusOK {
+		t.Fatalf("rotate system admin key: status = %d, body = %s", rotateRec.Code, rotateRec.Body.String())
+	}
+	var rotated struct {
+		SystemAdminKey string `json:"system_admin_key"`
+	}
+	if err := json.Unmarshal(rotateRec.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("decoding rotate response: %v", err)
+	}
+	if rotated.SystemAdminKey == "" {
+		t.Fatal("rotate response missing system_admin_key")
+	}
+
+	userA := registerTestUser(t, r, clientA.APIKey)
+	userB := registerTestUser(t, r, clientB.APIKey)
+
+	// Same tenant: works.
+	banOwnRec := systemAdminRequest(r, http.MethodPost, "/system-admin/users/"+userA.id+"/ban", rotated.SystemAdminKey)
+	if banOwnRec.Code != http.StatusNoContent {
+		t.Fatalf("ban own tenant's user: status = %d, body = %s", banOwnRec.Code, banOwnRec.Body.String())
+	}
+
+	// Cross tenant: 404, not 403 — never confirms the id exists elsewhere.
+	banOtherRec := systemAdminRequest(r, http.MethodPost, "/system-admin/users/"+userB.id+"/ban", rotated.SystemAdminKey)
+	if banOtherRec.Code != http.StatusNotFound {
+		t.Fatalf("ban another tenant's user: status = %d, want %d", banOtherRec.Code, http.StatusNotFound)
+	}
+
+	// Revoking the key ends its access immediately.
+	revokeRec := adminRequest(r, http.MethodDelete, "/admin/clients/"+clientA.ID+"/system-admin-key", testAdminToken, nil)
+	if revokeRec.Code != http.StatusNoContent {
+		t.Fatalf("revoke system admin key: status = %d", revokeRec.Code)
+	}
+	afterRevokeRec := systemAdminRequest(r, http.MethodPost, "/system-admin/users/"+userA.id+"/unban", rotated.SystemAdminKey)
+	if afterRevokeRec.Code != http.StatusUnauthorized {
+		t.Fatalf("using a revoked system admin key: status = %d, want %d", afterRevokeRec.Code, http.StatusUnauthorized)
+	}
+}
+
+func systemAdminRequest(r http.Handler, method, path, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	if key != "" {
+		req.Header.Set("X-System-Admin-Token", key)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+type testClient struct {
+	ID     string
+	APIKey string
+}
+
+func createTestClient(t *testing.T, r http.Handler, name string) testClient {
+	t.Helper()
+	rec := adminRequest(r, http.MethodPost, "/admin/clients/", testAdminToken, map[string]string{"name": name + "-" + testutil.UniqueSuffix(t)})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("creating test client %q: status = %d, body = %s", name, rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID     string `json:"id"`
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decoding create client response: %v", err)
+	}
+	return testClient{ID: created.ID, APIKey: created.APIKey}
+}
+
+type testUser struct {
+	id string
+}
+
+// registerTestUser registers and verifies a throwaway account under
+// apiKey's tenant, returning its id — enough for the ban/unban tests
+// above, which only need a valid id to act on, not a working login.
+func registerTestUser(t *testing.T, r http.Handler, apiKey string) testUser {
+	t.Helper()
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	body := map[string]string{
+		"email":    email,
+		"password": "correcthorsebattery",
+		"username": "user-" + testutil.UniqueSuffix(t),
+		"rut":      testutil.UniqueRUT(t),
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader(buf))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("registering test user: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decoding register response: %v", err)
+	}
+	return testUser{id: created.ID}
 }

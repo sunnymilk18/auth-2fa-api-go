@@ -183,3 +183,82 @@ func TestRotate_UnknownID(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, apiclient.ErrNotFound)
 	}
 }
+
+func TestAuthenticateSystemAdmin_UnprovisionedClient(t *testing.T) {
+	// A client with no system_admin_key_hash set (the default state for
+	// every client — see mustCreate) must reject any key at all, not just
+	// the wrong one.
+	svc, pool := newTestServiceAndPool(t)
+	_, _ = mustCreate(t, svc, pool)
+
+	if _, err := svc.AuthenticateSystemAdmin(t.Context(), "sk_live_anything"); err != apiclient.ErrInvalidSystemAdminKey {
+		t.Fatalf("err = %v, want %v", err, apiclient.ErrInvalidSystemAdminKey)
+	}
+}
+
+func TestRotateSystemAdminKey_RoundTrip(t *testing.T) {
+	svc, pool := newTestServiceAndPool(t)
+	client, _ := mustCreate(t, svc, pool)
+
+	key, err := svc.RotateSystemAdminKey(t.Context(), client.ID)
+	if err != nil {
+		t.Fatalf("RotateSystemAdminKey: %v", err)
+	}
+	if key == "" {
+		t.Fatal("RotateSystemAdminKey returned an empty key")
+	}
+
+	got, err := svc.AuthenticateSystemAdmin(t.Context(), key)
+	if err != nil {
+		t.Fatalf("AuthenticateSystemAdmin: %v", err)
+	}
+	if got.ID != client.ID {
+		t.Fatalf("AuthenticateSystemAdmin returned client %q, want %q", got.ID, client.ID)
+	}
+
+	// Doesn't authenticate as the client's regular tenant API key — the
+	// two credentials are unrelated secrets.
+	if _, err := svc.Authenticate(t.Context(), key); err != apiclient.ErrInvalidAPIKey {
+		t.Fatalf("Authenticate with the system admin key: err = %v, want %v", err, apiclient.ErrInvalidAPIKey)
+	}
+}
+
+func TestRotateSystemAdminKey_InvalidatesThePreviousKey(t *testing.T) {
+	svc, pool := newTestServiceAndPool(t)
+	client, _ := mustCreate(t, svc, pool)
+
+	oldKey, err := svc.RotateSystemAdminKey(t.Context(), client.ID)
+	if err != nil {
+		t.Fatalf("first RotateSystemAdminKey: %v", err)
+	}
+	newKey, err := svc.RotateSystemAdminKey(t.Context(), client.ID)
+	if err != nil {
+		t.Fatalf("second RotateSystemAdminKey: %v", err)
+	}
+	if newKey == oldKey {
+		t.Fatal("RotateSystemAdminKey returned the same key twice")
+	}
+
+	if _, err := svc.AuthenticateSystemAdmin(t.Context(), oldKey); err != apiclient.ErrInvalidSystemAdminKey {
+		t.Fatalf("AuthenticateSystemAdmin with the rotated-out key: err = %v, want %v", err, apiclient.ErrInvalidSystemAdminKey)
+	}
+	if _, err := svc.AuthenticateSystemAdmin(t.Context(), newKey); err != nil {
+		t.Fatalf("AuthenticateSystemAdmin with the new key: %v", err)
+	}
+}
+
+func TestRevokeSystemAdminKey(t *testing.T) {
+	svc, pool := newTestServiceAndPool(t)
+	client, _ := mustCreate(t, svc, pool)
+
+	key, err := svc.RotateSystemAdminKey(t.Context(), client.ID)
+	if err != nil {
+		t.Fatalf("RotateSystemAdminKey: %v", err)
+	}
+	if err := svc.RevokeSystemAdminKey(t.Context(), client.ID); err != nil {
+		t.Fatalf("RevokeSystemAdminKey: %v", err)
+	}
+	if _, err := svc.AuthenticateSystemAdmin(t.Context(), key); err != apiclient.ErrInvalidSystemAdminKey {
+		t.Fatalf("AuthenticateSystemAdmin after Revoke: err = %v, want %v", err, apiclient.ErrInvalidSystemAdminKey)
+	}
+}

@@ -11,11 +11,12 @@ API independiente en Go para autenticación con doble factor por correo (email +
   - Refresh token firmado con **HS256** (secreto compartido) — de uso exclusivo interno (`/auth/refresh`, `/auth/logout`), rotado en cada uso y revocable desde Postgres.
 - **Rate limiting**: por IP, con contador en Redis, sobre `/auth/register`, `/auth/login`, `/auth/verify-otp`, `/auth/devices/login`, `/auth/password-reset/*` y `/auth/verify-email/*` — mitiga fuerza bruta sobre contraseñas, códigos OTP y PINs. Además, `/auth/login` tiene un segundo límite **por cuenta** (`LOGIN_MAX_FAILED_ATTEMPTS`/`LOGIN_LOCKOUT_WINDOW`) — el límite por IP no detecta a alguien probando contraseñas contra una cuenta puntual desde muchas IPs distintas; es un throttle temporal, no un bloqueo permanente (eso sería, en sí mismo, una forma de bloquear a otra persona a propósito).
 - **Lista negra automática por IP** (`internal/middleware.Blacklist`): una IP que dispara cualquiera de los rate limits de arriba 3 veces separadas en 24h queda baneada del todo (no solo throttleada) — 24h la primera vez, 72h la segunda, 7 días de ahí en más. El nivel de escalada se olvida solo tras 30 días sin nuevas infracciones, para no castigar para siempre una IP compartida (biblioteca pública, wifi comunitario) mucho después de que el que abusó ya se fue. Un admin puede levantar un baneo a mano con `DELETE /admin/blacklist/{ip}` (mismo header `X-Admin-Token`).
-- **Bloqueo manual de cuentas**: `POST /admin/users/{id}/ban` desactiva una cuenta puntual (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut. Es una herramienta operativa, para cuando un caso de abuso se identifica puntualmente.
+- **Bloqueo manual de cuentas**: `POST /admin/users/{id}/ban` desactiva una cuenta puntual y revoca todos sus refresh tokens y dispositivos de confianza (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut. Es una herramienta operativa, para cuando un caso de abuso se identifica puntualmente. `/auth/refresh` además verifica por su cuenta que la cuenta siga activa antes de renovar un token — una segunda capa de defensa, no un sustituto de la revocación de arriba, por si esta llegara a fallar a medias. `/admin/users/{id}/disable-totp` y `/admin/users/{id}/revoke-sessions` cubren dos casos más puntuales: apagar la app autenticadora de alguien que perdió el celular (sin necesidad de que pueda loguear), y cerrar todas las sesiones de una cuenta sin llegar a bloquearla.
 - **Dispositivos de confianza + PIN**: capa adicional opcional — tras un login completo, un dispositivo puede quedar marcado como confiable (tabla `trusted_devices`, mismo Postgres) y reautenticarse después solo con `device_id` + `device_token` + PIN de 6 dígitos, sin repetir password ni OTP por correo.
 - **Verificación por app autenticadora (TOTP)**: alternativa opcional al código por correo — cada cuenta la activa por su cuenta (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)). Requiere `TOTP_ENCRYPTION_KEY`; sin ella, `/auth/totp/*` no existe (mismo criterio que `ADMIN_API_TOKEN`).
 - **Aprobación por notificación push**: tercer método opcional, además de correo y TOTP — un login en un dispositivo (típicamente PC) se confirma con un tap en un celular ya emparejado, en vez de tipear un código. Vía Firebase Cloud Messaging (Android). Requiere `FIREBASE_CREDENTIALS_PATH`; sin ella, `/auth/devices/{id}/push`, `/auth/login/push-status`, `/auth/login/push-answer` y `/auth/login/request-email-code` no existen (mismo criterio que `TOTP_ENCRYPTION_KEY`).
 - **Multi-tenant (API keys)**: cada sistema consumidor (app móvil, web, etc.) se identifica con una API key propia en el header `X-API-Key`. Los usuarios quedan aislados por sistema — el mismo email, username o rut puede existir como cuentas distintas bajo dos API keys diferentes.
+- **Administración por sistema (credencial scoped)**: además del `X-Admin-Token` global (el operador de toda la infraestructura), cada sistema consumidor puede tener su propia credencial de administración — `X-System-Admin-Token` — que solo puede moderar **sus propios** usuarios: ban/unban, desactivar TOTP y cerrar sesiones. Contra un usuario de otro sistema responde `404`, nunca `403` — así nunca confirma ni niega que ese id exista en algún otro sistema. Se provisiona con el `X-Admin-Token` (ver [Administración por sistema](#administración-por-sistema-credencial-scoped) más abajo); la mayoría de los clientes nunca necesitan una.
 - **Identidad del usuario**: además de email + password, cada cuenta tiene `username` (8-32 caracteres, no único entre personas, al menos una letra, sin forma de rut aunque tenga puntos/guiones, sin "@") y `rut` (documento chileno, único por sistema, validado con dígito verificador). El login acepta cualquiera de los tres — email, username o rut — en un único campo `identifier`: no hay detección de forma, se prueban los tres normalizados en una sola consulta (`email = ? OR username = ? OR rut = ?`), y las reglas de arriba garantizan que solo una columna puede coincidir.
 - **CORS**: habilitado para cualquier origen (`*`), sin credenciales — la API se autentica por headers (`X-API-Key`, `Authorization`), no por cookies de sesión, así que no hay nada que filtrar abriendo el origen a todos. Cada sistema consumidor puede llamar desde su propio frontend sin que haga falta mantener una lista de dominios permitidos.
 - **Documentación**: especificación OpenAPI servida en `/openapi.yaml`, con UI interactiva (Swagger UI) en `/docs`.
@@ -236,12 +237,38 @@ También por HTTP, con el mismo header `X-Admin-Token`:
 
 ```bash
 # Bloquear/desbloquear una cuenta puntual (ver "Bloqueo manual de cuentas" en Arquitectura).
-curl -X POST https://tu-api/admin/users/<id>/ban   -H "X-Admin-Token: $ADMIN_API_TOKEN"
-curl -X POST https://tu-api/admin/users/<id>/unban -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -X POST https://tu-api/admin/users/<id>/ban              -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -X POST https://tu-api/admin/users/<id>/unban            -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -X POST https://tu-api/admin/users/<id>/disable-totp     -H "X-Admin-Token: $ADMIN_API_TOKEN"
+curl -X POST https://tu-api/admin/users/<id>/revoke-sessions  -H "X-Admin-Token: $ADMIN_API_TOKEN"
 
 # Levantar antes de tiempo un baneo automático por IP (ver "Lista negra automática por IP").
 curl -X DELETE https://tu-api/admin/blacklist/203.0.113.7 -H "X-Admin-Token: $ADMIN_API_TOKEN"
 ```
+
+### Administración por sistema (credencial scoped)
+
+Para que el equipo detrás de un sistema consumidor pueda moderar **sus propios** usuarios sin necesitar tu `X-Admin-Token` (que puede tocar todos los sistemas, no solo el suyo). Se provisiona una vez por cliente, con tu `X-Admin-Token`:
+
+```bash
+# Provisiona (o rota, si ya existía una) la credencial scoped del cliente <id>.
+# El plaintext se muestra una sola vez, igual que la API key normal.
+curl -X POST https://tu-api/admin/clients/<id>/system-admin-key/rotate -H "X-Admin-Token: $ADMIN_API_TOKEN"
+
+# Revoca la credencial scoped por completo — vuelve al estado "nunca provisionada".
+curl -X DELETE https://tu-api/admin/clients/<id>/system-admin-key -H "X-Admin-Token: $ADMIN_API_TOKEN"
+```
+
+El equipo del sistema consumidor usa esa credencial contra `/system-admin/users/*` (mismas cuatro acciones que `/admin/users/*`, pero con el header `X-System-Admin-Token` en vez de `X-Admin-Token`):
+
+```bash
+curl -X POST https://tu-api/system-admin/users/<id>/ban             -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+curl -X POST https://tu-api/system-admin/users/<id>/unban           -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+curl -X POST https://tu-api/system-admin/users/<id>/disable-totp    -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+curl -X POST https://tu-api/system-admin/users/<id>/revoke-sessions -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+```
+
+Si `<id>` pertenece a otro sistema, la respuesta es `404` (no `403`) — indistinguible de un id que directamente no existe.
 
 ## Ejecutar
 
@@ -481,10 +508,6 @@ Todo corre en un mismo proyecto Compose en Dokploy — `api`, `postgres`, `redis
 - `docker-compose.otel-collector.yml` y `docker-compose.loki.yml`: versiones standalone alternativas, con la config embebida (`configs:` con `content:` inline), por si en algún momento se despliega alguna de esas dos piezas como proyecto Compose separado (pegando el contenido directo en Dokploy, sin depender de un repo) — en ese caso sí hay que conectarlas por dominio/URL pública en vez de por nombre de servicio, porque proyectos distintos de Dokploy no comparten red entre sí.
 - El dashboard de Grafana (`grafana/provisioning/dashboards/auth-2fa-api.json`) se importa manualmente ahí (Dashboards → New → Import) — Dokploy no provisiona archivos de dashboard automáticamente como sí hace con los datasources.
 - Los datasources de Grafana necesitan un `uid` fijo (`prometheus-ds`, `loki-ds`) para que el dashboard los encuentre sin preguntar nada al importar — ver los comentarios en `grafana/provisioning/datasources/*.yaml`.
-
-## Notas para producción (pendiente, no implementado aún)
-
-- **Verificar un dominio propio en Resend**: mientras `RESEND_FROM` siga siendo `onboarding@resend.dev` (el sandbox), solo se puede mandar correo a la dirección de la cuenta de Resend — hace falta verificar un dominio propio antes de que usuarios reales puedan registrarse. Sin esto, nadie fuera de esa única cuenta puede recibir el código de verificación ni el OTP de login — es lo primero a resolver antes de cualquier usuario real.
 
 ## Rotación de claves JWT
 

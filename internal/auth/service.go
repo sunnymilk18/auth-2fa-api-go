@@ -460,6 +460,14 @@ func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email
 
 // Refresh validates a refresh token and issues a new access token, rotating
 // the refresh token (old one revoked, new one issued) to limit replay risk.
+//
+// Also checks the account is still active — a second layer of defense on
+// top of AdminBanUser already revoking every refresh token a banned
+// account has: if that revocation ever races or partially fails, this
+// still refuses the renewal outright instead of silently keeping a banned
+// account's session alive. An access token already issued before the ban
+// stays valid until it expires on its own (short-lived by design); this
+// only stops new ones from being minted.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error) {
 	claims, err := s.tokens.ParseRefreshToken(refreshToken)
 	if err != nil {
@@ -472,6 +480,14 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 	}
 	if !valid {
 		return "", "", ErrRefreshTokenInvalid
+	}
+
+	u, err := s.users.FindByID(ctx, claims.Subject)
+	if err != nil {
+		return "", "", err
+	}
+	if !u.IsActive {
+		return "", "", ErrAccountBanned
 	}
 
 	if err := s.refresh.Revoke(ctx, refreshToken); err != nil {
@@ -547,6 +563,79 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, userID, newPassword); err != nil {
+		return err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.devices.RevokeAllForUser(ctx, userID)
+}
+
+// checkUserScope looks up userID and, when apiClientID is non-empty,
+// confirms the account actually belongs to that tenant — returning
+// user.ErrNotFound (never a distinct "forbidden") when it doesn't, so a
+// scoped system-admin token gets the exact same response for "no such
+// user" and "that user belongs to someone else's system": neither
+// confirms nor denies the id exists at all outside its own tenant.
+//
+// apiClientID == "" means "no scoping" — the operator's own global
+// X-Admin-Token, which every AdminXxx method below also uses (via the
+// same functions, just called with an empty apiClientID from
+// /admin/users/* instead of /system-admin/users/*), so there's exactly
+// one code path for each action regardless of which credential invoked it.
+func (s *Service) checkUserScope(ctx context.Context, apiClientID, userID string) (*user.User, error) {
+	u, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if apiClientID != "" && u.APIClientID != apiClientID {
+		return nil, user.ErrNotFound
+	}
+	return u, nil
+}
+
+// AdminBanUser deactivates userID (scoped to apiClientID — see
+// checkUserScope) and also revokes every refresh token and trusted device
+// it has, same as ResetPassword — otherwise a session already open at ban
+// time could keep renewing indefinitely (see Refresh's own doc comment for
+// the second layer of defense against that same gap).
+func (s *Service) AdminBanUser(ctx context.Context, apiClientID, userID string) error {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
+		return err
+	}
+	if err := s.users.Ban(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.devices.RevokeAllForUser(ctx, userID)
+}
+
+// AdminUnbanUser reverses a previous AdminBanUser (scoped to apiClientID).
+func (s *Service) AdminUnbanUser(ctx context.Context, apiClientID, userID string) error {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
+		return err
+	}
+	return s.users.Unban(ctx, userID)
+}
+
+// AdminDisableTOTP turns off userID's authenticator-app factor (scoped to
+// apiClientID) — login falls back to the email OTP flow, same effect as
+// the self-service /auth/totp/disable, but usable when the account can't
+// log in at all to reach that endpoint (e.g. a lost phone).
+func (s *Service) AdminDisableTOTP(ctx context.Context, apiClientID, userID string) error {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
+		return err
+	}
+	return s.users.DisableTOTP(ctx, userID)
+}
+
+// AdminRevokeAllSessions revokes every refresh token and trusted device
+// userID has (scoped to apiClientID), without banning the account —
+// forces re-authentication everywhere without locking the account out.
+func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userID string) error {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
 		return err
 	}
 	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
