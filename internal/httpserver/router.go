@@ -119,6 +119,13 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	requestLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-request-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 	resendLoginCodeLimiter := middleware.NewRateLimiter(rdb, "login-resend-code", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
+	// Legitimate use rarely needs more than one refresh per ACCESS_TOKEN_TTL
+	// window per device — 30/15min leaves plenty of room for several
+	// devices/tabs on the same account plus the occasional retry, while
+	// still shutting down a loop hammering this endpoint with one stolen or
+	// otherwise-valid refresh token (this was the one /auth/* route with no
+	// rate limit at all before this).
+	refreshLimiter := middleware.NewRateLimiter(rdb, "refresh", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -128,7 +135,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.With(registerLimiter.Middleware).Post("/register", authHandlers.Register)
 		r.With(loginLimiter.Middleware).Post("/login", authHandlers.Login)
 		r.With(otpLimiter.Middleware).Post("/verify-otp", authHandlers.VerifyOTP)
-		r.Post("/refresh", authHandlers.Refresh)
+		r.With(refreshLimiter.Middleware).Post("/refresh", authHandlers.Refresh)
 		r.Post("/logout", authHandlers.Logout)
 
 		// Trusted device + PIN: a returning device can log in with this

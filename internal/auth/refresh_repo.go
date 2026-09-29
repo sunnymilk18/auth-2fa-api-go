@@ -8,11 +8,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrRefreshTokenInvalid = errors.New("refresh token invalid, expired or revoked")
+
+// revokedRetentionWindow is how long a revoked-but-not-yet-expired
+// refresh_tokens row is kept around before DeleteExpired purges it —
+// deliberately not instant (see ConsumeIfValid's doc comment on why a
+// revoked row still needs to exist for a little while) and deliberately
+// much shorter than REFRESH_TOKEN_TTL (up to 7 days by default): a stolen
+// token being replayed is almost always tried within hours, not a week
+// later, so this keeps the table from carrying dead rows far longer than
+// that signal is actually useful for.
+const revokedRetentionWindow = 48 * time.Hour
 
 // RefreshRepository persists refresh-token hashes so they can be revoked
 // (logout, password reset, compromise) without waiting for JWT expiry.
@@ -35,29 +44,41 @@ func (r *RefreshRepository) Store(ctx context.Context, userID, token string, exp
 	return nil
 }
 
-// IsValid checks the token hash exists, is not revoked and not expired.
-func (r *RefreshRepository) IsValid(ctx context.Context, token string) (bool, error) {
+// ConsumeIfValid atomically checks a token is valid (exists, not revoked,
+// not expired) and marks it revoked in the same statement — used by
+// Service.Refresh's rotation instead of a separate check-then-revoke pair,
+// which had a real race: two near-simultaneous requests with the same
+// token (several browser tabs open on the same account, a client retrying
+// after a dropped response) could otherwise both pass the check before
+// either one's revoke landed, letting the same refresh token mint two
+// token pairs. The UPDATE's WHERE clause is the entire check — only the
+// request that actually flips revoked=FALSE to TRUE gets true back, so at
+// most one of any concurrent callers ever succeeds.
+//
+// Returns false (no error) for a token that's unknown, expired, or already
+// revoked — same "not valid" signal the old separate IsValid gave, just
+// atomic with the revoke. Deliberately still revokes-in-place rather than
+// deleting the row outright: keeping it (briefly — see revokedRetentionWindow)
+// is what would let a reused/stolen copy of this exact token be recognized
+// as "already used" instead of indistinguishable from "never existed".
+func (r *RefreshRepository) ConsumeIfValid(ctx context.Context, token string) (bool, error) {
 	const q = `
-		SELECT revoked, expires_at FROM refresh_tokens WHERE token_hash = $1`
-
-	var revoked bool
-	var expiresAt time.Time
-	err := r.pool.QueryRow(ctx, q, hashToken(token)).Scan(&revoked, &expiresAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
+		UPDATE refresh_tokens
+		SET revoked = TRUE, revoked_at = now()
+		WHERE token_hash = $1 AND revoked = FALSE AND expires_at > now()`
+	tag, err := r.pool.Exec(ctx, q, hashToken(token))
 	if err != nil {
-		return false, fmt.Errorf("checking refresh token: %w", err)
+		return false, fmt.Errorf("consuming refresh token: %w", err)
 	}
-	if revoked || time.Now().After(expiresAt) {
-		return false, nil
-	}
-	return true, nil
+	return tag.RowsAffected() == 1, nil
 }
 
-// Revoke invalidates a single refresh token (e.g. after it's used once, or on logout).
+// Revoke invalidates a single refresh token (e.g. on logout) — unlike
+// ConsumeIfValid, the caller here already knows the token belongs to the
+// session being logged out and isn't relying on the result to decide
+// anything, so a plain unconditional update is enough.
 func (r *RefreshRepository) Revoke(ctx context.Context, token string) error {
-	const q = `UPDATE refresh_tokens SET revoked = TRUE WHERE token_hash = $1`
+	const q = `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = now() WHERE token_hash = $1`
 	_, err := r.pool.Exec(ctx, q, hashToken(token))
 	if err != nil {
 		return fmt.Errorf("revoking refresh token: %w", err)
@@ -69,7 +90,7 @@ func (r *RefreshRepository) Revoke(ctx context.Context, token string) error {
 // used by the password reset flow to force re-authentication everywhere,
 // in case the reset was triggered by a compromised session.
 func (r *RefreshRepository) RevokeAllForUser(ctx context.Context, userID string) error {
-	const q = `UPDATE refresh_tokens SET revoked = TRUE WHERE user_id = $1 AND revoked = FALSE`
+	const q = `UPDATE refresh_tokens SET revoked = TRUE, revoked_at = now() WHERE user_id = $1 AND revoked = FALSE`
 	_, err := r.pool.Exec(ctx, q, userID)
 	if err != nil {
 		return fmt.Errorf("revoking all refresh tokens for user: %w", err)
@@ -77,16 +98,18 @@ func (r *RefreshRepository) RevokeAllForUser(ctx context.Context, userID string)
 	return nil
 }
 
-// DeleteExpired removes every refresh token row whose expires_at has
-// already passed — expired rows are otherwise never removed (IsValid just
-// rejects them, it doesn't clean up), so without this the table grows
-// forever. Returns how many rows were deleted, for logging. Revoked-but-
-// not-yet-expired rows are left alone; they get swept once their own
-// expires_at passes too, same as any other row — no separate cleanup path
-// needed for them.
+// DeleteExpired removes every refresh_tokens row that no longer serves any
+// purpose: one whose expires_at has already passed (expired rows are
+// otherwise never removed — ConsumeIfValid just rejects them, it doesn't
+// clean up), or one that was revoked more than revokedRetentionWindow ago
+// (see its own doc comment for why that's a short window, not instant).
+// Returns how many rows were deleted, for logging.
 func (r *RefreshRepository) DeleteExpired(ctx context.Context) (int64, error) {
-	const q = `DELETE FROM refresh_tokens WHERE expires_at < now()`
-	tag, err := r.pool.Exec(ctx, q)
+	const q = `
+		DELETE FROM refresh_tokens
+		WHERE expires_at < now()
+		   OR (revoked = TRUE AND revoked_at < $1)`
+	tag, err := r.pool.Exec(ctx, q, time.Now().Add(-revokedRetentionWindow))
 	if err != nil {
 		return 0, fmt.Errorf("deleting expired refresh tokens: %w", err)
 	}

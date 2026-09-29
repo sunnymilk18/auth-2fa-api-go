@@ -460,6 +460,13 @@ func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email
 
 // Refresh validates a refresh token and issues a new access token, rotating
 // the refresh token (old one revoked, new one issued) to limit replay risk.
+// The validate-and-revoke step is one atomic operation (see
+// RefreshRepository.ConsumeIfValid) rather than a separate check followed
+// by a separate revoke — two near-simultaneous requests with the same
+// token (several browser tabs on the same account, a client retrying after
+// a dropped response) could otherwise both pass a separate check before
+// either one's revoke landed, minting two token pairs from what should
+// only ever be usable once.
 //
 // Also checks the account is still active — a second layer of defense on
 // top of AdminBanUser already revoking every refresh token a banned
@@ -474,11 +481,11 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 		return "", "", ErrRefreshTokenInvalid
 	}
 
-	valid, err := s.refresh.IsValid(ctx, refreshToken)
+	consumed, err := s.refresh.ConsumeIfValid(ctx, refreshToken)
 	if err != nil {
 		return "", "", err
 	}
-	if !valid {
+	if !consumed {
 		return "", "", ErrRefreshTokenInvalid
 	}
 
@@ -488,10 +495,6 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 	}
 	if !u.IsActive {
 		return "", "", ErrAccountBanned
-	}
-
-	if err := s.refresh.Revoke(ctx, refreshToken); err != nil {
-		return "", "", err
 	}
 
 	return s.issueTokenPair(ctx, claims.Subject, claims.APIClientID, claims.Email)
