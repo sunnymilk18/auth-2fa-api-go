@@ -37,7 +37,7 @@ import (
 // are registered at all — same opt-in-at-deployment pattern as totpEnabled
 // (see config.Config.FirebaseCredentialsPath's doc comment): unset means
 // 404, not "exists but always fails".
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -184,14 +184,14 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// EnrollTOTP's doc comments. Only registered when the server
 			// has TOTP_ENCRYPTION_KEY configured.
 			r.Group(func(r chi.Router) {
-				r.Use(middleware.OptionalAuth(tokens))
+				r.Use(middleware.OptionalAuth(tokens, accessRevocation))
 				r.Post("/totp/enroll", authHandlers.EnrollTOTP)
 				r.With(totpConfirmLimiter.Middleware).Post("/totp/confirm", authHandlers.ConfirmTOTP)
 			})
 		}
 
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.RequireAuth(tokens))
+			r.Use(middleware.RequireAuth(tokens, accessRevocation))
 			r.Post("/devices/register", authHandlers.RegisterDevice)
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
@@ -286,7 +286,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	})
 
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequireAuth(tokens))
+		r.Use(middleware.RequireAuth(tokens, accessRevocation))
 
 		r.Get("/me", func(w http.ResponseWriter, r *http.Request) {
 			userID, _ := middleware.UserIDFromContext(r.Context())

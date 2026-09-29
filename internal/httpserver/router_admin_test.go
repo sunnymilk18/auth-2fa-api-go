@@ -33,16 +33,17 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	users := user.NewService(user.NewRepository(pool))
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 	svc := auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
 	)
 	handlers := auth.NewHandlers(svc)
 
-	return httpserver.NewRouter(handlers, svc, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
@@ -284,4 +285,60 @@ func registerTestUser(t *testing.T, r http.Handler, apiKey string) testUser {
 		t.Fatalf("decoding register response: %v", err)
 	}
 	return testUser{id: created.ID}
+}
+
+// TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken is the router-
+// level proof for AccessRevocationStore: a GET /me call with an access
+// token minted before AdminBanUser must fail immediately, not just once
+// that token would have expired on its own. Own inline wiring (not
+// newTestRouterWithAdmin) since this needs direct access to svc/tokens,
+// which that helper doesn't expose.
+func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	users := user.NewService(user.NewRepository(pool))
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+	access, err := tokens.IssueAccessToken(u.ID, client.ID, email)
+	if err != nil {
+		t.Fatalf("issuing access token: %v", err)
+	}
+
+	meReq := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := meReq(); rec.Code != http.StatusOK {
+		t.Fatalf("GET /me before ban: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	if err := svc.AdminBanUser(t.Context(), "", u.ID); err != nil {
+		t.Fatalf("AdminBanUser: %v", err)
+	}
+
+	if rec := meReq(); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /me with the same access token, right after AdminBanUser: status = %d, want %d (the token's signature/expiry alone are still fine — this is what AccessRevocationStore is for)", rec.Code, http.StatusUnauthorized)
+	}
 }

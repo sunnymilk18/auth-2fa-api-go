@@ -118,7 +118,12 @@ func run(logger *slog.Logger) error {
 		logger.Info("push approval configured")
 	}
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger)
+	// ttl matches AccessTokenTTL: once that much time passes since a
+	// revocation marker was set, everything it was protecting against has
+	// expired on its own anyway — see AccessRevocationStore's doc comment.
+	accessRevocation := auth.NewAccessRevocationStore(rdb, cfg.AccessTokenTTL)
+
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
@@ -136,7 +141,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, logger)
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, cfg.TrustProxyHeaders, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

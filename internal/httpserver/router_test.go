@@ -85,11 +85,12 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 		t.Fatalf("NewTOTPManager: %v", err)
 	}
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, nil, nil, nil, nil, testLogger())
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, nil, nil, nil, nil, testLogger(), accessRevocation)
 	handlers := auth.NewHandlers(svc)
 
-	r := httpserver.NewRouter(handlers, svc, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
@@ -136,10 +137,10 @@ func newTestRouterWithChoice(t *testing.T) (router http.Handler, apiKey string, 
 	twoFactorSetup := auth.NewTwoFactorSetupStore(rdb, 5*time.Minute)
 	mailer = testutil.NewFakeMailer()
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, testLogger())
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, testLogger(), nil)
 	handlers := auth.NewHandlers(svc)
 
-	r := httpserver.NewRouter(handlers, svc, tokens, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, nil, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
 	return r, plaintextKey, mailer
 }
 
@@ -250,10 +251,10 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	return httpserver.NewRouter(handlers, svc, tokens, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, nil, users, pgPool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
 }
 
 func TestRouter_JWKSShape(t *testing.T) {

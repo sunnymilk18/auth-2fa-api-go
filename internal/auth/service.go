@@ -70,6 +70,15 @@ type Service struct {
 	// production. Never nil — NewService falls back to slog.Default() —
 	// so every call site here can log unconditionally.
 	logger *slog.Logger
+
+	// accessRevocation lets AdminBanUser/AdminRevokeAllSessions/
+	// ResetPassword make an already-issued access token stop working
+	// immediately, not just once it naturally expires — see
+	// AccessRevocationStore's own doc comment. Nilable purely so tests that
+	// don't care about this can skip wiring it (every call site here
+	// guards with a nil check); a real deployment (cmd/api/main.go) always
+	// sets it, unlike totp/push, which are genuinely optional features.
+	accessRevocation *AccessRevocationStore
 }
 
 func NewService(
@@ -93,6 +102,7 @@ func NewService(
 	pushLogin *PushLoginStore,
 	pushRequestLimiter *PushRequestLimiter,
 	logger *slog.Logger,
+	accessRevocation *AccessRevocationStore,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -118,7 +128,19 @@ func NewService(
 		pushLogin:            pushLogin,
 		pushRequestLimiter:   pushRequestLimiter,
 		logger:               logger,
+		accessRevocation:     accessRevocation,
 	}
+}
+
+// markAccessTokensRevoked is a nil-safe passthrough to
+// accessRevocation.MarkRevoked — every caller below already has other
+// error-returning cleanup to do around it, so this keeps each call site a
+// one-liner instead of repeating the nil check three times.
+func (s *Service) markAccessTokensRevoked(ctx context.Context, userID string) error {
+	if s.accessRevocation == nil {
+		return nil
+	}
+	return s.accessRevocation.MarkRevoked(ctx, userID)
 }
 
 // ErrEmailAlreadyVerified is returned by ResendEmailVerification when the
@@ -469,12 +491,11 @@ func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email
 // only ever be usable once.
 //
 // Also checks the account is still active — a second layer of defense on
-// top of AdminBanUser already revoking every refresh token a banned
-// account has: if that revocation ever races or partially fails, this
-// still refuses the renewal outright instead of silently keeping a banned
-// account's session alive. An access token already issued before the ban
-// stays valid until it expires on its own (short-lived by design); this
-// only stops new ones from being minted.
+// top of AdminBanUser already revoking every refresh token (and marking
+// every access token already issued as untrusted — see
+// AccessRevocationStore) a banned account has: if that ever races or
+// partially fails, this still refuses the renewal outright instead of
+// silently keeping a banned account's session alive.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error) {
 	claims, err := s.tokens.ParseRefreshToken(refreshToken)
 	if err != nil {
@@ -540,11 +561,14 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 
 // ResetPassword consumes a reset code and sets a new password. It also
 // revokes every refresh token and every trusted device (PIN unlock) the
-// user has — a password reset should force re-authentication everywhere:
-// the trusted-device shortcut bypasses password+OTP entirely, so leaving it
-// intact would let whoever set it up (possibly an attacker, during whatever
-// compromise prompted the reset) keep getting in regardless of the new
-// password.
+// user has, and marks every access token already issued as no longer
+// trusted from this instant on (see AccessRevocationStore) — a password
+// reset should force re-authentication everywhere, immediately: the
+// trusted-device shortcut bypasses password+OTP entirely, and a live
+// access token is still good for actions on its own regardless of the
+// password, so leaving either intact would let whoever set it up (possibly
+// an attacker, during whatever compromise prompted the reset) keep getting
+// in or keep acting despite the new password.
 //
 // Validates newPassword before consuming the code, not after — the code is
 // single-use (see PasswordResetStore.ConsumeCode), so checking it only
@@ -571,7 +595,10 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
 		return err
 	}
-	return s.devices.RevokeAllForUser(ctx, userID)
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.markAccessTokensRevoked(ctx, userID)
 }
 
 // checkUserScope looks up userID and, when apiClientID is non-empty,
@@ -598,10 +625,14 @@ func (s *Service) checkUserScope(ctx context.Context, apiClientID, userID string
 }
 
 // AdminBanUser deactivates userID (scoped to apiClientID — see
-// checkUserScope) and also revokes every refresh token and trusted device
-// it has, same as ResetPassword — otherwise a session already open at ban
+// checkUserScope), revokes every refresh token and trusted device it has,
+// and marks every access token already issued as no longer trusted from
+// this instant on (see AccessRevocationStore) — same as ResetPassword.
+// Without the refresh/device revocation, a session already open at ban
 // time could keep renewing indefinitely (see Refresh's own doc comment for
-// the second layer of defense against that same gap).
+// the second layer of defense against that same gap); without the access
+// token marker, that session could keep acting for up to ACCESS_TOKEN_TTL
+// after the ban even though it could no longer renew.
 func (s *Service) AdminBanUser(ctx context.Context, apiClientID, userID string) error {
 	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
 		return err
@@ -612,7 +643,10 @@ func (s *Service) AdminBanUser(ctx context.Context, apiClientID, userID string) 
 	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
 		return err
 	}
-	return s.devices.RevokeAllForUser(ctx, userID)
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.markAccessTokensRevoked(ctx, userID)
 }
 
 // AdminUnbanUser reverses a previous AdminBanUser (scoped to apiClientID).
@@ -635,8 +669,11 @@ func (s *Service) AdminDisableTOTP(ctx context.Context, apiClientID, userID stri
 }
 
 // AdminRevokeAllSessions revokes every refresh token and trusted device
-// userID has (scoped to apiClientID), without banning the account —
-// forces re-authentication everywhere without locking the account out.
+// userID has (scoped to apiClientID) and marks every access token already
+// issued as no longer trusted from this instant on (see
+// AccessRevocationStore), without banning the account — forces
+// re-authentication everywhere, immediately, without locking the account
+// out.
 func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userID string) error {
 	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
 		return err
@@ -644,7 +681,10 @@ func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userI
 	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
 		return err
 	}
-	return s.devices.RevokeAllForUser(ctx, userID)
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.markAccessTokensRevoked(ctx, userID)
 }
 
 // PublicKeys exposes every public key access tokens can currently be
