@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -22,6 +23,19 @@ var ErrRefreshTokenInvalid = errors.New("refresh token invalid, expired or revok
 // later, so this keeps the table from carrying dead rows far longer than
 // that signal is actually useful for.
 const revokedRetentionWindow = 48 * time.Hour
+
+// reuseDetectionGracePeriod is how long after a token is revoked its reuse
+// is still treated as harmless — several browser tabs on one account
+// racing to refresh the same token, or a client retrying a request whose
+// response got dropped, both resolve within milliseconds, well inside
+// this window. A real stolen token essentially never gets replayed inside
+// the same few seconds an entirely unrelated legitimate rotation already
+// happened — it's used later, by someone who obtained a copy some other
+// way — so only a reuse *past* this window is treated as suspicious (see
+// CheckReuse). Without this grace period, that same benign multi-tab race
+// would look identical to a real theft and needlessly log a real user out
+// of every device.
+const reuseDetectionGracePeriod = 10 * time.Second
 
 // RefreshRepository persists refresh-token hashes so they can be revoked
 // (logout, password reset, compromise) without waiting for JWT expiry.
@@ -71,6 +85,37 @@ func (r *RefreshRepository) ConsumeIfValid(ctx context.Context, token string) (b
 		return false, fmt.Errorf("consuming refresh token: %w", err)
 	}
 	return tag.RowsAffected() == 1, nil
+}
+
+// CheckReuse looks up token regardless of its current state — called only
+// once ConsumeIfValid has already failed, to tell a completely harmless
+// "not valid" (an unknown token, or one that's simply expired) apart from
+// a genuinely suspicious one: a token that exists, is revoked, and was
+// revoked more than reuseDetectionGracePeriod ago (see its own doc comment
+// for why that grace period exists — a benign near-simultaneous double-use
+// of the same token must never be mistaken for a stolen one being
+// replayed). suspicious == true means Service.Refresh should treat this as
+// a likely account compromise and revoke everything for userID, not just
+// reject this one request.
+func (r *RefreshRepository) CheckReuse(ctx context.Context, token string) (userID string, suspicious bool, err error) {
+	const q = `SELECT user_id, revoked, revoked_at FROM refresh_tokens WHERE token_hash = $1`
+
+	var revoked bool
+	var revokedAt *time.Time
+	err = r.pool.QueryRow(ctx, q, hashToken(token)).Scan(&userID, &revoked, &revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("checking refresh token reuse: %w", err)
+	}
+	if !revoked || revokedAt == nil {
+		// Not revoked at all (only reachable here if it was expired, since
+		// ConsumeIfValid already ruled out "still valid") — nothing
+		// suspicious, expiry isn't a sign of theft.
+		return "", false, nil
+	}
+	return userID, time.Since(*revokedAt) > reuseDetectionGracePeriod, nil
 }
 
 // Revoke invalidates a single refresh token (e.g. on logout) — unlike

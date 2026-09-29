@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp/totp"
 
 	"auth-2fa-api/internal/auth"
@@ -1102,5 +1103,155 @@ func TestFirstLogin_TOTPBranch_EnrollAndConfirmCompletesLoginAndLocksInTOTP(t *t
 	loginCode := totpCodeFromOTPAuthURL(t, otpauthURL)
 	if _, _, err := svc.LoginStep2(t.Context(), loginToken2, loginCode); err != nil {
 		t.Fatalf("LoginStep2 (second login, TOTP code): %v", err)
+	}
+}
+
+// newTestServiceWithAccessRevocation is newTestService but also returns
+// the api client's own *redis.Client and the wired-in AccessRevocationStore
+// — needed by the reuse-detection tests below, which have to both backdate
+// a row's revoked_at directly via SQL and verify the access-token side of
+// the reaction, neither of which newTestService's callers can reach today.
+func newTestServiceWithAccessRevocation(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager, pool *pgxpool.Pool, accessRevocation *auth.AccessRevocationStore, mailer *testutil.FakeMailer, apiClientID string) {
+	t.Helper()
+
+	pool = testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	users := user.NewService(user.NewRepository(pool))
+	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
+	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	refresh := auth.NewRefreshRepository(pool)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
+	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
+	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
+	mailer = testutil.NewFakeMailer()
+	accessRevocation = auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, nil, accessRevocation)
+	return svc, tokens, pool, accessRevocation, mailer, client.ID
+}
+
+// TestRefresh_SuspiciousReuse_RevokesEverySession covers the actual point
+// of CheckReuse: presenting a refresh token that was consumed a while ago
+// (well past reuseDetectionGracePeriod, backdated here since no test
+// should really wait that long) must revoke every other session the
+// account has — a second, entirely independent login, and even the
+// already-rotated replacement for the reused token itself — plus mark its
+// access tokens revoked too. The caller still just sees the ordinary
+// ErrRefreshTokenInvalid, same as any other invalid token.
+func TestRefresh_SuspiciousReuse_RevokesEverySession(t *testing.T) {
+	svc, tokens, pool, accessRevocation, mailer, apiClientID := newTestServiceWithAccessRevocation(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	login := func() (access, refresh string) {
+		loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+		if err != nil {
+			t.Fatalf("LoginStep1: %v", err)
+		}
+		sent, _ := mailer.Last()
+		code := testutil.ExtractOTPCode(sent.Body)
+		access, refresh, err = svc.LoginStep2(t.Context(), loginToken, code)
+		if err != nil {
+			t.Fatalf("LoginStep2: %v", err)
+		}
+		return access, refresh
+	}
+
+	// Session A (e.g. the phone) and an entirely independent session B
+	// (e.g. the PC) — two separate logins, two separate refresh tokens.
+	accessA, refreshA := login()
+	_, refreshB := login()
+
+	// Normal use: rotate A once, same as any real refresh.
+	_, newRefreshA, err := svc.Refresh(t.Context(), refreshA)
+	if err != nil {
+		t.Fatalf("rotating refreshA: %v", err)
+	}
+
+	// Backdate refreshA's revoked_at past the grace period — simulates a
+	// stolen copy being replayed well after the legitimate rotation above,
+	// without a real test having to wait that long.
+	if _, err := pool.Exec(t.Context(),
+		`UPDATE refresh_tokens SET revoked_at = now() - INTERVAL '1 minute' WHERE token_hash = $1`,
+		hashTokenForTest(refreshA),
+	); err != nil {
+		t.Fatalf("backdating revoked_at: %v", err)
+	}
+
+	// The replay itself: rejected, same error as always.
+	if _, _, err := svc.Refresh(t.Context(), refreshA); err != auth.ErrRefreshTokenInvalid {
+		t.Fatalf("replaying the old refreshA: err = %v, want %v", err, auth.ErrRefreshTokenInvalid)
+	}
+
+	// Session A's own already-rotated replacement must be dead too.
+	if _, _, err := svc.Refresh(t.Context(), newRefreshA); err != auth.ErrRefreshTokenInvalid {
+		t.Fatalf("newRefreshA after the reuse reaction: err = %v, want %v", err, auth.ErrRefreshTokenInvalid)
+	}
+
+	// Session B — a completely separate login — must be dead too: the
+	// reaction revokes every session on the account, not just the one the
+	// reused token belonged to.
+	if _, _, err := svc.Refresh(t.Context(), refreshB); err != auth.ErrRefreshTokenInvalid {
+		t.Fatalf("refreshB after the reuse reaction: err = %v, want %v", err, auth.ErrRefreshTokenInvalid)
+	}
+
+	// Access tokens already issued (accessA, from before any of this) must
+	// be marked revoked too.
+	claims, err := tokens.ParseAccessToken(accessA)
+	if err != nil {
+		t.Fatalf("parsing accessA: %v", err)
+	}
+	revoked, err := accessRevocation.IsRevoked(t.Context(), claims.Subject, claims.IssuedAt.Time)
+	if err != nil {
+		t.Fatalf("IsRevoked: %v", err)
+	}
+	if !revoked {
+		t.Fatal("accessA should be marked revoked after the reuse reaction")
+	}
+}
+
+// TestRefresh_BenignRace_DoesNotAffectOtherSessions is the false-positive
+// guard: two requests presenting the same token in immediate succession
+// (the legitimate case — several browser tabs, a retried request) must
+// never trigger the reuse reaction, so a completely unrelated session on
+// the same account stays untouched.
+func TestRefresh_BenignRace_DoesNotAffectOtherSessions(t *testing.T) {
+	svc, _, _, _, mailer, apiClientID := newTestServiceWithAccessRevocation(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	login := func() (access, refresh string) {
+		loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+		if err != nil {
+			t.Fatalf("LoginStep1: %v", err)
+		}
+		sent, _ := mailer.Last()
+		code := testutil.ExtractOTPCode(sent.Body)
+		access, refresh, err = svc.LoginStep2(t.Context(), loginToken, code)
+		if err != nil {
+			t.Fatalf("LoginStep2: %v", err)
+		}
+		return access, refresh
+	}
+
+	_, refreshA := login()
+	_, refreshB := login()
+
+	// The race: ConsumeIfValid already guarantees only one of two
+	// near-simultaneous calls wins — this exercises the loser's path
+	// (immediately after, well within reuseDetectionGracePeriod).
+	if _, _, err := svc.Refresh(t.Context(), refreshA); err != nil {
+		t.Fatalf("first Refresh(refreshA) (the winner): %v", err)
+	}
+	if _, _, err := svc.Refresh(t.Context(), refreshA); err != auth.ErrRefreshTokenInvalid {
+		t.Fatalf("second Refresh(refreshA) (the loser): err = %v, want %v", err, auth.ErrRefreshTokenInvalid)
+	}
+
+	// Session B must be completely unaffected by that race on session A.
+	if _, _, err := svc.Refresh(t.Context(), refreshB); err != nil {
+		t.Fatalf("refreshB should be unaffected by the benign race on refreshA: %v", err)
 	}
 }

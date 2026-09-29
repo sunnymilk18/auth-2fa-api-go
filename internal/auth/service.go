@@ -496,6 +496,17 @@ func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email
 // AccessRevocationStore) a banned account has: if that ever races or
 // partially fails, this still refuses the renewal outright instead of
 // silently keeping a banned account's session alive.
+//
+// A token that fails ConsumeIfValid gets one more check — RefreshRepository.
+// CheckReuse — before this gives up on it: if it's specifically a token
+// that was already used a while ago (not just unknown or expired), that's
+// treated as a likely sign of a stolen copy being replayed, and every
+// session the account has is revoked as a precaution (same actions
+// AdminBanUser takes, minus the ban itself — this doesn't lock the account
+// out, it just forces everyone, attacker included, to re-authenticate).
+// The caller always sees the same ErrRefreshTokenInvalid either way,
+// whether or not this fired — never anything that would tell an attacker
+// their reuse attempt was specifically noticed.
 func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken, newRefreshToken string, err error) {
 	claims, err := s.tokens.ParseRefreshToken(refreshToken)
 	if err != nil {
@@ -507,6 +518,7 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 		return "", "", err
 	}
 	if !consumed {
+		s.reactToPossibleTokenReuse(ctx, refreshToken)
 		return "", "", ErrRefreshTokenInvalid
 	}
 
@@ -519,6 +531,33 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string) (accessToken
 	}
 
 	return s.issueTokenPair(ctx, claims.Subject, claims.APIClientID, claims.Email)
+}
+
+// reactToPossibleTokenReuse revokes every session an account has the
+// moment a refresh token that was already used a while ago (not just
+// unknown or expired) gets presented again — see Refresh's own doc
+// comment. Deliberately swallows its own errors (logged, not returned):
+// this is best-effort defense-in-depth on top of an already-rejected
+// request, not something that should change what the caller sees.
+func (s *Service) reactToPossibleTokenReuse(ctx context.Context, refreshToken string) {
+	userID, suspicious, err := s.refresh.CheckReuse(ctx, refreshToken)
+	if err != nil {
+		s.logger.Error("checking refresh token reuse", "error", err)
+		return
+	}
+	if !suspicious {
+		return
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		s.logger.Error("revoking sessions after suspected refresh token reuse", "user_id", userID, "error", err)
+	}
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		s.logger.Error("revoking devices after suspected refresh token reuse", "user_id", userID, "error", err)
+	}
+	if err := s.markAccessTokensRevoked(ctx, userID); err != nil {
+		s.logger.Error("marking access tokens revoked after suspected refresh token reuse", "user_id", userID, "error", err)
+	}
+	s.logger.Warn("possible refresh token reuse detected, revoked every session for the account", "user_id", userID)
 }
 
 // Logout revokes a refresh token so it can no longer be used.

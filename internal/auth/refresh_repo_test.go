@@ -177,3 +177,88 @@ func TestRefreshRepository_DeleteExpired_RevokedRetentionWindow(t *testing.T) {
 		t.Fatalf("remaining rows = %v, want only the recently-revoked token (the old one should've been purged)", remaining)
 	}
 }
+
+func TestRefreshRepository_CheckReuse(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	client, _ := testutil.NewAPIClient(t, pool)
+	u := testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
+	repo := auth.NewRefreshRepository(pool)
+
+	t.Run("unknown token", func(t *testing.T) {
+		_, suspicious, err := repo.CheckReuse(t.Context(), "does-not-exist-"+testutil.UniqueSuffix(t))
+		if err != nil {
+			t.Fatalf("CheckReuse: %v", err)
+		}
+		if suspicious {
+			t.Fatal("an unknown token was never used at all — nothing to be suspicious about")
+		}
+	})
+
+	t.Run("expired but never used", func(t *testing.T) {
+		token := "expired-unused-" + testutil.UniqueSuffix(t)
+		if err := repo.Store(t.Context(), u.ID, token, time.Now().Add(-time.Hour)); err != nil {
+			t.Fatalf("storing token: %v", err)
+		}
+		_, suspicious, err := repo.CheckReuse(t.Context(), token)
+		if err != nil {
+			t.Fatalf("CheckReuse: %v", err)
+		}
+		if suspicious {
+			t.Fatal("expiring on its own isn't a sign of theft")
+		}
+	})
+
+	t.Run("just consumed — within the grace period", func(t *testing.T) {
+		// The legitimate-race case ConsumeIfValid's own doc comment
+		// describes: several tabs, a retried request — resolves within
+		// milliseconds, so reusing it an instant later must NOT look
+		// suspicious.
+		token := "just-consumed-" + testutil.UniqueSuffix(t)
+		if err := repo.Store(t.Context(), u.ID, token, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("storing token: %v", err)
+		}
+		if _, err := repo.ConsumeIfValid(t.Context(), token); err != nil {
+			t.Fatalf("ConsumeIfValid: %v", err)
+		}
+
+		userID, suspicious, err := repo.CheckReuse(t.Context(), token)
+		if err != nil {
+			t.Fatalf("CheckReuse: %v", err)
+		}
+		if suspicious {
+			t.Fatal("reusing a token an instant after it was consumed must not be flagged — that's the benign race case, not theft")
+		}
+		if userID != u.ID {
+			t.Fatalf("userID = %q, want %q", userID, u.ID)
+		}
+	})
+
+	t.Run("consumed a while ago — past the grace period", func(t *testing.T) {
+		token := "consumed-long-ago-" + testutil.UniqueSuffix(t)
+		if err := repo.Store(t.Context(), u.ID, token, time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("storing token: %v", err)
+		}
+		if _, err := repo.ConsumeIfValid(t.Context(), token); err != nil {
+			t.Fatalf("ConsumeIfValid: %v", err)
+		}
+		// Backdate revoked_at past the grace period directly — there's no
+		// way to actually wait that long in a fast test.
+		if _, err := pool.Exec(t.Context(),
+			`UPDATE refresh_tokens SET revoked_at = now() - INTERVAL '1 minute' WHERE token_hash = $1`,
+			hashTokenForTest(token),
+		); err != nil {
+			t.Fatalf("backdating revoked_at: %v", err)
+		}
+
+		userID, suspicious, err := repo.CheckReuse(t.Context(), token)
+		if err != nil {
+			t.Fatalf("CheckReuse: %v", err)
+		}
+		if !suspicious {
+			t.Fatal("reusing a token well after it was consumed should be flagged as suspicious")
+		}
+		if userID != u.ID {
+			t.Fatalf("userID = %q, want %q", userID, u.ID)
+		}
+	})
+}
