@@ -43,7 +43,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	)
 	handlers := auth.NewHandlers(svc)
 
-	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), adminToken, false, false, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
@@ -310,7 +310,7 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, false, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))

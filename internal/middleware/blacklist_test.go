@@ -12,7 +12,7 @@ import (
 
 func TestBlacklist_BansAfterStrikeThreshold(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, false, 3, 24*time.Hour,
+	bl := middleware.NewBlacklist(rdb, 3, 24*time.Hour,
 		[]time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour}, 30*24*time.Hour)
 	ctx := t.Context()
 
@@ -53,7 +53,7 @@ func TestBlacklist_BansAfterStrikeThreshold(t *testing.T) {
 func TestBlacklist_EscalatesBanDurationOnRepeatOffense(t *testing.T) {
 	rdb, mr := testutil.RedisClientAndServer(t)
 	banDurations := []time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour}
-	bl := middleware.NewBlacklist(rdb, false, 1, time.Hour, banDurations, 30*24*time.Hour)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, banDurations, 30*24*time.Hour)
 	ctx := t.Context()
 
 	// 1st ban: threshold is 1, so a single violation bans immediately.
@@ -97,7 +97,7 @@ func TestBlacklist_EscalatesBanDurationOnRepeatOffense(t *testing.T) {
 
 func TestBlacklist_Unban_ClearsBanAndHistory(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, false, 1, time.Hour,
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour,
 		[]time.Duration{time.Hour, 2 * time.Hour}, 30*24*time.Hour)
 	ctx := t.Context()
 
@@ -132,7 +132,7 @@ func TestBlacklist_Unban_ClearsBanAndHistory(t *testing.T) {
 
 func TestBlacklist_Middleware_RejectsBannedIP(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, false, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "203.0.113.9"); err != nil {
@@ -169,8 +169,8 @@ func TestBlacklist_Middleware_RejectsBannedIP(t *testing.T) {
 // this is the integration point router.go relies on.
 func TestRateLimiter_DenialFeedsAttachedBlacklist(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, false, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour)
-	rl := middleware.NewRateLimiter(rdb, "test", 1, time.Minute, false).AttachBlacklist(bl)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour)
+	rl := middleware.NewRateLimiter(rdb, "test", 1, time.Minute).AttachBlacklist(bl)
 
 	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

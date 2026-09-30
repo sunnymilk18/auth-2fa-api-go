@@ -3,25 +3,22 @@ package middleware
 import (
 	"net"
 	"net/http"
-	"strings"
 )
 
-// ClientIP resolves the caller's IP — shared by RateLimiter and Blacklist so
-// both agree on who a request is "from".
+// ClientIP resolves the caller's IP from the real TCP connection — shared
+// by RateLimiter and Blacklist so both agree on who a request is "from".
 //
-// Only consults X-Forwarded-For when trustProxyHeaders is set — i.e. a
-// reverse proxy we control sits in front and overwrites (rather than
-// appends to) that header, so callers can't forge it to dodge either
-// mechanism. Takes the first (client-facing) hop, since ELB/nginx/etc.
-// append the real client IP at the front and any hop after that is ours.
-func ClientIP(r *http.Request, trustProxyHeaders bool) string {
-	if trustProxyHeaders {
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := strings.TrimSpace(strings.Split(fwd, ",")[0]); ip != "" {
-				return ip
-			}
-		}
-	}
+// Deliberately never consults X-Forwarded-For: trusting it safely requires
+// knowing the request actually came through a proxy we control (so the
+// header couldn't have been forged by the caller itself), which this API
+// has no way to verify today — there's no allowlist of trusted proxy
+// IPs, just the request itself. A wrong "yes, trust it" here would let
+// anyone dodge both the rate limits and the blacklist by setting an
+// arbitrary value on every request. If this API ever does need to sit
+// behind a proxy that hides the real client IP, the fix is a real
+// trusted-proxies allowlist (checking RemoteAddr is one of them before
+// reading the header) — not a blanket trust-it-or-not flag.
+func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

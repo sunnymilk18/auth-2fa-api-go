@@ -37,7 +37,7 @@ import (
 // are registered at all — same opt-in-at-deployment pattern as totpEnabled
 // (see config.Config.FirebaseCredentialsPath's doc comment): unset means
 // 404, not "exists but always fails".
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, trustProxyHeaders bool, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -66,7 +66,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// good behavior instead of climbing forever. Registered globally here
 	// (chi requires every Use before any route) so a banned IP never
 	// reaches any route at all, rate-limited or not.
-	blacklist := middleware.NewBlacklist(rdb, trustProxyHeaders,
+	blacklist := middleware.NewBlacklist(rdb,
 		3, 24*time.Hour,
 		[]time.Duration{24 * time.Hour, 72 * time.Hour, 7 * 24 * time.Hour},
 		30*24*time.Hour,
@@ -107,25 +107,25 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// and device PINs. Fixed windows, keyed by client IP, backed by Redis.
 	// Each is wired into the shared blacklist above: repeatedly tripping
 	// any one of them (or a mix of several) counts toward the same ban.
-	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
-	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
-	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
-	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	requestLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-request-email-code", 10, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
-	resendLoginCodeLimiter := middleware.NewRateLimiter(rdb, "login-resend-code", 5, time.Hour, trustProxyHeaders).AttachBlacklist(blacklist)
+	registerLimiter := middleware.NewRateLimiter(rdb, "register", 10, time.Hour).AttachBlacklist(blacklist)
+	loginLimiter := middleware.NewRateLimiter(rdb, "login", 20, 15*time.Minute).AttachBlacklist(blacklist)
+	otpLimiter := middleware.NewRateLimiter(rdb, "verify-otp", 30, 15*time.Minute).AttachBlacklist(blacklist)
+	deviceLoginLimiter := middleware.NewRateLimiter(rdb, "device-login", 30, 15*time.Minute).AttachBlacklist(blacklist)
+	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour).AttachBlacklist(blacklist)
+	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour).AttachBlacklist(blacklist)
+	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	requestLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-request-email-code", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	resendLoginCodeLimiter := middleware.NewRateLimiter(rdb, "login-resend-code", 5, time.Hour).AttachBlacklist(blacklist)
 	// Legitimate use rarely needs more than one refresh per ACCESS_TOKEN_TTL
 	// window per device — 30/15min leaves plenty of room for several
 	// devices/tabs on the same account plus the occasional retry, while
 	// still shutting down a loop hammering this endpoint with one stolen or
 	// otherwise-valid refresh token (this was the one /auth/* route with no
 	// rate limit at all before this).
-	refreshLimiter := middleware.NewRateLimiter(rdb, "refresh", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	refreshLimiter := middleware.NewRateLimiter(rdb, "refresh", 30, 15*time.Minute).AttachBlacklist(blacklist)
 	// Keyed by login_token (see loginTokenKey below), not by IP like every
 	// limiter above — /auth/login/push-status is polled every ~2s for up to
 	// PUSH_LOGIN_TTL (60s default), so a single wait alone can cost up to
@@ -139,7 +139,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// attempt (a stray extra tab polling the same token, a slow retry)
 	// with no cost to raising it: nothing outlives the token's own 60s
 	// regardless of this limit.
-	pushStatusLimiter := middleware.NewRateLimiter(rdb, "login-push-status", 100, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	pushStatusLimiter := middleware.NewRateLimiter(rdb, "login-push-status", 100, 15*time.Minute).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —

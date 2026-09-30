@@ -14,7 +14,7 @@ import (
 
 func TestRateLimiter_Allow(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	rl := NewRateLimiter(rdb, "test", 3, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 3, time.Minute)
 	ctx := t.Context()
 
 	for i := 1; i <= 3; i++ {
@@ -47,7 +47,7 @@ func TestRateLimiter_Allow(t *testing.T) {
 
 func TestRateLimiter_Middleware_BlocksOverLimit(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	rl := NewRateLimiter(rdb, "test", 2, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 2, time.Minute)
 
 	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -79,12 +79,12 @@ func TestRateLimiter_Middleware_BlocksOverLimit(t *testing.T) {
 	}
 }
 
-// This is the regression test for the X-Forwarded-For bypass: with
-// trustProxyHeaders off (the default), spoofing a different IP on every
-// request must NOT reset the counter.
-func TestRateLimiter_IgnoresForgedXForwardedForByDefault(t *testing.T) {
+// ClientIP never consults X-Forwarded-For at all (see its own doc comment
+// on why) — a forged one must have zero effect on which counter a request
+// hits, always the real connection's address.
+func TestRateLimiter_IgnoresXForwardedFor(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 1, time.Minute)
 
 	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -112,43 +112,12 @@ func TestRateLimiter_IgnoresForgedXForwardedForByDefault(t *testing.T) {
 	}
 }
 
-// When TRUST_PROXY_HEADERS is explicitly enabled (only correct behind a
-// proxy that overwrites the header itself), X-Forwarded-For is honored.
-func TestRateLimiter_UsesXForwardedForWhenTrusted(t *testing.T) {
-	rdb := testutil.RedisClient(t)
-	rl := NewRateLimiter(rdb, "test", 1, time.Minute, true)
-
-	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	do := func(forwardedFor string) int {
-		req := httptest.NewRequest(http.MethodPost, "/", nil)
-		req.RemoteAddr = "203.0.113.5:12345" // same proxy hop every time
-		req.Header.Set("X-Forwarded-For", forwardedFor)
-		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, req)
-		return rec.Code
-	}
-
-	if code := do("1.1.1.1"); code != http.StatusOK {
-		t.Fatalf("client 1.1.1.1, request 1: want 200, got %d", code)
-	}
-	if code := do("1.1.1.1"); code != http.StatusTooManyRequests {
-		t.Fatalf("client 1.1.1.1, request 2: want 429, got %d", code)
-	}
-	// A genuinely different client (different first hop) gets its own limit.
-	if code := do("9.9.9.9, 203.0.113.5"); code != http.StatusOK {
-		t.Fatalf("client 9.9.9.9, request 1: want 200, got %d", code)
-	}
-}
-
 // Allow's retryAfter must reflect how much of the window is actually left,
 // not always the full configured window — see the analogous
 // auth.TestLoginAttemptLimiter_IsLocked_ReturnsRealRemainingTime.
 func TestRateLimiter_Allow_ReturnsRealRemainingTime(t *testing.T) {
 	rdb, mr := testutil.RedisClientAndServer(t)
-	rl := NewRateLimiter(rdb, "test", 1, 10*time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 1, 10*time.Minute)
 	ctx := t.Context()
 
 	if _, _, err := rl.Allow(ctx, "key"); err != nil {
@@ -169,7 +138,7 @@ func TestRateLimiter_Allow_ReturnsRealRemainingTime(t *testing.T) {
 
 func TestRateLimiter_WindowResets(t *testing.T) {
 	rdb, mr := testutil.RedisClientAndServer(t)
-	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 1, time.Minute)
 	ctx := t.Context()
 
 	allowed, _, err := rl.Allow(ctx, "key")
@@ -206,7 +175,7 @@ func TestRateLimiter_FailsOpenWhenRedisIsDown(t *testing.T) {
 	// would otherwise make it take several seconds for no benefit.
 	rdb := redis.NewClient(&redis.Options{Addr: addr, MaxRetries: -1})
 	t.Cleanup(func() { _ = rdb.Close() })
-	rl := NewRateLimiter(rdb, "test", 1, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test", 1, time.Minute)
 
 	allowed, _, err := rl.Allow(t.Context(), "key")
 	if err == nil {
@@ -236,7 +205,7 @@ func TestRateLimiter_FailsOpenWhenRedisIsDown(t *testing.T) {
 // under the ordinary IP-keyed Middleware.
 func TestRateLimiter_MiddlewareByKey_CountsByCustomKeyNotIP(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	rl := NewRateLimiter(rdb, "test-by-key", 2, time.Minute, false)
+	rl := NewRateLimiter(rdb, "test-by-key", 2, time.Minute)
 
 	handler := rl.MiddlewareByKey(func(r *http.Request) string {
 		return r.URL.Query().Get("login_token")
@@ -275,8 +244,8 @@ func TestRateLimiter_MiddlewareByKey_CountsByCustomKeyNotIP(t *testing.T) {
 // whichever identifier a particular limiter happens to count requests by.
 func TestRateLimiter_MiddlewareByKey_StrikesRecordedAgainstIP(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := NewBlacklist(rdb, false, 1, time.Hour, []time.Duration{time.Hour}, 24*time.Hour)
-	rl := NewRateLimiter(rdb, "test-by-key-strikes", 1, time.Minute, false).AttachBlacklist(bl)
+	bl := NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 24*time.Hour)
+	rl := NewRateLimiter(rdb, "test-by-key-strikes", 1, time.Minute).AttachBlacklist(bl)
 
 	handler := rl.MiddlewareByKey(func(r *http.Request) string {
 		return r.URL.Query().Get("login_token")

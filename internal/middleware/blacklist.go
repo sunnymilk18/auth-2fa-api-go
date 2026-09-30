@@ -26,22 +26,20 @@ import (
 // long-departed offender shouldn't leave that whole location on the
 // longest ban tier indefinitely.
 type Blacklist struct {
-	rdb               *redis.Client
-	trustProxyHeaders bool
-	strikeThreshold   int64
-	strikeWindow      time.Duration
-	banDurations      []time.Duration
-	levelMemory       time.Duration
+	rdb             *redis.Client
+	strikeThreshold int64
+	strikeWindow    time.Duration
+	banDurations    []time.Duration
+	levelMemory     time.Duration
 }
 
-func NewBlacklist(rdb *redis.Client, trustProxyHeaders bool, strikeThreshold int64, strikeWindow time.Duration, banDurations []time.Duration, levelMemory time.Duration) *Blacklist {
+func NewBlacklist(rdb *redis.Client, strikeThreshold int64, strikeWindow time.Duration, banDurations []time.Duration, levelMemory time.Duration) *Blacklist {
 	return &Blacklist{
-		rdb:               rdb,
-		trustProxyHeaders: trustProxyHeaders,
-		strikeThreshold:   strikeThreshold,
-		strikeWindow:      strikeWindow,
-		banDurations:      banDurations,
-		levelMemory:       levelMemory,
+		rdb:             rdb,
+		strikeThreshold: strikeThreshold,
+		strikeWindow:    strikeWindow,
+		banDurations:    banDurations,
+		levelMemory:     levelMemory,
 	}
 }
 
@@ -120,7 +118,7 @@ func (bl *Blacklist) Unban(ctx context.Context, ip string) error {
 // any route at all, rate-limited or not.
 func (bl *Blacklist) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := ClientIP(r, bl.trustProxyHeaders)
+		ip := ClientIP(r)
 
 		banned, retryAfter, err := bl.IsBanned(r.Context(), ip)
 		if err != nil {

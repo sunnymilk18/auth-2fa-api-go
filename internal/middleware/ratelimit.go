@@ -38,13 +38,6 @@ type RateLimiter struct {
 	limit  int64
 	window time.Duration
 
-	// trustProxyHeaders enables reading X-Forwarded-For for the client IP.
-	// Only safe when the server sits behind a reverse proxy that overwrites
-	// (rather than appends to) that header — otherwise any caller can set
-	// it themselves and reset their own counter on every request, making
-	// the limit trivial to bypass.
-	trustProxyHeaders bool
-
 	// blacklist, when attached, is told about every request this limiter
 	// denies — see Blacklist's doc comment for the escalation that feeds.
 	// nil is a valid, common state (most limiters don't need it attached
@@ -53,8 +46,8 @@ type RateLimiter struct {
 	blacklist *Blacklist
 }
 
-func NewRateLimiter(rdb *redis.Client, prefix string, limit int64, window time.Duration, trustProxyHeaders bool) *RateLimiter {
-	return &RateLimiter{rdb: rdb, prefix: prefix, limit: limit, window: window, trustProxyHeaders: trustProxyHeaders}
+func NewRateLimiter(rdb *redis.Client, prefix string, limit int64, window time.Duration) *RateLimiter {
+	return &RateLimiter{rdb: rdb, prefix: prefix, limit: limit, window: window}
 }
 
 // AttachBlacklist wires bl into this limiter so a denied request also
@@ -142,5 +135,5 @@ func (rl *RateLimiter) MiddlewareByKey(key func(*http.Request) string) func(http
 }
 
 func (rl *RateLimiter) clientIP(r *http.Request) string {
-	return ClientIP(r, rl.trustProxyHeaders)
+	return ClientIP(r)
 }

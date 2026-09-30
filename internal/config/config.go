@@ -91,12 +91,6 @@ type Config struct {
 	ResendAPIKey string
 	ResendFrom   string
 
-	// TrustProxyHeaders makes the rate limiter read the client IP from
-	// X-Forwarded-For instead of the raw connection. Only enable this when
-	// a reverse proxy you control sits in front and overwrites that header
-	// — otherwise any client can forge it to dodge the rate limit.
-	TrustProxyHeaders bool
-
 	// AdminAPIToken gates /admin/* (provisioning api_clients over HTTP —
 	// the same operations as cmd/createclient, for when running the CLI
 	// over SSH is more friction than it's worth). Checked against the
@@ -230,9 +224,6 @@ func Load() (*Config, error) {
 	if cfg.DevicePinMaxTries, err = getEnvInt("DEVICE_PIN_MAX_TRIES", 5); err != nil {
 		return nil, err
 	}
-	if cfg.TrustProxyHeaders, err = getEnvBool("TRUST_PROXY_HEADERS", false); err != nil {
-		return nil, err
-	}
 	if cfg.PushLoginTTL, err = getEnvDuration("PUSH_LOGIN_TTL", 60*time.Second); err != nil {
 		return nil, err
 	}
@@ -267,18 +258,6 @@ func getEnvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid int for %s: %w", key, err)
 	}
 	return n, nil
-}
-
-func getEnvBool(key string, fallback bool) (bool, error) {
-	v, ok := os.LookupEnv(key)
-	if !ok || v == "" {
-		return fallback, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return false, fmt.Errorf("invalid bool for %s: %w", key, err)
-	}
-	return b, nil
 }
 
 func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
