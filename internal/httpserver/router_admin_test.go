@@ -355,6 +355,52 @@ func registerUserWithFields(t *testing.T, r http.Handler, apiKey, email, usernam
 	return testUser{id: created.ID}
 }
 
+// TestAdminListUsers_UnscopedSpansEveryTenant covers the operator's own
+// GET /admin/users (X-Admin-Token, no {id}) — the same ListUsers handler
+// as /system-admin/users, but reached with no tenant in context, so it
+// must return users from multiple tenants in one call, unlike every other
+// Admin* route and unlike /system-admin/users itself.
+func TestAdminListUsers_UnscopedSpansEveryTenant(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+
+	clientA := createTestClient(t, r, "admin-list-a")
+	clientB := createTestClient(t, r, "admin-list-b")
+	userA := registerTestUser(t, r, clientA.APIKey)
+	userB := registerTestUser(t, r, clientB.APIKey)
+
+	// Unregistered without ADMIN_API_TOKEN configured — same as every
+	// other /admin/* route.
+	noTokenRouter := newTestRouterWithAdmin(t, "")
+	notFoundRec := adminRequest(noTokenRouter, http.MethodGet, "/admin/users/", testAdminToken, nil)
+	if notFoundRec.Code != http.StatusNotFound {
+		t.Fatalf("no ADMIN_API_TOKEN configured: status = %d, want %d", notFoundRec.Code, http.StatusNotFound)
+	}
+
+	// Wrong/missing token: 401.
+	unauthRec := adminRequest(r, http.MethodGet, "/admin/users/", "wrong-token", nil)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong token: status = %d, want %d", unauthRec.Code, http.StatusUnauthorized)
+	}
+
+	listRec := adminRequest(r, http.MethodGet, "/admin/users/?page_size=200", testAdminToken, nil)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list: status = %d, body = %s", listRec.Code, listRec.Body.String())
+	}
+	var resp struct {
+		Users []map[string]any `json:"users"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+	found := map[string]bool{}
+	for _, u := range resp.Users {
+		found[u["id"].(string)] = true
+	}
+	if !found[userA.id] || !found[userB.id] {
+		t.Fatalf("unscoped /admin/users listing missing users from one or both tenants: got %d users, want to find %s and %s among them", len(resp.Users), userA.id, userB.id)
+	}
+}
+
 func systemAdminRequest(r http.Handler, method, path, key string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	if key != "" {

@@ -77,9 +77,13 @@ func (h *AdminHandlers) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 // userListItem is deliberately a narrow projection of user.User — no
 // PasswordHash, no TOTP secret (it isn't even on user.User — see its doc
 // comment), same "never leaves the server" rule the rest of this package
-// already follows for sensitive fields.
+// already follows for sensitive fields. APIClientID is included because
+// ListUsers is the one Admin* route that can return results spanning
+// multiple tenants (see ListUsers' doc comment) — without it, a result
+// from /admin/users wouldn't say which tenant it belongs to.
 type userListItem struct {
 	ID                    string    `json:"id"`
+	APIClientID           string    `json:"api_client_id"`
 	Email                 string    `json:"email"`
 	Username              string    `json:"username"`
 	RUT                   string    `json:"rut"`
@@ -96,13 +100,19 @@ type listUsersResponse struct {
 	Total    int            `json:"total"`
 }
 
-// ListUsers returns one page of the caller's own tenant's registered
-// users — see Service.AdminListUsers's doc comment for why this is the
-// only Admin* handler with no {id} in its path. page/page_size/q are read
-// from the query string; missing or invalid page/page_size fall back to
-// Service.AdminListUsers' own defaults/clamping rather than rejecting the
-// request outright. q is optional — omitted or empty behaves exactly like
-// the plain paginated listing did before q existed.
+// ListUsers returns one page of registered users — see Service.
+// AdminListUsers's doc comment for why this is the only Admin* handler
+// with no {id} in its path. Through /system-admin/users, apiClientID
+// (read from context, same as every other Admin* handler) is always a
+// real tenant id, so results are scoped to the caller's own tenant, same
+// as the other four actions. Through /admin/users, apiClientID is always
+// "" (the operator's unscoped X-Admin-Token sets no tenant in context),
+// so this instead spans every tenant — the one Admin* route where that's
+// true. page/page_size/q are read from the query string; missing or
+// invalid page/page_size fall back to Service.AdminListUsers' own
+// defaults/clamping rather than rejecting the request outright. q is
+// optional — omitted or empty behaves exactly like the plain paginated
+// listing did before q existed.
 func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	apiClientID, _ := APIClientIDFromContext(r.Context())
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -119,6 +129,7 @@ func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	for _, u := range users {
 		out = append(out, userListItem{
 			ID:                    u.ID,
+			APIClientID:           u.APIClientID,
 			Email:                 u.Email,
 			Username:              u.Username,
 			RUT:                   u.RUT,

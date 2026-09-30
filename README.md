@@ -244,6 +244,14 @@ curl -X POST https://tu-api/admin/users/<id>/unban            -H "X-Admin-Token:
 curl -X POST https://tu-api/admin/users/<id>/disable-totp     -H "X-Admin-Token: $ADMIN_API_TOKEN"
 curl -X POST https://tu-api/admin/users/<id>/revoke-sessions  -H "X-Admin-Token: $ADMIN_API_TOKEN"
 
+# Listar cuentas de TODOS los sistemas a la vez (page/page_size/q — ver la sección
+# de listado más abajo para el detalle de estos parámetros). A diferencia de las
+# cuatro rutas de arriba, esta no requiere conocer el id de antemano — es la forma
+# de encontrar una cuenta sin saber a qué sistema pertenece. Deliberadamente NO está
+# documentada en /docs ni en openapi.yaml (esas rutas se sirven sin autenticación) —
+# su existencia solo debe conocerla quien ya tiene este X-Admin-Token.
+curl "https://tu-api/admin/users?page=1&page_size=50&q=texto"  -H "X-Admin-Token: $ADMIN_API_TOKEN"
+
 # Levantar antes de tiempo un baneo automático por IP (ver "Lista negra automática por IP").
 curl -X DELETE https://tu-api/admin/blacklist/203.0.113.7 -H "X-Admin-Token: $ADMIN_API_TOKEN"
 ```
@@ -278,7 +286,7 @@ La misma credencial también sirve para listar las cuentas del tenant — la ún
 curl "https://tu-api/system-admin/users?page=1&page_size=50&q=texto" -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
 ```
 
-Devuelve una página (`page`/`page_size`, paginado con `COUNT(*) OVER()` para el `total`) de las cuentas registradas, incluidas las que nunca terminaron de registrarse (correo sin verificar, sin segundo factor elegido) — sin campos sensibles (hash de contraseña, secreto TOTP). `q` es opcional: busca coincidencia parcial, sin distinguir mayúsculas/minúsculas, sobre `email`, `username` y `rut`.
+Devuelve una página (`page`/`page_size`, paginado con `COUNT(*) OVER()` para el `total`) de las cuentas registradas, incluidas las que nunca terminaron de registrarse (correo sin verificar, sin segundo factor elegido) — sin campos sensibles (hash de contraseña, secreto TOTP). `q` es opcional: busca coincidencia parcial, sin distinguir mayúsculas/minúsculas, sobre `email`, `username` y `rut`. Es el mismo handler que atiende `GET /admin/users` más arriba — cuál de los dos tokens autenticó la petición es lo único que decide si el resultado queda acotado a un tenant o abarca todos.
 
 ## Ejecutar
 

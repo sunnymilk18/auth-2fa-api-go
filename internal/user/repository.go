@@ -170,24 +170,35 @@ func escapeLikePattern(s string) string {
 	return replacer.Replace(s)
 }
 
-// ListByAPIClient returns one page of apiClientID's users, newest first,
-// plus the total row count for that tenant (COUNT(*) OVER() — computed in
-// the same query as the page itself, not a separate round trip) so a caller
-// can page through without a second request just to know how many pages
-// there are. offset/limit are the caller's responsibility to keep sane
-// (see user.Service.ListByAPIClient) — this method applies them as-is. q,
-// when non-empty, restricts the results to rows where email, username or
-// rut contains it (ILIKE, so case-insensitive) — see escapeLikePattern for
-// why the value is escaped before being wrapped in "%...%".
+// ListByAPIClient returns one page of users, newest first, plus the total
+// row count for the same filter (COUNT(*) OVER() — computed in the same
+// query as the page itself, not a separate round trip) so a caller can page
+// through without a second request just to know how many pages there are.
+// offset/limit are the caller's responsibility to keep sane (see
+// user.Service.ListByAPIClient); this method applies them as-is. q, when
+// non-empty, restricts the results to rows where email, username or rut
+// contains it (ILIKE, so case-insensitive) — see escapeLikePattern for why
+// the value is escaped before being wrapped in "%...%". apiClientID, when
+// non-empty, restricts the results to that one tenant — when empty, this
+// lists across every tenant instead (see auth.Service.AdminListUsers's
+// caller: this is only ever reached with apiClientID == "" through
+// /admin/users, gated by the operator's own unscoped X-Admin-Token, never
+// through /system-admin/users, which always has a real tenant id).
 func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string) ([]*User, int, error) {
-	query := `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total
-		FROM users WHERE api_client_id = $1`
-	args := []any{apiClientID}
+	query := `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total FROM users`
+	var args []any
+	var conditions []string
 
+	if apiClientID != "" {
+		args = append(args, apiClientID)
+		conditions = append(conditions, fmt.Sprintf("api_client_id = $%d", len(args)))
+	}
 	if q != "" {
-		pattern := "%" + escapeLikePattern(q) + "%"
-		query += ` AND (email ILIKE $2 OR username ILIKE $2 OR rut ILIKE $2)`
-		args = append(args, pattern)
+		args = append(args, "%"+escapeLikePattern(q)+"%")
+		conditions = append(conditions, fmt.Sprintf("(email ILIKE $%d OR username ILIKE $%d OR rut ILIKE $%d)", len(args), len(args), len(args)))
+	}
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
 	query += fmt.Sprintf(" ORDER BY created_at DESC OFFSET $%d LIMIT $%d", len(args)+1, len(args)+2)
 	args = append(args, offset, limit)

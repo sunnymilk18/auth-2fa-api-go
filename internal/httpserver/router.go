@@ -260,6 +260,15 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Route("/admin/users", func(r chi.Router) {
 			r.Use(middleware.RequireAdminToken(adminToken))
 
+			// No {id} — X-Admin-Token sets no tenant in context (unlike
+			// X-System-Admin-Token), so this spans every tenant. See
+			// AdminHandlers.ListUsers' doc comment. Deliberately not in
+			// openapi.yaml/docs: those are served unauthenticated at
+			// /docs, and this route's existence shouldn't be discoverable
+			// by anyone without the operator's own token — see README's
+			// /admin/users section for where this is documented instead.
+			r.Get("/", adminUserHandlers.ListUsers)
+
 			r.Post("/{id}/ban", adminUserHandlers.Ban)
 			r.Post("/{id}/unban", adminUserHandlers.Unban)
 			r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
@@ -296,10 +305,9 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Use(middleware.RequireSystemAdminToken(apiClients))
 
 		// Scoped to the caller's own tenant via APIClientIDFromContext —
-		// see AdminHandlers.ListUsers' doc comment. Deliberately not
-		// mirrored under /admin/users: that route's X-Admin-Token isn't
-		// scoped to one tenant, so an unscoped listing endpoint is a
-		// separate decision left for later, not implemented here.
+		// see AdminHandlers.ListUsers' doc comment. The same handler also
+		// backs GET /admin/users above, unscoped — which one a request
+		// gets is entirely a function of which token authenticated it.
 		r.Get("/", adminUserHandlers.ListUsers)
 
 		r.Post("/{id}/ban", adminUserHandlers.Ban)

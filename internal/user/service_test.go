@@ -454,3 +454,37 @@ func TestListByAPIClient_SearchEscapesLikeWildcards(t *testing.T) {
 		t.Fatalf("q=no_percent: total = %d, want 1 (exact literal match only)", total)
 	}
 }
+
+// An empty apiClientID means "every tenant" — the /admin/users case (the
+// operator's own unscoped token). This is the one place the tenant-scoping
+// rule every other ListByAPIClient test relies on is deliberately not
+// applied, so it's covered as its own test rather than folded into the
+// scoped ones above.
+func TestListByAPIClient_EmptyAPIClientIDSpansEveryTenant(t *testing.T) {
+	svcA, apiClientA := newTestUserService(t)
+	// A second tenant — its own *pgxpool.Pool, but pointed at the same
+	// test database as svcA's, so both tenants' rows are visible to an
+	// unscoped query through either service.
+	svcB, apiClientB := newTestUserService(t)
+
+	userA, err := svcA.Register(t.Context(), apiClientA, "spanA-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register in tenant A: %v", err)
+	}
+	userB, err := svcB.Register(t.Context(), apiClientB, "spanB-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register in tenant B: %v", err)
+	}
+
+	results, _, _, _, err := svcA.ListByAPIClient(t.Context(), "", 1, 200, "")
+	if err != nil {
+		t.Fatalf("ListByAPIClient with apiClientID=\"\": %v", err)
+	}
+	found := map[string]bool{}
+	for _, u := range results {
+		found[u.ID] = true
+	}
+	if !found[userA.ID] || !found[userB.ID] {
+		t.Fatalf("unscoped listing missing users from one or both tenants: found=%v, want %s and %s", found, userA.ID, userB.ID)
+	}
+}
