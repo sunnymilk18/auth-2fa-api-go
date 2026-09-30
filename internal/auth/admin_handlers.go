@@ -98,16 +98,18 @@ type listUsersResponse struct {
 
 // ListUsers returns one page of the caller's own tenant's registered
 // users — see Service.AdminListUsers's doc comment for why this is the
-// only Admin* handler with no {id} in its path. page/page_size are read
-// from the query string; missing or invalid values fall back to
+// only Admin* handler with no {id} in its path. page/page_size/q are read
+// from the query string; missing or invalid page/page_size fall back to
 // Service.AdminListUsers' own defaults/clamping rather than rejecting the
-// request outright.
+// request outright. q is optional — omitted or empty behaves exactly like
+// the plain paginated listing did before q existed.
 func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	apiClientID, _ := APIClientIDFromContext(r.Context())
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	q := r.URL.Query().Get("q")
 
-	users, total, effectivePage, effectivePageSize, err := h.svc.AdminListUsers(r.Context(), apiClientID, page, pageSize)
+	users, total, effectivePage, effectivePageSize, err := h.svc.AdminListUsers(r.Context(), apiClientID, page, pageSize, q)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "no se pudo listar los usuarios")
 		return

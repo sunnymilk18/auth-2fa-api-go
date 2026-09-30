@@ -283,6 +283,78 @@ func TestSystemAdminListUsers_ScopedToTenantAndOmitsSensitiveFields(t *testing.T
 	}
 }
 
+// TestSystemAdminListUsers_SearchByQ covers the ?q= search end to end
+// through the HTTP route — case-insensitive partial match, and still
+// scoped to the caller's own tenant.
+func TestSystemAdminListUsers_SearchByQ(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+
+	clientA := createTestClient(t, r, "search-users-a")
+	rotateRec := adminRequest(r, http.MethodPost, "/admin/clients/"+clientA.ID+"/system-admin-key/rotate", testAdminToken, nil)
+	if rotateRec.Code != http.StatusOK {
+		t.Fatalf("rotate system admin key: status = %d, body = %s", rotateRec.Code, rotateRec.Body.String())
+	}
+	var rotated struct {
+		SystemAdminKey string `json:"system_admin_key"`
+	}
+	if err := json.Unmarshal(rotateRec.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("decoding rotate response: %v", err)
+	}
+
+	suffix := testutil.UniqueSuffix(t)
+	matchUsername := "findable-" + suffix
+	registerUserWithFields(t, r, clientA.APIKey, "unrelated-"+suffix+"@example.com", matchUsername)
+	registerUserWithFields(t, r, clientA.APIKey, "unrelated2-"+suffix+"@example.com", "nomatch-"+suffix)
+
+	// Uppercased and only a substring, on purpose — the search must still
+	// find it (case-insensitive, partial match).
+	searchRec := systemAdminRequest(r, http.MethodGet, "/system-admin/users/?q=FINDABLE-"+suffix, rotated.SystemAdminKey)
+	if searchRec.Code != http.StatusOK {
+		t.Fatalf("search: status = %d, body = %s", searchRec.Code, searchRec.Body.String())
+	}
+	var resp struct {
+		Users []map[string]any `json:"users"`
+		Total int              `json:"total"`
+	}
+	if err := json.Unmarshal(searchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding search response: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("total = %d, want 1 (only the matching username)", resp.Total)
+	}
+	if len(resp.Users) != 1 || resp.Users[0]["username"] != matchUsername {
+		t.Fatalf("unexpected search results: %+v", resp.Users)
+	}
+}
+
+// registerUserWithFields is registerTestUser but with a caller-chosen
+// email/username, needed to test ?q= search against a known value.
+func registerUserWithFields(t *testing.T, r http.Handler, apiKey, email, username string) testUser {
+	t.Helper()
+	body := map[string]string{
+		"email":    email,
+		"password": "correcthorsebattery",
+		"username": username,
+		"rut":      testutil.UniqueRUT(t),
+	}
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, "/auth/register", bytes.NewReader(buf))
+	req.Header.Set("X-API-Key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("registering test user: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decoding register response: %v", err)
+	}
+	return testUser{id: created.ID}
+}
+
 func systemAdminRequest(r http.Handler, method, path, key string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	if key != "" {

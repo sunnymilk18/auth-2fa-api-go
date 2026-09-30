@@ -302,7 +302,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 	}
 
 	// Page size 2, first page — should be the two most recently created.
-	page1, total, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 2)
+	page1, total, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 2, "")
 	if err != nil {
 		t.Fatalf("ListByAPIClient page 1: %v", err)
 	}
@@ -320,7 +320,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 	}
 
 	// Page 3 of size 2 over 5 rows has exactly one leftover row.
-	page3, total3, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 3, 2)
+	page3, total3, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 3, 2, "")
 	if err != nil {
 		t.Fatalf("ListByAPIClient page 3: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 
 	// A different tenant sees none of these.
 	otherSvc, otherClientID := newTestUserService(t)
-	otherPage, otherTotal, _, _, err := otherSvc.ListByAPIClient(t.Context(), otherClientID, 1, 10)
+	otherPage, otherTotal, _, _, err := otherSvc.ListByAPIClient(t.Context(), otherClientID, 1, 10, "")
 	if err != nil {
 		t.Fatalf("ListByAPIClient other tenant: %v", err)
 	}
@@ -350,7 +350,7 @@ func TestListByAPIClient_ClampsOutOfRangePageParams(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	_, _, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 0, 0)
+	_, _, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 0, 0, "")
 	if err != nil {
 		t.Fatalf("ListByAPIClient page=0 pageSize=0: %v", err)
 	}
@@ -361,11 +361,96 @@ func TestListByAPIClient_ClampsOutOfRangePageParams(t *testing.T) {
 		t.Fatalf("pageSize=0 was clamped to %d, want the 50 default", effPageSize)
 	}
 
-	_, _, _, effPageSize2, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 10000)
+	_, _, _, effPageSize2, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 10000, "")
 	if err != nil {
 		t.Fatalf("ListByAPIClient pageSize=10000: %v", err)
 	}
 	if effPageSize2 != 100 {
 		t.Fatalf("pageSize=10000 was clamped to %d, want the 100 cap", effPageSize2)
+	}
+}
+
+// q must match partially, case-insensitively, across email, username and
+// rut — and a user from a different tenant must never show up even if its
+// email would otherwise match.
+func TestListByAPIClient_SearchMatchesEmailUsernameOrRUT(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	suffix := testutil.UniqueSuffix(t)
+
+	byEmail, err := svc.Register(t.Context(), apiClientID, "findme-"+suffix+"@example.com", "correcthorsebattery", "unrelated-a-"+suffix, testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register byEmail: %v", err)
+	}
+	byUsername, err := svc.Register(t.Context(), apiClientID, "unrelated-b-"+suffix+"@example.com", "correcthorsebattery", "findme-"+suffix, testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register byUsername: %v", err)
+	}
+	if _, err := svc.Register(t.Context(), apiClientID, "nomatch-"+suffix+"@example.com", "correcthorsebattery", "nomatch-"+suffix, testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register nomatch: %v", err)
+	}
+
+	// Uppercased on purpose: ILIKE must still match.
+	results, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "FINDME-"+suffix)
+	if err != nil {
+		t.Fatalf("ListByAPIClient with q: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("total = %d, want 2 (byEmail + byUsername, not the unrelated one)", total)
+	}
+	gotIDs := map[string]bool{}
+	for _, u := range results {
+		gotIDs[u.ID] = true
+	}
+	if !gotIDs[byEmail.ID] || !gotIDs[byUsername.ID] {
+		t.Fatalf("results missing expected matches: got %v, want %s and %s", gotIDs, byEmail.ID, byUsername.ID)
+	}
+
+	// A different tenant's matching user never leaks in.
+	otherSvc, otherClientID := newTestUserService(t)
+	if _, err := otherSvc.Register(t.Context(), otherClientID, "findme-"+suffix+"-other@example.com", "correcthorsebattery", "other-"+suffix, testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register in other tenant: %v", err)
+	}
+	otherTenantResults, _, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "findme-"+suffix)
+	if err != nil {
+		t.Fatalf("ListByAPIClient (checking tenant isolation with q): %v", err)
+	}
+	for _, u := range otherTenantResults {
+		if u.APIClientID != apiClientID {
+			t.Fatalf("search leaked a user from another tenant: %+v", u)
+		}
+	}
+}
+
+// A literal "%" or "_" in q must be matched as a literal character, not
+// treated as an ILIKE wildcard — see Repository.escapeLikePattern.
+func TestListByAPIClient_SearchEscapesLikeWildcards(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	suffix := testutil.UniqueSuffix(t)
+
+	if _, err := svc.Register(t.Context(), apiClientID, "percent-"+suffix+"@example.com", "correcthorsebattery", "no_percent_here-"+suffix, testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if _, err := svc.Register(t.Context(), apiClientID, "other-"+suffix+"@example.com", "correcthorsebattery", "other-"+suffix, testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// A literal "%" shouldn't match every username — only one that actually
+	// contains a "%" character (none of them do).
+	_, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "%")
+	if err != nil {
+		t.Fatalf("ListByAPIClient q=%%: %v", err)
+	}
+	if total != 0 {
+		t.Fatalf("q=%%: total = %d, want 0 (no username actually contains a literal %%)", total)
+	}
+
+	// A literal "_" must match only a username with that literal character —
+	// not stand in for "any character" and match everything.
+	_, total, _, _, err = svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "no_percent")
+	if err != nil {
+		t.Fatalf("ListByAPIClient q=no_percent: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("q=no_percent: total = %d, want 1 (exact literal match only)", total)
 	}
 }

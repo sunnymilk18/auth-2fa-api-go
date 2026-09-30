@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -157,19 +158,41 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*User, error) {
 	return findOne(ctx, r.pool, q, "id", id)
 }
 
+// escapeLikePattern escapes the three characters that mean something
+// special to LIKE/ILIKE (%, _ and the escape character itself, \) so a
+// caller's search text is matched literally — without this, a search for
+// an email containing a literal "%" or "_" would silently behave like a
+// wildcard instead of matching that character. The escaped value still
+// needs to be wrapped in its own "%...%" by the caller; only the escape
+// character itself is fixed here (backslash, Postgres's default).
+func escapeLikePattern(s string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(s)
+}
+
 // ListByAPIClient returns one page of apiClientID's users, newest first,
 // plus the total row count for that tenant (COUNT(*) OVER() — computed in
 // the same query as the page itself, not a separate round trip) so a caller
 // can page through without a second request just to know how many pages
 // there are. offset/limit are the caller's responsibility to keep sane
-// (see user.Service.ListByAPIClient) — this method applies them as-is.
-func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int) ([]*User, int, error) {
-	const q = `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total
-		FROM users WHERE api_client_id = $1
-		ORDER BY created_at DESC
-		OFFSET $2 LIMIT $3`
+// (see user.Service.ListByAPIClient) — this method applies them as-is. q,
+// when non-empty, restricts the results to rows where email, username or
+// rut contains it (ILIKE, so case-insensitive) — see escapeLikePattern for
+// why the value is escaped before being wrapped in "%...%".
+func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string) ([]*User, int, error) {
+	query := `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total
+		FROM users WHERE api_client_id = $1`
+	args := []any{apiClientID}
 
-	rows, err := r.pool.Query(ctx, q, apiClientID, offset, limit)
+	if q != "" {
+		pattern := "%" + escapeLikePattern(q) + "%"
+		query += ` AND (email ILIKE $2 OR username ILIKE $2 OR rut ILIKE $2)`
+		args = append(args, pattern)
+	}
+	query += fmt.Sprintf(" ORDER BY created_at DESC OFFSET $%d LIMIT $%d", len(args)+1, len(args)+2)
+	args = append(args, offset, limit)
+
+	rows, err := r.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("listing users: %w", err)
 	}

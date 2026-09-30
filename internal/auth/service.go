@@ -731,10 +731,12 @@ func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userI
 // (unverified email, no 2FA method chosen yet), which is the whole point:
 // unlike every other Admin* method above, there's no userID to scope by
 // here, so this is the only way an operator or a tenant's own system can
-// discover an account exists at all instead of already knowing its id. See
-// user.Service.ListByAPIClient for the page/pageSize clamping rules.
-func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int) (users []*user.User, total, effectivePage, effectivePageSize int, err error) {
-	return s.users.ListByAPIClient(ctx, apiClientID, page, pageSize)
+// discover an account exists at all instead of already knowing its id. q,
+// when non-empty, narrows this to accounts whose email, username or rut
+// contains it. See user.Service.ListByAPIClient for the page/pageSize
+// clamping rules and q's matching semantics.
+func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*user.User, total, effectivePage, effectivePageSize int, err error) {
+	return s.users.ListByAPIClient(ctx, apiClientID, page, pageSize, q)
 }
 
 // PublicKeys exposes every public key access tokens can currently be

@@ -291,8 +291,10 @@ const (
 // back to defaultPageSize; pageSize>maxPageSize is capped there instead of
 // refused outright — a caller asking for too much gets a smaller page, not
 // an error, same reasoning as every other clamped-not-rejected limit in
-// this project.
-func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page, pageSize int) (users []*User, total, effectivePage, effectivePageSize int, err error) {
+// this project. q, when non-empty (after trimming), restricts results to
+// users whose email, username or rut contains it — trimmed only, not
+// lowercased, since ILIKE is already case-insensitive on its own.
+func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*User, total, effectivePage, effectivePageSize int, err error) {
 	if page < 1 {
 		page = 1
 	}
@@ -302,9 +304,10 @@ func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page,
 	if pageSize > maxPageSize {
 		pageSize = maxPageSize
 	}
+	q = strings.TrimSpace(q)
 
 	offset := (page - 1) * pageSize
-	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize)
+	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize, q)
 	return users, total, page, pageSize, err
 }
 

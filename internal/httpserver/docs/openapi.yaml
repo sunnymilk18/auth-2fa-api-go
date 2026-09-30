@@ -1039,6 +1039,15 @@ paths:
             minimum: 1
             maximum: 100
             default: 50
+        - name: q
+          in: query
+          description: >
+            Texto de búsqueda opcional — filtra las cuentas cuyo email,
+            username o rut lo contenga (coincidencia parcial, sin distinguir
+            mayúsculas/minúsculas). Sin este parámetro, se listan todas las
+            cuentas del tenant sin filtrar.
+          schema:
+            type: string
       responses:
         "200":
           description: Página de cuentas
