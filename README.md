@@ -272,6 +272,14 @@ curl -X POST https://tu-api/system-admin/users/<id>/revoke-sessions -H "X-System
 
 Si `<id>` pertenece a otro sistema, la respuesta es `404` (no `403`) — indistinguible de un id que directamente no existe.
 
+La misma credencial también sirve para listar las cuentas del tenant — la única ruta de este grupo sin `{id}`, ya que las cuatro de arriba solo actúan sobre una cuenta que ya se conoce por su id:
+
+```bash
+curl "https://tu-api/system-admin/users?page=1&page_size=50" -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+```
+
+Devuelve una página (`page`/`page_size`, paginado con `COUNT(*) OVER()` para el `total`) de las cuentas registradas, incluidas las que nunca terminaron de registrarse (correo sin verificar, sin segundo factor elegido) — sin campos sensibles (hash de contraseña, secreto TOTP).
+
 ## Ejecutar
 
 ```bash

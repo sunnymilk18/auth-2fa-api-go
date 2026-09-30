@@ -295,6 +295,13 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	r.Route("/system-admin/users", func(r chi.Router) {
 		r.Use(middleware.RequireSystemAdminToken(apiClients))
 
+		// Scoped to the caller's own tenant via APIClientIDFromContext —
+		// see AdminHandlers.ListUsers' doc comment. Deliberately not
+		// mirrored under /admin/users: that route's X-Admin-Token isn't
+		// scoped to one tenant, so an unscoped listing endpoint is a
+		// separate decision left for later, not implemented here.
+		r.Get("/", adminUserHandlers.ListUsers)
+
 		r.Post("/{id}/ban", adminUserHandlers.Ban)
 		r.Post("/{id}/unban", adminUserHandlers.Unban)
 		r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)

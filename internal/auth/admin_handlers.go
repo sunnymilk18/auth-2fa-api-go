@@ -3,6 +3,8 @@ package auth
 import (
 	"errors"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -70,6 +72,66 @@ func (h *AdminHandlers) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// userListItem is deliberately a narrow projection of user.User — no
+// PasswordHash, no TOTP secret (it isn't even on user.User — see its doc
+// comment), same "never leaves the server" rule the rest of this package
+// already follows for sensitive fields.
+type userListItem struct {
+	ID                    string    `json:"id"`
+	Email                 string    `json:"email"`
+	Username              string    `json:"username"`
+	RUT                   string    `json:"rut"`
+	IsActive              bool      `json:"is_active"`
+	EmailVerified         bool      `json:"email_verified"`
+	TwoFactorMethodChosen bool      `json:"two_factor_method_chosen"`
+	CreatedAt             time.Time `json:"created_at"`
+}
+
+type listUsersResponse struct {
+	Users    []userListItem `json:"users"`
+	Page     int            `json:"page"`
+	PageSize int            `json:"page_size"`
+	Total    int            `json:"total"`
+}
+
+// ListUsers returns one page of the caller's own tenant's registered
+// users — see Service.AdminListUsers's doc comment for why this is the
+// only Admin* handler with no {id} in its path. page/page_size are read
+// from the query string; missing or invalid values fall back to
+// Service.AdminListUsers' own defaults/clamping rather than rejecting the
+// request outright.
+func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+
+	users, total, effectivePage, effectivePageSize, err := h.svc.AdminListUsers(r.Context(), apiClientID, page, pageSize)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no se pudo listar los usuarios")
+		return
+	}
+
+	out := make([]userListItem, 0, len(users))
+	for _, u := range users {
+		out = append(out, userListItem{
+			ID:                    u.ID,
+			Email:                 u.Email,
+			Username:              u.Username,
+			RUT:                   u.RUT,
+			IsActive:              u.IsActive,
+			EmailVerified:         u.EmailVerified,
+			TwoFactorMethodChosen: u.TwoFactorMethodChosen,
+			CreatedAt:             u.CreatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, listUsersResponse{
+		Users:    out,
+		Page:     effectivePage,
+		PageSize: effectivePageSize,
+		Total:    total,
+	})
 }
 
 func writeAdminUserActionError(w http.ResponseWriter, err error) {

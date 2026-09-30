@@ -222,6 +222,67 @@ func TestSystemAdminKey_RotateThenScopedUserModeration(t *testing.T) {
 	}
 }
 
+// TestSystemAdminListUsers_ScopedToTenantAndOmitsSensitiveFields covers the
+// one Admin* route with no {id}: it must return only the calling tenant's
+// own users (never another tenant's, even though both exist in the same
+// table) and must never leak PasswordHash — the whole reason the handler
+// projects onto userListItem instead of serializing user.User directly.
+func TestSystemAdminListUsers_ScopedToTenantAndOmitsSensitiveFields(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+
+	clientA := createTestClient(t, r, "list-users-a")
+	clientB := createTestClient(t, r, "list-users-b")
+
+	rotateRec := adminRequest(r, http.MethodPost, "/admin/clients/"+clientA.ID+"/system-admin-key/rotate", testAdminToken, nil)
+	if rotateRec.Code != http.StatusOK {
+		t.Fatalf("rotate system admin key: status = %d, body = %s", rotateRec.Code, rotateRec.Body.String())
+	}
+	var rotated struct {
+		SystemAdminKey string `json:"system_admin_key"`
+	}
+	if err := json.Unmarshal(rotateRec.Body.Bytes(), &rotated); err != nil {
+		t.Fatalf("decoding rotate response: %v", err)
+	}
+
+	userA := registerTestUser(t, r, clientA.APIKey)
+	_ = registerTestUser(t, r, clientB.APIKey)
+
+	listRec := systemAdminRequest(r, http.MethodGet, "/system-admin/users/", rotated.SystemAdminKey)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list users: status = %d, body = %s", listRec.Code, listRec.Body.String())
+	}
+
+	var resp struct {
+		Users []map[string]any `json:"users"`
+		Page  int              `json:"page"`
+		Total int              `json:"total"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding list response: %v", err)
+	}
+	if resp.Total != 1 {
+		t.Fatalf("total = %d, want 1 (only clientA's own user, never clientB's)", resp.Total)
+	}
+	if len(resp.Users) != 1 {
+		t.Fatalf("len(users) = %d, want 1", len(resp.Users))
+	}
+	if resp.Users[0]["id"] != userA.id {
+		t.Fatalf("returned user id = %v, want clientA's user %s", resp.Users[0]["id"], userA.id)
+	}
+	for _, sensitive := range []string{"password_hash", "PasswordHash", "totp_secret", "totp_secret_enc"} {
+		if _, present := resp.Users[0][sensitive]; present {
+			t.Fatalf("list response leaked sensitive field %q", sensitive)
+		}
+	}
+
+	// Wrong/missing key still 401s, same as every other /system-admin/*
+	// route — no separate auth path for the one GET among POSTs.
+	unauthRec := systemAdminRequest(r, http.MethodGet, "/system-admin/users/", "")
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("no key: status = %d, want %d", unauthRec.Code, http.StatusUnauthorized)
+	}
+}
+
 func systemAdminRequest(r http.Handler, method, path, key string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
 	if key != "" {

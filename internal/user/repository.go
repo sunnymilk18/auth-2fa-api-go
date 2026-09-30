@@ -157,6 +157,42 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*User, error) {
 	return findOne(ctx, r.pool, q, "id", id)
 }
 
+// ListByAPIClient returns one page of apiClientID's users, newest first,
+// plus the total row count for that tenant (COUNT(*) OVER() — computed in
+// the same query as the page itself, not a separate round trip) so a caller
+// can page through without a second request just to know how many pages
+// there are. offset/limit are the caller's responsibility to keep sane
+// (see user.Service.ListByAPIClient) — this method applies them as-is.
+func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int) ([]*User, int, error) {
+	const q = `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total
+		FROM users WHERE api_client_id = $1
+		ORDER BY created_at DESC
+		OFFSET $2 LIMIT $3`
+
+	rows, err := r.pool.Query(ctx, q, apiClientID, offset, limit)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []*User
+	total := 0
+	for rows.Next() {
+		u := &User{}
+		if err := rows.Scan(
+			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.CreatedAt, &u.UpdatedAt,
+			&total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scanning user row: %w", err)
+		}
+		users = append(users, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("listing users: %w", err)
+	}
+	return users, total, nil
+}
+
 // MarkEmailVerified flips email_verified to true — called once, when the
 // user confirms the code emailed at registration. Unblocks login (see
 // auth.Service.LoginStep1).

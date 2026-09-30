@@ -284,3 +284,88 @@ func TestRegister_DuplicateRUT(t *testing.T) {
 		t.Fatalf("second Register with the same rut: err = %v, want %v", err, user.ErrRUTTaken)
 	}
 }
+
+// ListByAPIClient must page correctly (newest first) and report the true
+// total, not just the page's own length — the whole reason total is
+// returned separately instead of len(users).
+func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+
+	const n = 5
+	var created []*user.User
+	for i := 0; i < n; i++ {
+		u, err := svc.Register(t.Context(), apiClientID, "page-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+		if err != nil {
+			t.Fatalf("Register #%d: %v", i, err)
+		}
+		created = append(created, u)
+	}
+
+	// Page size 2, first page — should be the two most recently created.
+	page1, total, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 2)
+	if err != nil {
+		t.Fatalf("ListByAPIClient page 1: %v", err)
+	}
+	if total != n {
+		t.Fatalf("total = %d, want %d", total, n)
+	}
+	if effPage != 1 || effPageSize != 2 {
+		t.Fatalf("effPage/effPageSize = %d/%d, want 1/2", effPage, effPageSize)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("len(page1) = %d, want 2", len(page1))
+	}
+	if page1[0].ID != created[n-1].ID || page1[1].ID != created[n-2].ID {
+		t.Fatal("page 1 isn't ordered newest-first")
+	}
+
+	// Page 3 of size 2 over 5 rows has exactly one leftover row.
+	page3, total3, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 3, 2)
+	if err != nil {
+		t.Fatalf("ListByAPIClient page 3: %v", err)
+	}
+	if total3 != n {
+		t.Fatalf("page 3 total = %d, want %d", total3, n)
+	}
+	if len(page3) != 1 || page3[0].ID != created[0].ID {
+		t.Fatalf("page 3: got %d rows, want exactly the oldest one", len(page3))
+	}
+
+	// A different tenant sees none of these.
+	otherSvc, otherClientID := newTestUserService(t)
+	otherPage, otherTotal, _, _, err := otherSvc.ListByAPIClient(t.Context(), otherClientID, 1, 10)
+	if err != nil {
+		t.Fatalf("ListByAPIClient other tenant: %v", err)
+	}
+	if otherTotal != 0 || len(otherPage) != 0 {
+		t.Fatalf("other tenant: total=%d len=%d, want 0/0 (tenants must not see each other's users)", otherTotal, len(otherPage))
+	}
+}
+
+// page<1 and pageSize<1/>maxPageSize are clamped to sane values rather than
+// rejected — see ListByAPIClient's doc comment.
+func TestListByAPIClient_ClampsOutOfRangePageParams(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	if _, err := svc.Register(t.Context(), apiClientID, "clamp-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	_, _, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 0, 0)
+	if err != nil {
+		t.Fatalf("ListByAPIClient page=0 pageSize=0: %v", err)
+	}
+	if effPage != 1 {
+		t.Fatalf("page=0 was clamped to %d, want 1", effPage)
+	}
+	if effPageSize != 50 {
+		t.Fatalf("pageSize=0 was clamped to %d, want the 50 default", effPageSize)
+	}
+
+	_, _, _, effPageSize2, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 10000)
+	if err != nil {
+		t.Fatalf("ListByAPIClient pageSize=10000: %v", err)
+	}
+	if effPageSize2 != 100 {
+		t.Fatalf("pageSize=10000 was clamped to %d, want the 100 cap", effPageSize2)
+	}
+}

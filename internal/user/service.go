@@ -278,6 +278,36 @@ func (s *Service) Unban(ctx context.Context, userID string) error {
 	return s.repo.SetActive(ctx, userID, true)
 }
 
+// defaultPageSize and maxPageSize bound ListByAPIClient's page parameter —
+// see its doc comment.
+const (
+	defaultPageSize = 50
+	maxPageSize     = 100
+)
+
+// ListByAPIClient returns one page of apiClientID's users (see
+// Repository.ListByAPIClient) along with the total number of users that
+// tenant has. page is 1-indexed; page<1 is treated as 1. pageSize<1 falls
+// back to defaultPageSize; pageSize>maxPageSize is capped there instead of
+// refused outright — a caller asking for too much gets a smaller page, not
+// an error, same reasoning as every other clamped-not-rejected limit in
+// this project.
+func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page, pageSize int) (users []*User, total, effectivePage, effectivePageSize int, err error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = defaultPageSize
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+
+	offset := (page - 1) * pageSize
+	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize)
+	return users, total, page, pageSize, err
+}
+
 // NormalizeEmail trims and lowercases — the only form ever stored or
 // looked up, same reasoning as NormalizeUsername/NormalizeRUT. Exported so
 // auth.Service can apply the same rule where it builds Redis keys directly
