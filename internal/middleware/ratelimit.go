@@ -99,30 +99,46 @@ func (rl *RateLimiter) Allow(ctx context.Context, key string) (allowed bool, ret
 
 // Middleware rate-limits by client IP.
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := rl.clientIP(r)
+	return rl.MiddlewareByKey(rl.clientIP)(next)
+}
 
-		allowed, retryAfter, err := rl.Allow(r.Context(), ip)
-		if err != nil {
-			// Fail open: a Redis hiccup shouldn't take the whole API down.
-			next.ServeHTTP(w, r)
-			return
-		}
-		if !allowed {
-			if rl.blacklist != nil {
-				// Best-effort, same fail-open spirit as everything else on
-				// this path — a Redis hiccup here just means one strike
-				// goes unrecorded, not a request that should have failed
-				// open turning into a 500.
-				_ = rl.blacklist.RecordViolation(r.Context(), ip)
+// MiddlewareByKey is Middleware but with a caller-supplied key instead of
+// always the client IP — for a route that should be throttled per
+// identifier rather than per IP. The one caller today is
+// /auth/login/push-status, keyed by login_token instead: that route is
+// meant to be polled every ~2s while a push approval is pending, so
+// sharing one IP-wide budget with every other login attempt (and with
+// verify-otp's own budget) meant a single wait could nearly exhaust it for
+// everyone behind that IP — see router.go's own comment on
+// pushStatusLimiter. blacklist strikes (when attached) are still recorded
+// against the client IP regardless of what key is used for the count
+// itself — the strike escalation is about the IP's behavior, not about
+// whichever identifier this particular limiter happens to count by.
+func (rl *RateLimiter) MiddlewareByKey(key func(*http.Request) string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			allowed, retryAfter, err := rl.Allow(r.Context(), key(r))
+			if err != nil {
+				// Fail open: a Redis hiccup shouldn't take the whole API down.
+				next.ServeHTTP(w, r)
+				return
 			}
-			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
-			http.Error(w, fmt.Sprintf(`{"error":"demasiadas solicitudes, intenta de nuevo en %s"}`, formatWait(retryAfter)), http.StatusTooManyRequests)
-			return
-		}
+			if !allowed {
+				if rl.blacklist != nil {
+					// Best-effort, same fail-open spirit as everything else on
+					// this path — a Redis hiccup here just means one strike
+					// goes unrecorded, not a request that should have failed
+					// open turning into a 500.
+					_ = rl.blacklist.RecordViolation(r.Context(), rl.clientIP(r))
+				}
+				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
+				http.Error(w, fmt.Sprintf(`{"error":"demasiadas solicitudes, intenta de nuevo en %s"}`, formatWait(retryAfter)), http.StatusTooManyRequests)
+				return
+			}
 
-		next.ServeHTTP(w, r)
-	})
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 func (rl *RateLimiter) clientIP(r *http.Request) string {

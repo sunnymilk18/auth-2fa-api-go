@@ -228,3 +228,80 @@ func TestRateLimiter_FailsOpenWhenRedisIsDown(t *testing.T) {
 		t.Fatalf("Middleware with Redis down: status = %d, want %d (fail open)", rec.Code, http.StatusOK)
 	}
 }
+
+// TestRateLimiter_MiddlewareByKey_CountsByCustomKeyNotIP is the case
+// /auth/login/push-status needs: two requests from the *same* IP but with
+// different keys (e.g. different login_token query params) must each get
+// their own independent budget, exactly like two different IPs would
+// under the ordinary IP-keyed Middleware.
+func TestRateLimiter_MiddlewareByKey_CountsByCustomKeyNotIP(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	rl := NewRateLimiter(rdb, "test-by-key", 2, time.Minute, false)
+
+	handler := rl.MiddlewareByKey(func(r *http.Request) string {
+		return r.URL.Query().Get("login_token")
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	do := func(loginToken string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/?login_token="+loginToken, nil)
+		req.RemoteAddr = "203.0.113.5:12345" // same IP for every call below
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Token A: exhaust its budget (limit 2).
+	for i := 1; i <= 2; i++ {
+		if rec := do("token-a"); rec.Code != http.StatusOK {
+			t.Fatalf("token-a call %d: status = %d, want %d", i, rec.Code, http.StatusOK)
+		}
+	}
+	if rec := do("token-a"); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("token-a call 3 (over its own limit): status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+
+	// Token B, same IP, untouched budget — must still work.
+	if rec := do("token-b"); rec.Code != http.StatusOK {
+		t.Fatalf("token-b (different key, same IP): status = %d, want %d — a different key must not share token-a's exhausted budget", rec.Code, http.StatusOK)
+	}
+}
+
+// TestRateLimiter_MiddlewareByKey_StrikesRecordedAgainstIP confirms the
+// blacklist strike (when attached) is still keyed by IP even though the
+// rate-limit count itself uses a different key — the strike escalation is
+// about that IP's behavior across everything it does, not tied to
+// whichever identifier a particular limiter happens to count requests by.
+func TestRateLimiter_MiddlewareByKey_StrikesRecordedAgainstIP(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := NewBlacklist(rdb, false, 1, time.Hour, []time.Duration{time.Hour}, 24*time.Hour)
+	rl := NewRateLimiter(rdb, "test-by-key-strikes", 1, time.Minute, false).AttachBlacklist(bl)
+
+	handler := rl.MiddlewareByKey(func(r *http.Request) string {
+		return r.URL.Query().Get("login_token")
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	do := func(loginToken string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/?login_token="+loginToken, nil)
+		req.RemoteAddr = "203.0.113.9:12345"
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	do("token-a")                                                     // within limit
+	if rec := do("token-a"); rec.Code != http.StatusTooManyRequests { // trips it, 1 strike
+		t.Fatalf("token-a call 2: status = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+
+	banned, _, err := bl.IsBanned(t.Context(), "203.0.113.9")
+	if err != nil {
+		t.Fatalf("IsBanned: %v", err)
+	}
+	if !banned {
+		t.Fatal("the IP should be banned after 1 strike (strikeThreshold=1), even though the rate limit itself was keyed by login_token")
+	}
+}

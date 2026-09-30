@@ -126,6 +126,20 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// otherwise-valid refresh token (this was the one /auth/* route with no
 	// rate limit at all before this).
 	refreshLimiter := middleware.NewRateLimiter(rdb, "refresh", 30, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
+	// Keyed by login_token (see loginTokenKey below), not by IP like every
+	// limiter above — /auth/login/push-status is polled every ~2s for up to
+	// PUSH_LOGIN_TTL (60s default), so a single wait alone can cost up to
+	// ~30 requests. Sharing an IP-wide budget with otpLimiter (as this used
+	// to) meant one or two login attempts from the same IP could nearly
+	// exhaust it for everyone behind that IP — including different users
+	// polling entirely unrelated logins through the same consuming
+	// system's backend. Keying by login_token instead gives every login
+	// attempt its own isolated budget that expires with the token itself,
+	// so 100 here isn't "generous", it's just headroom for that one
+	// attempt (a stray extra tab polling the same token, a slow retry)
+	// with no cost to raising it: nothing outlives the token's own 60s
+	// regardless of this limit.
+	pushStatusLimiter := middleware.NewRateLimiter(rdb, "login-push-status", 100, 15*time.Minute, trustProxyHeaders).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -153,7 +167,9 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// Polled by the PC (~every 2s) while the phone hasn't answered
 			// yet — identified only by login_token, same as /auth/verify-otp:
 			// no Bearer token exists on the PC side of a push login either.
-			r.With(otpLimiter.Middleware).Get("/login/push-status", authHandlers.PushLoginStatus)
+			// Rate-limited by that same login_token (see pushStatusLimiter's
+			// own comment above), not by IP.
+			r.With(pushStatusLimiter.MiddlewareByKey(loginTokenQueryKey)).Get("/login/push-status", authHandlers.PushLoginStatus)
 
 			// The "usar otro método" fallback for a login that only offered
 			// push (see auth.Service.LoginStep1's doc comment: the OTP isn't
@@ -309,4 +325,14 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	})
 
 	return r
+}
+
+// loginTokenQueryKey reads login_token from the query string — the key
+// pushStatusLimiter counts by, since /auth/login/push-status has no other
+// identity to key on (no Bearer token exists on the PC side of a push
+// login). A request missing it entirely shares one bucket among itself —
+// harmless: the handler itself already rejects a missing login_token on
+// its own terms, this is only about what the rate limiter counts against.
+func loginTokenQueryKey(r *http.Request) string {
+	return r.URL.Query().Get("login_token")
 }
