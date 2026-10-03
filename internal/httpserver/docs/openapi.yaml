@@ -475,9 +475,11 @@ paths:
       summary: Marca el dispositivo actual como de confianza
       description: >
         Requiere haber completado el login completo (password + OTP) justo
-        antes — se llama con el access_token recién obtenido. Genera un PIN
-        y un device_token nuevos para este device_id (si ya existía, los
-        reemplaza).
+        antes — se llama con el access_token recién obtenido. Genera un
+        device_token nuevo para este device_id (si ya existía, lo
+        reemplaza). El campo pin cumple un rol doble: si la cuenta todavía
+        no tiene un PIN, se guarda como el PIN nuevo de la cuenta; si ya
+        tiene uno, pin debe coincidir con el existente.
       security:
         - apiKeyAuth: []
           bearerAuth: []
@@ -506,16 +508,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+        "403":
+          description: >
+            La cuenta ya tiene un PIN y el enviado no coincide (code:
+            pin_invalid, con attempts_left)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: PIN de la cuenta bloqueado temporalmente (code pin_locked, con retry_after_seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /auth/devices/login:
     post:
       tags: [devices]
-      summary: Login con dispositivo de confianza + PIN (sin password ni OTP)
+      summary: Login con dispositivo de confianza + PIN de cuenta (sin password ni OTP)
       description: >
         Un dispositivo no registrado (device_id desconocido) siempre falla
         aquí — debe usar /auth/login primero. El device_token se rota en
         cada uso exitoso: la respuesta trae uno nuevo que reemplaza al
-        anterior.
+        anterior. pin es el PIN de la cuenta (no uno por dispositivo) — un
+        PIN incorrecto ya no revoca el dispositivo, cuenta contra el
+        bloqueo compartido de la cuenta (ver /auth/pin/verify).
       security:
         - apiKeyAuth: []
       requestBody:
@@ -532,13 +550,116 @@ paths:
               schema:
                 $ref: "#/components/schemas/DeviceLoginResponse"
         "401":
-          description: Dispositivo no confiable, expirado, revocado, o PIN incorrecto
+          description: Dispositivo no confiable, expirado o revocado (code device_not_trusted)
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
-        "429":
-          description: Demasiados intentos de PIN fallidos — el dispositivo quedó revocado
+        "403":
+          description: PIN incorrecto (code pin_invalid, con attempts_left)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: La cuenta todavía no tiene un PIN configurado (code pin_not_set)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: PIN de la cuenta bloqueado temporalmente (code pin_locked, con retry_after_seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/pin:
+    put:
+      tags: [devices]
+      summary: Crea o cambia el PIN de la cuenta
+      description: >
+        Sin PIN previo, solo pin es necesario (current_pin se ignora). Con
+        PIN previo, current_pin es obligatorio y se verifica contra las
+        mismas reglas de bloqueo que el resto de los usos del PIN.
+      security:
+        - apiKeyAuth: []
+          bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetPinRequest"
+      responses:
+        "204":
+          description: PIN guardado
+        "400":
+          description: Formato de PIN inválido (code pin_invalid_format)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: current_pin incorrecto (code pin_invalid, con attempts_left)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: PIN de la cuenta bloqueado temporalmente (code pin_locked, con retry_after_seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/pin/verify:
+    post:
+      tags: [devices]
+      summary: Confirma el PIN de la cuenta, sin otro efecto
+      description: >
+        No crea sesión ni rota ningún token — el bloque que un sistema
+        consumidor usa para confirmar "la persona frente al teclado todavía
+        sabe el PIN" antes de una acción sensible (p. ej. un panel de
+        administración, antes de bloquear una cuenta o cambiar un rol).
+      security:
+        - apiKeyAuth: []
+          bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyPinRequest"
+      responses:
+        "204":
+          description: PIN correcto
+        "401":
+          description: Token faltante, inválido o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: PIN incorrecto (code pin_invalid, con attempts_left)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: La cuenta todavía no tiene un PIN configurado (code pin_not_set)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: PIN de la cuenta bloqueado temporalmente (code pin_locked, con retry_after_seconds)
           content:
             application/json:
               schema:
@@ -1201,6 +1322,42 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /system-admin/users/{id}/reset-pin:
+    post:
+      tags: [system-admin]
+      summary: Borra el PIN de una cuenta de tu propio sistema
+      description: >
+        Borra el PIN de la cuenta y revoca todos sus dispositivos de
+        confianza y sesiones activas (refresh tokens + access tokens ya
+        emitidos) — mismo criterio que /ban. Para cuando la persona olvidó
+        su PIN o se sospecha que se comprometió.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: PIN borrado, dispositivos y sesiones revocados
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1430,6 +1587,9 @@ components:
             Si la cuenta activó la app autenticadora (TOTP) como su segundo
             factor. Siempre presente, incluso cuando el servidor no tiene
             TOTP_ENCRYPTION_KEY configurada (en ese caso, siempre false).
+        pin_set:
+          type: boolean
+          description: Si la cuenta ya configuró un PIN (ver PUT /auth/pin).
 
     SystemAdminUserListItem:
       type: object
@@ -1516,7 +1676,31 @@ components:
           example: "iPhone de Juan"
         pin:
           type: string
-          description: Exactamente 6 dígitos.
+          description: >
+            Exactamente 6 dígitos. Sin PIN previo en la cuenta, se guarda
+            como el PIN nuevo de la cuenta; con PIN previo, debe coincidir
+            con el existente.
+          example: "123456"
+
+    SetPinRequest:
+      type: object
+      required: [pin]
+      properties:
+        pin:
+          type: string
+          description: El PIN nuevo, exactamente 6 dígitos.
+          example: "123456"
+        current_pin:
+          type: string
+          description: Obligatorio solo si la cuenta ya tiene un PIN — se ignora si no.
+          example: "654321"
+
+    VerifyPinRequest:
+      type: object
+      required: [pin]
+      properties:
+        pin:
+          type: string
           example: "123456"
 
     RegisterDeviceResponse:

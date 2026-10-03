@@ -7,10 +7,10 @@ import (
 )
 
 func TestEnableDisablePush_RoundTrip(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
 
-	if _, err := svc.Register(t.Context(), userID, deviceID, "Test", "123456"); err != nil {
+	if _, err := svc.Register(t.Context(), userID, deviceID, "Test"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

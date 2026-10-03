@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -48,11 +50,13 @@ func ValidatePassword(password string) bool {
 }
 
 type Service struct {
-	repo *Repository
+	repo              *Repository
+	pinMaxFailedTries int
+	pinLockDuration   time.Duration
 }
 
-func NewService(repo *Repository) *Service {
-	return &Service{repo: repo}
+func NewService(repo *Repository, pinMaxFailedTries int, pinLockDuration time.Duration) *Service {
+	return &Service{repo: repo, pinMaxFailedTries: pinMaxFailedTries, pinLockDuration: pinLockDuration}
 }
 
 // UsernameTakenError wraps ErrUsernameTaken with a suggested alternative
@@ -309,6 +313,158 @@ func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page,
 	offset := (page - 1) * pageSize
 	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize, q)
 	return users, total, page, pageSize, err
+}
+
+// --- Account PIN ---
+//
+// One PIN per account (not per device, unlike the old trusted_devices.pin_hash)
+// — it unlocks a trusted device (device.Service no longer knows about PINs
+// at all, see auth.Service.DeviceLogin/RegisterDevice) and confirms
+// sensitive actions from any client. A single failed-attempt counter and
+// lock are shared across every use (PUT /auth/pin's current_pin check,
+// POST /auth/pin/verify, device register/login) — it's one secret, so
+// guesses against it share one budget regardless of which endpoint checked
+// it; otherwise an attacker could exhaust one endpoint's budget and switch
+// to another for a fresh one.
+
+var (
+	ErrPinNotSet        = errors.New("account has no pin set")
+	ErrPinInvalid       = errors.New("invalid pin")
+	ErrPinLocked        = errors.New("pin locked")
+	ErrInvalidPinFormat = errors.New("pin must be exactly 6 digits")
+	pinPattern          = regexp.MustCompile(`^\d{6}$`)
+)
+
+// PinInvalidError wraps ErrPinInvalid with how many attempts are left
+// before the account's PIN locks — same errors.Is-still-works pattern as
+// UsernameTakenError above, so existing error-checking code doesn't need to
+// know this type exists.
+type PinInvalidError struct {
+	AttemptsLeft int
+}
+
+func (e *PinInvalidError) Error() string        { return ErrPinInvalid.Error() }
+func (e *PinInvalidError) Is(target error) bool { return target == ErrPinInvalid }
+
+// PinLockedError wraps ErrPinLocked with how long the lock actually has
+// left — same pattern as auth.LockedOutError.
+type PinLockedError struct {
+	RetryAfter time.Duration
+}
+
+func (e *PinLockedError) Error() string { return ErrPinLocked.Error() }
+func (e *PinLockedError) Unwrap() error { return ErrPinLocked }
+
+// HasPin reports whether userID has ever set an account PIN — exposed as
+// pin_set on GET /me.
+func (s *Service) HasPin(ctx context.Context, userID string) (bool, error) {
+	pinHash, _, _, err := s.repo.PinState(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	return pinHash != "", nil
+}
+
+// VerifyPin checks pin against userID's account PIN, applying the shared
+// failed-attempt lockout: maxFailedTries consecutive wrong guesses lock the
+// PIN for pinLockDuration. While locked, every verification (even a correct
+// PIN) returns a *PinLockedError without touching the counter — guessing
+// during a lockout can't extend it, and a correct-but-still-locked PIN
+// can't be used to skip the wait (see the project's standing reasoning
+// against letting repeated attempts punish anyone but the attacker,
+// e.g. Ban's doc comment on why failed logins never auto-ban an account).
+func (s *Service) VerifyPin(ctx context.Context, userID, pin string) error {
+	pinHash, _, lockedUntil, err := s.repo.PinState(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if pinHash == "" {
+		return ErrPinNotSet
+	}
+	if lockedUntil != nil && lockedUntil.After(time.Now()) {
+		return &PinLockedError{RetryAfter: time.Until(*lockedUntil)}
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(pinHash), []byte(pin)); err != nil {
+		attempts, incErr := s.repo.IncrementPinFailedAttempts(ctx, userID)
+		if incErr != nil {
+			return incErr
+		}
+		if attempts >= s.pinMaxFailedTries {
+			until := time.Now().Add(s.pinLockDuration)
+			if lockErr := s.repo.LockPin(ctx, userID, until); lockErr != nil {
+				return lockErr
+			}
+			return &PinLockedError{RetryAfter: s.pinLockDuration}
+		}
+		return &PinInvalidError{AttemptsLeft: s.pinMaxFailedTries - attempts}
+	}
+
+	return s.repo.ResetPinFailedAttempts(ctx, userID)
+}
+
+// SetPin creates (first PIN ever) or changes userID's account PIN.
+// Creating requires no currentPin; changing requires the correct current
+// one (checked via VerifyPin, so a wrong currentPin counts against the
+// same shared lockout as everything else). Resets the failed-attempt
+// counter on success — the PIN itself just changed, so failures against
+// the old one are moot.
+func (s *Service) SetPin(ctx context.Context, userID, newPin, currentPin string) error {
+	if !pinPattern.MatchString(newPin) {
+		return ErrInvalidPinFormat
+	}
+
+	hasPin, err := s.HasPin(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if hasPin {
+		if err := s.VerifyPin(ctx, userID, currentPin); err != nil {
+			return err
+		}
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPin), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing pin: %w", err)
+	}
+	return s.repo.SetPin(ctx, userID, string(newHash))
+}
+
+// EnsurePin backs RegisterDevice's dual meaning for its pin field (see
+// auth.Service.RegisterDevice): when the account has no PIN yet, pin
+// becomes the new account PIN; when it already has one, pin must match it
+// (checked via VerifyPin, same shared lockout). Unlike SetPin, there's
+// never a separate "new" vs "current" value here — pin plays whichever
+// role the account's current state calls for.
+func (s *Service) EnsurePin(ctx context.Context, userID, pin string) error {
+	// Checked first, with no DB call — same reasoning as Register's old
+	// format check in package device: a malformed guess is a client bug,
+	// not worth a database round trip (or, once an account PIN exists, a
+	// wasted attempt against its lockout) to reject.
+	if !pinPattern.MatchString(pin) {
+		return ErrInvalidPinFormat
+	}
+
+	hasPin, err := s.HasPin(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if hasPin {
+		return s.VerifyPin(ctx, userID, pin)
+	}
+	newHash, err := bcrypt.GenerateFromPassword([]byte(pin), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing pin: %w", err)
+	}
+	return s.repo.SetPin(ctx, userID, string(newHash))
+}
+
+// ClearPin removes userID's account PIN entirely — see
+// auth.Service.AdminResetPin, which also revokes their trusted devices and
+// sessions alongside this.
+func (s *Service) ClearPin(ctx context.Context, userID string) error {
+	return s.repo.ClearPin(ctx, userID)
 }
 
 // NormalizeEmail trims and lowercases — the only form ever stored or

@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -19,7 +20,7 @@ import (
 func NewUser(t *testing.T, pool *pgxpool.Pool, apiClientID, password string) *user.User {
 	t.Helper()
 
-	svc := user.NewService(user.NewRepository(pool))
+	svc := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	suffix := UniqueSuffix(t)
 	email := "user-" + suffix + "@example.com"
 	username := "user-" + suffix

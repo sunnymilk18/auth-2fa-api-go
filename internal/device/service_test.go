@@ -8,124 +8,112 @@ import (
 	"auth-2fa-api/internal/testutil"
 )
 
-func newTestDeviceService(t *testing.T, maxPinTries int) (*device.Service, string) {
+func newTestDeviceService(t *testing.T) (*device.Service, string) {
 	t.Helper()
 	pool := testutil.PostgresPool(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 	u := testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
-	svc := device.NewService(device.NewRepository(pool), 30*24*time.Hour, maxPinTries)
+	svc := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	return svc, u.ID
 }
 
-func TestRegister_RejectsMalformedPin(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
+// Register no longer takes a PIN — the account PIN that gates a device
+// lives in user.Service now (see auth.Service.RegisterDevice, which checks
+// it separately before calling this).
+func TestRegister_IssuesTokenAndListsDevice(t *testing.T) {
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
 
-	for _, pin := range []string{"", "12345", "1234567", "abcdef", "12 345"} {
-		if _, err := svc.Register(t.Context(), userID, deviceID, "Test", pin); err != device.ErrInvalidPinFormat {
-			t.Errorf("Register with pin %q: err = %v, want %v", pin, err, device.ErrInvalidPinFormat)
-		}
+	token, err := svc.Register(t.Context(), userID, deviceID, "Test")
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if token == "" {
+		t.Fatal("Register: want a non-empty device token")
+	}
+
+	list, err := svc.List(t.Context(), userID)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("List: list=%v err=%v", list, err)
 	}
 }
 
-func TestVerifyPin_Success(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
+func TestVerifyToken_Success(t *testing.T) {
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
 
-	token, err := svc.Register(t.Context(), userID, deviceID, "Test", "123456")
+	token, err := svc.Register(t.Context(), userID, deviceID, "Test")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	gotUserID, newToken, err := svc.VerifyPin(t.Context(), deviceID, token, "123456")
+	d, err := svc.VerifyToken(t.Context(), deviceID, token)
 	if err != nil {
-		t.Fatalf("VerifyPin: %v", err)
+		t.Fatalf("VerifyToken: %v", err)
 	}
-	if gotUserID != userID {
-		t.Fatalf("VerifyPin userID = %q, want %q", gotUserID, userID)
-	}
-	if newToken == "" || newToken == token {
-		t.Fatal("VerifyPin: expected a fresh device token distinct from the original")
+	if d.UserID != userID {
+		t.Fatalf("VerifyToken userID = %q, want %q", d.UserID, userID)
 	}
 }
 
-func TestVerifyPin_UnknownDevice(t *testing.T) {
-	svc, _ := newTestDeviceService(t, 3)
-	if _, _, err := svc.VerifyPin(t.Context(), "does-not-exist", "sometoken", "123456"); err != device.ErrDeviceNotTrusted {
+func TestVerifyToken_UnknownDevice(t *testing.T) {
+	svc, _ := newTestDeviceService(t)
+	if _, err := svc.VerifyToken(t.Context(), "does-not-exist", "sometoken"); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("err = %v, want %v", err, device.ErrDeviceNotTrusted)
 	}
 }
 
-func TestVerifyPin_WrongDeviceToken(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
+func TestVerifyToken_WrongToken(t *testing.T) {
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
-	if _, err := svc.Register(t.Context(), userID, deviceID, "Test", "123456"); err != nil {
+	if _, err := svc.Register(t.Context(), userID, deviceID, "Test"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, "wrong-token", "123456"); err != device.ErrDeviceNotTrusted {
+	if _, err := svc.VerifyToken(t.Context(), deviceID, "wrong-token"); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("wrong device token: err = %v, want %v", err, device.ErrDeviceNotTrusted)
 	}
 }
 
-func TestVerifyPin_TooManyFailuresRevokes(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 2)
+// RotateToken issues a fresh token and invalidates the previous one — the
+// shape auth.Service.DeviceLogin relies on after the account PIN checks out.
+func TestRotateToken_IssuesFreshTokenAndInvalidatesOld(t *testing.T) {
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
-	token, err := svc.Register(t.Context(), userID, deviceID, "Test", "123456")
+	token, err := svc.Register(t.Context(), userID, deviceID, "Test")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, token, "000000"); err != device.ErrInvalidPin {
-		t.Fatalf("attempt 1: err = %v, want %v", err, device.ErrInvalidPin)
+	d, err := svc.VerifyToken(t.Context(), deviceID, token)
+	if err != nil {
+		t.Fatalf("VerifyToken: %v", err)
 	}
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, token, "000000"); err != device.ErrTooManyPinTries {
-		t.Fatalf("attempt 2 (maxPinTries=2): err = %v, want %v", err, device.ErrTooManyPinTries)
+	newToken, err := svc.RotateToken(t.Context(), d.ID)
+	if err != nil {
+		t.Fatalf("RotateToken: %v", err)
 	}
-	// Revoked now — even the right PIN with the right token is rejected.
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, token, "123456"); err != device.ErrDeviceNotTrusted {
-		t.Fatalf("correct pin after revocation: err = %v, want %v", err, device.ErrDeviceNotTrusted)
+	if newToken == "" || newToken == token {
+		t.Fatal("RotateToken: expected a fresh token distinct from the original")
+	}
+
+	if _, err := svc.VerifyToken(t.Context(), deviceID, token); err != device.ErrDeviceNotTrusted {
+		t.Fatalf("old token after rotation: err = %v, want %v", err, device.ErrDeviceNotTrusted)
+	}
+	if _, err := svc.VerifyToken(t.Context(), deviceID, newToken); err != nil {
+		t.Fatalf("new token after rotation: unexpected error %v", err)
 	}
 }
 
-func TestVerifyPin_SuccessResetsFailedAttempts(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
-	deviceID := "device-" + testutil.UniqueSuffix(t)
-	token, err := svc.Register(t.Context(), userID, deviceID, "Test", "123456")
-	if err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-
-	// One failed attempt, then a success — the counter must reset, so two
-	// more failed attempts afterward shouldn't trip a maxPinTries=3 limit
-	// on their own (1 failed + 2 failed = 3 total, but not consecutive
-	// since a success happened in between).
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, token, "000000"); err != device.ErrInvalidPin {
-		t.Fatalf("first failed attempt: err = %v, want %v", err, device.ErrInvalidPin)
-	}
-	_, rotated, err := svc.VerifyPin(t.Context(), deviceID, token, "123456")
-	if err != nil {
-		t.Fatalf("successful attempt: %v", err)
-	}
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, rotated, "000000"); err != device.ErrInvalidPin {
-		t.Fatalf("failed attempt after success: err = %v, want %v (counter should have reset)", err, device.ErrInvalidPin)
-	}
-}
-
-func TestRegister_ReRegisteringSameDeviceIDResetsTrust(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 2)
+func TestRegister_ReRegisteringSameDeviceIDIssuesFreshToken(t *testing.T) {
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
 
-	firstToken, err := svc.Register(t.Context(), userID, deviceID, "Test", "111111")
+	firstToken, err := svc.Register(t.Context(), userID, deviceID, "Test")
 	if err != nil {
 		t.Fatalf("first Register: %v", err)
 	}
-	// Rack up a failed attempt so failed_pin_attempts > 0 before re-registering.
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, firstToken, "000000"); err != device.ErrInvalidPin {
-		t.Fatalf("failed attempt: err = %v, want %v", err, device.ErrInvalidPin)
-	}
-
-	secondToken, err := svc.Register(t.Context(), userID, deviceID, "Test", "222222")
+	secondToken, err := svc.Register(t.Context(), userID, deviceID, "Test")
 	if err != nil {
 		t.Fatalf("second Register (same device_id): %v", err)
 	}
@@ -133,20 +121,18 @@ func TestRegister_ReRegisteringSameDeviceIDResetsTrust(t *testing.T) {
 		t.Fatal("re-registering must issue a fresh device token")
 	}
 
-	// The old token+pin no longer work; the new ones do, and the failed
-	// attempt counter was reset by the upsert.
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, firstToken, "111111"); err != device.ErrDeviceNotTrusted {
+	if _, err := svc.VerifyToken(t.Context(), deviceID, firstToken); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("stale token after re-register: err = %v, want %v", err, device.ErrDeviceNotTrusted)
 	}
-	if _, _, err := svc.VerifyPin(t.Context(), deviceID, secondToken, "222222"); err != nil {
-		t.Fatalf("new token+pin after re-register: unexpected error %v", err)
+	if _, err := svc.VerifyToken(t.Context(), deviceID, secondToken); err != nil {
+		t.Fatalf("new token after re-register: unexpected error %v", err)
 	}
 }
 
 func TestListAndRevoke(t *testing.T) {
-	svc, userID := newTestDeviceService(t, 3)
+	svc, userID := newTestDeviceService(t)
 	deviceID := "device-" + testutil.UniqueSuffix(t)
-	if _, err := svc.Register(t.Context(), userID, deviceID, "My Phone", "123456"); err != nil {
+	if _, err := svc.Register(t.Context(), userID, deviceID, "My Phone"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

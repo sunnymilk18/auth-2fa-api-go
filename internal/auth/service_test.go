@@ -27,11 +27,11 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -67,11 +67,11 @@ func newTestServiceWithChoice(t *testing.T) (svc *auth.Service, tokens *auth.Tok
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -401,7 +401,7 @@ func TestRefresh_BannedAccountIsRefused(t *testing.T) {
 		t.Fatalf("LoginStep2: %v", err)
 	}
 
-	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)), 5, 15*time.Minute)
 	u, err := users.FindByEmail(t.Context(), apiClientID, email)
 	if err != nil {
 		t.Fatalf("FindByEmail: %v", err)
@@ -429,7 +429,7 @@ func TestAdminBanUser_ScopedToOwnTenant(t *testing.T) {
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
-	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)), 5, 15*time.Minute)
 	u, err := users.FindByEmail(t.Context(), apiClientID, email)
 	if err != nil {
 		t.Fatalf("FindByEmail: %v", err)
@@ -481,7 +481,7 @@ func TestAdminBanUser_RevokesSessions(t *testing.T) {
 		t.Fatalf("LoginStep2: %v", err)
 	}
 
-	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)), 5, 15*time.Minute)
 	u, err := users.FindByEmail(t.Context(), apiClientID, email)
 	if err != nil {
 		t.Fatalf("FindByEmail: %v", err)
@@ -508,7 +508,7 @@ func TestAdminDisableTOTP_ScopedToOwnTenant(t *testing.T) {
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
-	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)), 5, 15*time.Minute)
 	u, err := users.FindByEmail(t.Context(), apiClientID, email)
 	if err != nil {
 		t.Fatalf("FindByEmail: %v", err)
@@ -540,7 +540,7 @@ func TestAdminRevokeAllSessions_ScopedToOwnTenant(t *testing.T) {
 		t.Fatalf("LoginStep2: %v", err)
 	}
 
-	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)))
+	users := user.NewService(user.NewRepository(testutil.PostgresPool(t)), 5, 15*time.Minute)
 	u, err := users.FindByEmail(t.Context(), apiClientID, email)
 	if err != nil {
 		t.Fatalf("FindByEmail: %v", err)
@@ -589,8 +589,8 @@ func TestDeviceLoginFlow(t *testing.T) {
 	}
 
 	// Wrong PIN doesn't authenticate.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); err != device.ErrInvalidPin {
-		t.Fatalf("DeviceLogin with wrong pin: err = %v, want %v", err, device.ErrInvalidPin)
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+		t.Fatalf("DeviceLogin with wrong pin: err = %v, want a *user.PinInvalidError", err)
 	}
 
 	// Right device token + PIN logs in and rotates the device token.
@@ -624,11 +624,11 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	client, _ := testutil.NewAPIClient(t, pool)
 	apiClientID := client.ID
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -673,7 +673,7 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	// Unban restores password+OTP login (the trusted-device token itself
 	// was already rotated server-side by the pin check inside the attempt
 	// above — same pre-existing behavior as any other failure that happens
-	// after a correct PIN, e.g. device.ErrTooManyPinTries — so re-trying
+	// after a correct PIN, e.g. the account's ban check — so re-trying
 	// DeviceLogin with the original, now-stale token correctly still fails;
 	// the client would need to re-register a device after this).
 	if err := users.Unban(t.Context(), userID); err != nil {
@@ -684,7 +684,12 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	}
 }
 
-func TestDeviceLogin_TooManyFailedPinsRevokesTrust(t *testing.T) {
+// Unlike the old per-device PIN, too many wrong guesses through DeviceLogin
+// no longer revoke the device itself — they lock the account's shared PIN
+// (see user.Service.VerifyPin), which also gates PUT /auth/pin and
+// POST /auth/pin/verify. The device stays trusted; it's the PIN that's
+// temporarily unusable, from any of those entry points.
+func TestDeviceLogin_TooManyFailedPinsLocksAccountPinButKeepsDeviceTrusted(t *testing.T) {
 	svc, tokens, mailer, apiClientID := newTestService(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
@@ -710,18 +715,19 @@ func TestDeviceLogin_TooManyFailedPinsRevokesTrust(t *testing.T) {
 		t.Fatalf("RegisterDevice: %v", err)
 	}
 
-	// newTestService's device.Service allows 3 failed PIN attempts before revoking.
-	for i := 1; i <= 2; i++ {
-		if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); err != device.ErrInvalidPin {
-			t.Fatalf("failed pin attempt %d: err = %v, want %v", i, err, device.ErrInvalidPin)
+	// newTestService's user.Service allows 5 failed PIN attempts before locking.
+	for i := 1; i <= 4; i++ {
+		if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+			t.Fatalf("failed pin attempt %d: err = %v, want a *user.PinInvalidError", i, err)
 		}
 	}
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); err != device.ErrTooManyPinTries {
-		t.Fatalf("failed pin attempt 3: err = %v, want %v", err, device.ErrTooManyPinTries)
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("failed pin attempt 5: err = %v, want a *user.PinLockedError", err)
 	}
-	// Trust was revoked — even the correct PIN is rejected now.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != device.ErrDeviceNotTrusted {
-		t.Fatalf("correct pin after revocation: err = %v, want %v", err, device.ErrDeviceNotTrusted)
+	// Locked — even the correct PIN is rejected now, but as a *user.PinLockedError,
+	// not device.ErrDeviceNotTrusted: the device itself was never revoked.
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("correct pin while locked: err = %v, want a *user.PinLockedError", err)
 	}
 }
 
@@ -919,11 +925,11 @@ func TestStartTOTPEnrollment_NotConfigured(t *testing.T) {
 	client, _ := testutil.NewAPIClient(t, pool)
 	apiClientID := client.ID
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -1118,11 +1124,11 @@ func newTestServiceWithAccessRevocation(t *testing.T) (svc *auth.Service, tokens
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens = auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -329,6 +330,81 @@ func (r *Repository) MarkTwoFactorMethodChosen(ctx context.Context, id string) e
 	_, err := r.pool.Exec(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("marking two-factor method chosen: %w", err)
+	}
+	return nil
+}
+
+// PinState returns id's current account PIN state: the bcrypt hash (empty
+// if never set), the failed-attempt counter, and the lock expiry (nil if
+// not locked) — everything Service.VerifyPin needs in one round trip.
+func (r *Repository) PinState(ctx context.Context, id string) (pinHash string, failedAttempts int, lockedUntil *time.Time, err error) {
+	const q = `SELECT COALESCE(pin_hash, ''), pin_failed_attempts, pin_locked_until FROM users WHERE id = $1`
+	err = r.pool.QueryRow(ctx, q, id).Scan(&pinHash, &failedAttempts, &lockedUntil)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, nil, ErrNotFound
+	}
+	if err != nil {
+		return "", 0, nil, fmt.Errorf("querying pin state: %w", err)
+	}
+	return pinHash, failedAttempts, lockedUntil, nil
+}
+
+// SetPin replaces id's account PIN and clears any failed-attempt/lock state
+// — a fresh PIN means past failures against the old one are moot.
+func (r *Repository) SetPin(ctx context.Context, id, pinHash string) error {
+	const q = `UPDATE users SET pin_hash = $2, pin_set_at = now(), pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, pinHash)
+	if err != nil {
+		return fmt.Errorf("setting pin: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// IncrementPinFailedAttempts bumps id's pin_failed_attempts and returns the
+// new value — mirrors device.Repository.IncrementFailedAttempts, now scoped
+// to the account instead of one device.
+func (r *Repository) IncrementPinFailedAttempts(ctx context.Context, id string) (int, error) {
+	const q = `UPDATE users SET pin_failed_attempts = pin_failed_attempts + 1, updated_at = now() WHERE id = $1 RETURNING pin_failed_attempts`
+	var attempts int
+	if err := r.pool.QueryRow(ctx, q, id).Scan(&attempts); err != nil {
+		return 0, fmt.Errorf("incrementing pin failed attempts: %w", err)
+	}
+	return attempts, nil
+}
+
+// LockPin sets id's pin_locked_until — called once pin_failed_attempts
+// crosses the configured threshold (see user.Service.VerifyPin).
+func (r *Repository) LockPin(ctx context.Context, id string, until time.Time) error {
+	const q = `UPDATE users SET pin_locked_until = $2, updated_at = now() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, q, id, until)
+	if err != nil {
+		return fmt.Errorf("locking pin: %w", err)
+	}
+	return nil
+}
+
+// ResetPinFailedAttempts clears the counter and any lock — called after a
+// correct PIN, same reasoning as LoginAttemptLimiter.Reset.
+func (r *Repository) ResetPinFailedAttempts(ctx context.Context, id string) error {
+	const q = `UPDATE users SET pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("resetting pin failed attempts: %w", err)
+	}
+	return nil
+}
+
+// ClearPin removes id's account PIN entirely (admin reset) — see
+// auth.Service.AdminResetPin, which also revokes the account's trusted
+// devices and sessions alongside this.
+func (r *Repository) ClearPin(ctx context.Context, id string) error {
+	const q = `UPDATE users SET pin_hash = NULL, pin_set_at = NULL, pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("clearing pin: %w", err)
 	}
 	return nil
 }

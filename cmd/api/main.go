@@ -76,7 +76,7 @@ func run(logger *slog.Logger) error {
 
 	// Wiring: repositories -> services -> handlers.
 	userRepo := user.NewRepository(pgPool)
-	userSvc := user.NewService(userRepo)
+	userSvc := user.NewService(userRepo, cfg.PinMaxFailedAttempts, time.Duration(cfg.PinLockMinutes)*time.Minute)
 
 	privateKey, err := loadPrivateKey(cfg)
 	if err != nil {
@@ -94,7 +94,7 @@ func run(logger *slog.Logger) error {
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, cfg.LoginMaxFailedAttempts, cfg.LoginLockoutWindow)
 
 	deviceRepo := device.NewRepository(pgPool)
-	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL, cfg.DevicePinMaxTries)
+	deviceSvc := device.NewService(deviceRepo, cfg.DeviceTrustTTL)
 
 	apiClientRepo := apiclient.NewRepository(pgPool)
 	apiClientSvc := apiclient.NewService(apiClientRepo)

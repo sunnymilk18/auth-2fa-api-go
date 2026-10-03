@@ -74,6 +74,18 @@ func (h *AdminHandlers) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ResetPin clears the account's PIN and revokes its trusted devices and
+// sessions — see Service.AdminResetPin's doc comment.
+func (h *AdminHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+	if err := h.svc.AdminResetPin(r.Context(), apiClientID, id); err != nil {
+		writeAdminUserActionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // userListItem is deliberately a narrow projection of user.User — no
 // PasswordHash, no TOTP secret (it isn't even on user.User — see its doc
 // comment), same "never leaves the server" rule the rest of this package

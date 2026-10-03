@@ -78,9 +78,18 @@ type Config struct {
 	LoginMaxFailedAttempts int
 	LoginLockoutWindow     time.Duration
 
-	// Trusted device + PIN shortcut around password+OTP.
-	DeviceTrustTTL    time.Duration
-	DevicePinMaxTries int
+	// Trusted device shortcut around password+OTP — the PIN that gates it
+	// lives on the account (see PinMaxFailedAttempts/PinLockMinutes below),
+	// not here.
+	DeviceTrustTTL time.Duration
+
+	// Account PIN: one per user, unlocks a trusted device and confirms
+	// sensitive actions from any client (see user.Service.VerifyPin).
+	// PinMaxFailedAttempts consecutive wrong guesses — across every use:
+	// changing the PIN, verifying it, registering or logging in with a
+	// device — lock it for PinLockMinutes.
+	PinMaxFailedAttempts int
+	PinLockMinutes       int
 
 	// Resend (https://resend.com) — HTTP API, not SMTP, so it isn't at
 	// risk of a host blocking/filtering an outbound SMTP port (this
@@ -221,7 +230,10 @@ func Load() (*Config, error) {
 	if cfg.DeviceTrustTTL, err = getEnvDuration("DEVICE_TRUST_TTL", 30*24*time.Hour); err != nil {
 		return nil, err
 	}
-	if cfg.DevicePinMaxTries, err = getEnvInt("DEVICE_PIN_MAX_TRIES", 5); err != nil {
+	if cfg.PinMaxFailedAttempts, err = getEnvInt("PIN_MAX_FAILED_ATTEMPTS", 5); err != nil {
+		return nil, err
+	}
+	if cfg.PinLockMinutes, err = getEnvInt("PIN_LOCK_MINUTES", 15); err != nil {
 		return nil, err
 	}
 	if cfg.PushLoginTTL, err = getEnvDuration("PUSH_LOGIN_TTL", 60*time.Second); err != nil {

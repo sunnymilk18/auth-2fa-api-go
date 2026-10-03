@@ -7,49 +7,32 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"regexp"
 	"time"
-
-	"golang.org/x/crypto/bcrypt"
 )
 
-var (
-	ErrInvalidPin       = errors.New("invalid pin")
-	ErrDeviceNotTrusted = errors.New("device not trusted, please login again")
-	ErrTooManyPinTries  = errors.New("too many failed pin attempts, device trust revoked")
-	ErrInvalidPinFormat = errors.New("pin must be exactly 6 digits")
-	pinPattern          = regexp.MustCompile(`^\d{6}$`)
-)
+var ErrDeviceNotTrusted = errors.New("device not trusted, please login again")
 
 type Service struct {
-	repo        *Repository
-	trustTTL    time.Duration
-	maxPinTries int
+	repo     *Repository
+	trustTTL time.Duration
 }
 
-func NewService(repo *Repository, trustTTL time.Duration, maxPinTries int) *Service {
-	return &Service{repo: repo, trustTTL: trustTTL, maxPinTries: maxPinTries}
+func NewService(repo *Repository, trustTTL time.Duration) *Service {
+	return &Service{repo: repo, trustTTL: trustTTL}
 }
 
-// Register (re)marks deviceID as trusted for userID, setting a fresh PIN and
-// returning a new device token in plain text — the caller must hand it to
-// the client exactly once; only its hash is ever stored.
-func (s *Service) Register(ctx context.Context, userID, deviceID, deviceName, pin string) (deviceToken string, err error) {
-	if !pinPattern.MatchString(pin) {
-		return "", ErrInvalidPinFormat
-	}
-
-	pinHash, err := bcrypt.GenerateFromPassword([]byte(pin), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("hashing pin: %w", err)
-	}
-
+// Register (re)marks deviceID as trusted for userID and returns a new
+// device token in plain text — the caller must hand it to the client
+// exactly once; only its hash is ever stored. The PIN that gates this
+// device lives on the account, not here — see auth.Service.RegisterDevice,
+// which checks/sets it (via user.Service.EnsurePin) before calling this.
+func (s *Service) Register(ctx context.Context, userID, deviceID, deviceName string) (deviceToken string, err error) {
 	deviceToken, err = generateToken(32)
 	if err != nil {
 		return "", fmt.Errorf("generating device token: %w", err)
 	}
 
-	_, err = s.repo.Upsert(ctx, userID, deviceID, deviceName, hashToken(deviceToken), string(pinHash), time.Now().Add(s.trustTTL))
+	_, err = s.repo.Upsert(ctx, userID, deviceID, deviceName, hashToken(deviceToken), time.Now().Add(s.trustTTL))
 	if err != nil {
 		return "", err
 	}
@@ -57,48 +40,44 @@ func (s *Service) Register(ctx context.Context, userID, deviceID, deviceName, pi
 	return deviceToken, nil
 }
 
-// VerifyPin checks device_token + pin for deviceID. On success it rotates
-// the device token (the caller MUST hand newDeviceToken back to the client
-// to replace its stored copy — the old one stops working), extends the
-// trust window, and returns the owning user.
-func (s *Service) VerifyPin(ctx context.Context, deviceID, deviceToken, pin string) (userID, newDeviceToken string, err error) {
+// VerifyToken checks deviceID/deviceToken (possession) only — not the
+// account PIN (knowledge), which the caller (auth.Service.DeviceLogin)
+// checks separately via user.Service.VerifyPin before calling RotateToken
+// below. Splitting these two steps lets the PIN check's own failed-attempt
+// lockout apply even when the device_token itself was never in question.
+func (s *Service) VerifyToken(ctx context.Context, deviceID, deviceToken string) (*Device, error) {
 	d, err := s.repo.FindByDeviceID(ctx, deviceID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return "", "", ErrDeviceNotTrusted
+			return nil, ErrDeviceNotTrusted
 		}
-		return "", "", err
+		return nil, err
 	}
 
 	if d.Revoked || time.Now().After(d.ExpiresAt) {
-		return "", "", ErrDeviceNotTrusted
+		return nil, ErrDeviceNotTrusted
 	}
-
 	if d.DeviceTokenHash != hashToken(deviceToken) {
-		return "", "", ErrDeviceNotTrusted
+		return nil, ErrDeviceNotTrusted
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(d.PinHash), []byte(pin)); err != nil {
-		attempts, incErr := s.repo.IncrementFailedAttempts(ctx, d.ID)
-		if incErr != nil {
-			return "", "", incErr
-		}
-		if attempts >= s.maxPinTries {
-			_ = s.repo.Revoke(ctx, d.ID)
-			return "", "", ErrTooManyPinTries
-		}
-		return "", "", ErrInvalidPin
-	}
+	return d, nil
+}
 
+// RotateToken issues a fresh device token for id and extends the trust
+// window (sliding expiration) — called once the account PIN gating id has
+// already checked out (see VerifyToken above). The caller MUST hand the
+// returned token back to the client to replace its stored copy; the old
+// one stops working.
+func (s *Service) RotateToken(ctx context.Context, id string) (newDeviceToken string, err error) {
 	newDeviceToken, err = generateToken(32)
 	if err != nil {
-		return "", "", fmt.Errorf("generating device token: %w", err)
+		return "", fmt.Errorf("generating device token: %w", err)
 	}
-	if err := s.repo.MarkSuccess(ctx, d.ID, hashToken(newDeviceToken), time.Now().Add(s.trustTTL)); err != nil {
-		return "", "", err
+	if err := s.repo.MarkSuccess(ctx, id, hashToken(newDeviceToken), time.Now().Add(s.trustTTL)); err != nil {
+		return "", err
 	}
-
-	return d.UserID, newDeviceToken, nil
+	return newDeviceToken, nil
 }
 
 func (s *Service) List(ctx context.Context, userID string) ([]Info, error) {

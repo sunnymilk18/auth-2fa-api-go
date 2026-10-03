@@ -140,6 +140,10 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// with no cost to raising it: nothing outlives the token's own 60s
 	// regardless of this limit.
 	pushStatusLimiter := middleware.NewRateLimiter(rdb, "login-push-status", 100, 15*time.Minute).AttachBlacklist(blacklist)
+	// On top of the account-level PIN lockout (user.Service.VerifyPin) —
+	// this one just bounds raw request volume against the endpoint itself,
+	// same reasoning as every other limiter here.
+	pinVerifyLimiter := middleware.NewRateLimiter(rdb, "pin-verify", 30, 15*time.Minute).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -212,6 +216,19 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
 
+			// Account PIN: unlocks a trusted device (see RegisterDevice/
+			// DeviceLogin above) and, for a consuming system that wants it,
+			// confirms a sensitive action from any client — see
+			// Handlers.SetPin/VerifyPin's doc comments. /pin/verify has its
+			// own rate limiter on top of the account-level PIN lockout
+			// (user.Service.VerifyPin) — keyed by IP like every other
+			// limiter here, so it shares the known, already-documented
+			// limitation that every client IP currently looks the same in
+			// production (see the deferred trusted-proxy investigation) —
+			// not something to fix as part of this.
+			r.Put("/pin", authHandlers.SetPin)
+			r.With(pinVerifyLimiter.Middleware).Post("/pin/verify", authHandlers.VerifyPin)
+
 			if pushEnabled {
 				// Opting a trusted device into push approval (and back out
 				// of it), and the phone's own "I tapped this number" answer
@@ -273,6 +290,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/unban", adminUserHandlers.Unban)
 			r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
 			r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
+			r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a
@@ -314,6 +332,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Post("/{id}/unban", adminUserHandlers.Unban)
 		r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
 		r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
+		r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 	})
 
 	r.Group(func(r chi.Router) {
@@ -327,6 +346,11 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				http.Error(w, `{"error":"usuario no encontrado"}`, http.StatusNotFound)
 				return
 			}
+			pinSet, err := users.HasPin(r.Context(), userID)
+			if err != nil {
+				http.Error(w, `{"error":"no se pudo obtener el usuario"}`, http.StatusInternalServerError)
+				return
+			}
 
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -335,6 +359,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				"username":     u.Username,
 				"rut":          u.RUT,
 				"totp_enabled": u.TOTPEnabled,
+				"pin_set":      pinSet,
 			})
 		})
 	})

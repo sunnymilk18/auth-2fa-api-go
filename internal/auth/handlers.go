@@ -515,8 +515,7 @@ func (h *Handlers) RegisterDevice(w http.ResponseWriter, r *http.Request) {
 
 	deviceToken, err := h.svc.RegisterDevice(r.Context(), userID, req.DeviceID, req.DeviceName, req.Pin)
 	if err != nil {
-		if errors.Is(err, device.ErrInvalidPinFormat) {
-			writeError(w, http.StatusBadRequest, "el PIN debe tener exactamente 6 dígitos")
+		if writePinError(w, err) {
 			return
 		}
 		log.Printf("register device error: %v", err)
@@ -555,19 +554,15 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 
 	access, refresh, newDeviceToken, err := h.svc.DeviceLogin(r.Context(), req.DeviceID, req.DeviceToken, req.Pin)
 	if err != nil {
-		switch {
-		case errors.Is(err, device.ErrDeviceNotTrusted):
-			writeError(w, http.StatusUnauthorized, "dispositivo no confiable, inicia sesión con tu contraseña y el código de correo")
-		case errors.Is(err, device.ErrInvalidPin):
-			writeError(w, http.StatusUnauthorized, "PIN inválido")
-		case errors.Is(err, device.ErrTooManyPinTries):
-			writeError(w, http.StatusTooManyRequests, "demasiados intentos de PIN fallidos, vuelve a iniciar sesión")
-		case errors.Is(err, ErrAccountBanned):
+		if errors.Is(err, ErrAccountBanned) {
 			writeError(w, http.StatusForbidden, "esta cuenta está bloqueada")
-		default:
-			log.Printf("device login error: %v", err)
-			writeError(w, http.StatusInternalServerError, "no se pudo iniciar sesión con el dispositivo")
+			return
 		}
+		if writePinError(w, err) {
+			return
+		}
+		log.Printf("device login error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo iniciar sesión con el dispositivo")
 		return
 	}
 
@@ -577,6 +572,102 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 		DeviceToken:  newDeviceToken,
 		TokenType:    "Bearer",
 	})
+}
+
+// writePinError maps an account-PIN or device-trust error to the shared
+// {error, code, ...extra} response shape every PIN-touching route uses —
+// reused by SetPin, VerifyPin, RegisterDevice and DeviceLogin above. A PIN
+// mistake deliberately never uses 401: clients already treat 401 as "access
+// token expired, refresh and retry" (see RequireAuth/OptionalAuth), and a
+// wrong PIN silently retried with the exact same wrong PIN would just waste
+// an attempt against the lockout instead of surfacing the real problem.
+// Returns false when err matches none of these, so the caller falls back to
+// its own default/500 handling.
+func writePinError(w http.ResponseWriter, err error) bool {
+	var invalid *user.PinInvalidError
+	var locked *user.PinLockedError
+	switch {
+	case errors.As(err, &invalid):
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error": "PIN inválido", "code": "pin_invalid", "attempts_left": invalid.AttemptsLeft,
+		})
+	case errors.As(err, &locked):
+		writeJSON(w, http.StatusLocked, map[string]any{
+			"error": "PIN bloqueado temporalmente, intenta más tarde", "code": "pin_locked",
+			"retry_after_seconds": int(locked.RetryAfter.Seconds()),
+		})
+	case errors.Is(err, user.ErrPinNotSet):
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "la cuenta no tiene PIN configurado", "code": "pin_not_set"})
+	case errors.Is(err, user.ErrInvalidPinFormat):
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "el PIN debe tener exactamente 6 dígitos", "code": "pin_invalid_format"})
+	case errors.Is(err, device.ErrDeviceNotTrusted):
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "dispositivo no confiable, inicia sesión con tu contraseña y el código de correo", "code": "device_not_trusted"})
+	default:
+		return false
+	}
+	return true
+}
+
+type setPinRequest struct {
+	Pin        string `json:"pin"`
+	CurrentPin string `json:"current_pin"`
+}
+
+// SetPin creates (first time) or changes (current_pin required) the
+// caller's account PIN — see Service.SetPin.
+func (h *Handlers) SetPin(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+	var req setPinRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	if err := h.svc.SetPin(r.Context(), userID, req.Pin, req.CurrentPin); err != nil {
+		if writePinError(w, err) {
+			return
+		}
+		log.Printf("set pin error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo guardar el PIN")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type verifyPinRequest struct {
+	Pin string `json:"pin"`
+}
+
+// VerifyPin confirms the caller's account PIN with no other side effect —
+// the building block a consuming system (e.g. empresa-backend) uses to
+// confirm "the person at the keyboard still knows the PIN" before a
+// destructive action, without creating a session or rotating any token.
+// See Service.VerifyPin.
+func (h *Handlers) VerifyPin(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+	var req verifyPinRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	if err := h.svc.VerifyPin(r.Context(), userID, req.Pin); err != nil {
+		if writePinError(w, err) {
+			return
+		}
+		log.Printf("verify pin error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo verificar el PIN")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type deviceInfoResponse struct {

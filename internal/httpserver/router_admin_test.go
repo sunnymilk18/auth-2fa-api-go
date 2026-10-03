@@ -30,13 +30,13 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	pool := testutil.PostgresPool(t)
 	rdb := testutil.RedisClient(t)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 	svc := auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
-		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
@@ -477,13 +477,13 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 	rdb := testutil.RedisClient(t)
 	client, _ := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 	svc := auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
-		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
@@ -519,5 +519,115 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 
 	if rec := meReq(); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /me with the same access token, right after AdminBanUser: status = %d, want %d (the token's signature/expiry alone are still fine — this is what AccessRevocationStore is for)", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant
+// covers POST /system-admin/users/{id}/reset-pin: it must clear the PIN,
+// revoke the account's trusted devices and sessions (same pairing as
+// AdminBanUser/ResetPassword), and stay scoped to the calling tenant like
+// every other action in this group. Direct svc/tokens wiring (same as
+// TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken above) since this
+// needs to set up a PIN/device/access-token directly, not through a full
+// HTTP login flow.
+func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
+
+	clientA, _, err := apiClients.Create(t.Context(), "reset-pin-a-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client A: %v", err)
+	}
+	clientB, _, err := apiClients.Create(t.Context(), "reset-pin-b-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client B: %v", err)
+	}
+	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client A: %v", err)
+	}
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	u, err := svc.Register(t.Context(), clientA.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+	if err := svc.SetPin(t.Context(), u.ID, "123456", ""); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+	if _, err := svc.RegisterDevice(t.Context(), u.ID, "device-"+testutil.UniqueSuffix(t), "Test Phone", "123456"); err != nil {
+		t.Fatalf("RegisterDevice: %v", err)
+	}
+	access, err := tokens.IssueAccessToken(u.ID, clientA.ID, email)
+	if err != nil {
+		t.Fatalf("issuing access token: %v", err)
+	}
+
+	meReq := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/me", nil)
+		req.Header.Set("Authorization", "Bearer "+access)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := meReq(); rec.Code != http.StatusOK {
+		t.Fatalf("GET /me before reset-pin: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	// A second tenant's scoped key can't reset the first tenant's user — 404,
+	// same isolation rule as ban/unban/etc.
+	systemAdminKeyB, err := apiClients.RotateSystemAdminKey(t.Context(), clientB.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client B: %v", err)
+	}
+	crossTenantRec := systemAdminRequest(r, http.MethodPost, "/system-admin/users/"+u.ID+"/reset-pin", systemAdminKeyB)
+	if crossTenantRec.Code != http.StatusNotFound {
+		t.Fatalf("reset-pin from another tenant: status = %d, want %d", crossTenantRec.Code, http.StatusNotFound)
+	}
+
+	// The real tenant's key works.
+	resetRec := systemAdminRequest(r, http.MethodPost, "/system-admin/users/"+u.ID+"/reset-pin", systemAdminKeyA)
+	if resetRec.Code != http.StatusNoContent {
+		t.Fatalf("reset-pin: status = %d, body = %s", resetRec.Code, resetRec.Body.String())
+	}
+
+	hasPin, err := users.HasPin(t.Context(), u.ID)
+	if err != nil || hasPin {
+		t.Fatalf("HasPin after reset-pin: hasPin=%v err=%v, want false", hasPin, err)
+	}
+	devices, err := svc.ListDevices(t.Context(), u.ID)
+	if err != nil || len(devices) != 0 {
+		t.Fatalf("ListDevices after reset-pin: devices=%v err=%v, want empty (trusted devices must be revoked)", devices, err)
+	}
+	if rec := meReq(); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /me with the pre-reset access token: status = %d, want %d (sessions must be revoked too)", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// The operator's unscoped /admin/users/{id}/reset-pin must also exist and
+// work — same handler as /system-admin/users/{id}/reset-pin above, just
+// reached through the operator's own X-Admin-Token instead.
+func TestAdminResetPin_Unscoped(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+	clientA := createTestClient(t, r, "admin-reset-pin-a")
+	userA := registerTestUser(t, r, clientA.APIKey)
+
+	rec := adminRequest(r, http.MethodPost, "/admin/users/"+userA.id+"/reset-pin", testAdminToken, nil)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d, body = %s", rec.Code, http.StatusNoContent, rec.Body.String())
 	}
 }

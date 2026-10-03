@@ -752,22 +752,42 @@ func (s *Service) PublicKeys() map[string]*rsa.PublicKey {
 // RegisterDevice marks deviceID as trusted for the already-authenticated
 // userID (the caller must have just completed a full password+OTP login)
 // and returns a device token the client must store securely — it's shown
-// only once.
+// only once. pin plays a dual role depending on whether the account already
+// has one (see user.Service.EnsurePin): no PIN yet, pin becomes the
+// account's new one; already has one, pin must match it. Either way, the
+// device itself ends up gated by the account's PIN, not one of its own —
+// see package device's doc comment.
 func (s *Service) RegisterDevice(ctx context.Context, userID, deviceID, deviceName, pin string) (deviceToken string, err error) {
-	return s.devices.Register(ctx, userID, deviceID, deviceName, pin)
+	if err := s.users.EnsurePin(ctx, userID, pin); err != nil {
+		return "", err
+	}
+	return s.devices.Register(ctx, userID, deviceID, deviceName)
 }
 
-// DeviceLogin verifies a device_token + pin pair and, on success, issues a
-// fresh access/refresh token pair — the trusted-device shortcut around
-// password+OTP. It also returns a rotated device token that MUST replace
-// the client's stored one; the old one stops working.
+// DeviceLogin verifies a device_token (possession) + the account's PIN
+// (knowledge) and, on success, issues a fresh access/refresh token pair —
+// the trusted-device shortcut around password+OTP. It also returns a
+// rotated device token that MUST replace the client's stored one; the old
+// one stops working. Unlike before, a wrong PIN here no longer revokes the
+// device — it counts against the account's shared PIN lockout instead (see
+// user.Service.VerifyPin), since the PIN is the account's now, not this
+// device's alone.
 func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin string) (accessToken, refreshToken, newDeviceToken string, err error) {
-	userID, newDeviceToken, err := s.devices.VerifyPin(ctx, deviceID, deviceToken, pin)
+	d, err := s.devices.VerifyToken(ctx, deviceID, deviceToken)
 	if err != nil {
 		return "", "", "", err
 	}
 
-	u, err := s.users.FindByID(ctx, userID)
+	if err := s.users.VerifyPin(ctx, d.UserID, pin); err != nil {
+		return "", "", "", err
+	}
+
+	newDeviceToken, err = s.devices.RotateToken(ctx, d.ID)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	u, err := s.users.FindByID(ctx, d.UserID)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -780,6 +800,43 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 		return "", "", "", err
 	}
 	return accessToken, refreshToken, newDeviceToken, nil
+}
+
+// SetPin creates or changes the authenticated userID's account PIN — see
+// user.Service.SetPin.
+func (s *Service) SetPin(ctx context.Context, userID, newPin, currentPin string) error {
+	return s.users.SetPin(ctx, userID, newPin, currentPin)
+}
+
+// VerifyPin confirms userID's account PIN with no other side effect — the
+// building block POST /auth/pin/verify exposes for a caller (e.g.
+// empresa-backend, before a destructive admin action) to confirm "the
+// person at the keyboard still knows the PIN" without creating a session or
+// rotating any token. See user.Service.VerifyPin for the shared lockout.
+func (s *Service) VerifyPin(ctx context.Context, userID, pin string) error {
+	return s.users.VerifyPin(ctx, userID, pin)
+}
+
+// AdminResetPin clears userID's account PIN (scoped to apiClientID — see
+// checkUserScope) and revokes every trusted device and session it has,
+// same reasoning as AdminBanUser/ResetPassword: a PIN reset means the old
+// one shouldn't be trusted anymore, so anything it alone could unlock
+// (a trusted device) or that was open before the reset (an active session)
+// goes with it.
+func (s *Service) AdminResetPin(ctx context.Context, apiClientID, userID string) error {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
+		return err
+	}
+	if err := s.users.ClearPin(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	return s.markAccessTokensRevoked(ctx, userID)
 }
 
 // ListDevices returns the authenticated user's trusted devices.

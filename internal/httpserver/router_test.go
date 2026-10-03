@@ -71,11 +71,11 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	rdb := testutil.RedisClient(t)
 	client, plaintextKey := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -120,11 +120,11 @@ func newTestRouterWithChoice(t *testing.T) (router http.Handler, apiKey string, 
 	rdb := testutil.RedisClient(t)
 	_, plaintextKey := testutil.NewAPIClient(t, pool)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	otpStore := auth.NewOTPStore(rdb, 5*time.Minute, 3, 6)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	refresh := auth.NewRefreshRepository(pool)
-	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3)
+	devices := device.NewService(device.NewRepository(pool), 30*24*time.Hour)
 	passwordReset := auth.NewPasswordResetStore(rdb, time.Hour, 3, 6)
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
@@ -243,12 +243,12 @@ func TestRouter_HealthReportsDependencyOutage(t *testing.T) {
 func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) http.Handler {
 	t.Helper()
 	pool := testutil.PostgresPool(t)
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
 	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
 	svc := auth.NewService(
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
-		device.NewService(device.NewRepository(pool), 30*24*time.Hour, 3), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil,
@@ -388,6 +388,36 @@ func TestRouter_Me_IncludesUsernameAndRUT(t *testing.T) {
 	if _, ok := resp["totp_enabled"].(bool); !ok {
 		t.Errorf("GET /me response missing boolean totp_enabled: %v", resp)
 	}
+	if pinSet, ok := resp["pin_set"].(bool); !ok || pinSet {
+		t.Errorf("GET /me response pin_set = %v (ok=%v), want false (no PIN set yet)", resp["pin_set"], ok)
+	}
+}
+
+// PUT /auth/pin is the only way pin_set flips to true — covers the route
+// end to end through the real router/middleware, not just the handler.
+func TestRouter_SetPin_ReflectedInMe(t *testing.T) {
+	r, apiKey, accessToken := newTestRouter(t)
+
+	// PUT /auth/pin lives under /auth, which (unlike /me) also requires
+	// X-API-Key — same as every other /auth/* route.
+	setRec := doRequest(r, http.MethodPut, "/auth/pin", apiKey, accessToken, map[string]string{"pin": "123456"})
+	if setRec.Code != http.StatusNoContent {
+		t.Fatalf("PUT /auth/pin: status = %d, want %d, body=%s", setRec.Code, http.StatusNoContent, setRec.Body.String())
+	}
+
+	meRec := doRequest(r, http.MethodGet, "/me", "", accessToken, nil)
+	var resp map[string]any
+	if err := json.Unmarshal(meRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if pinSet, _ := resp["pin_set"].(bool); !pinSet {
+		t.Fatalf("GET /me after PUT /auth/pin: pin_set = %v, want true", resp["pin_set"])
+	}
+
+	verifyRec := doRequest(r, http.MethodPost, "/auth/pin/verify", apiKey, accessToken, map[string]string{"pin": "123456"})
+	if verifyRec.Code != http.StatusNoContent {
+		t.Fatalf("POST /auth/pin/verify with the just-set pin: status = %d, want %d, body=%s", verifyRec.Code, http.StatusNoContent, verifyRec.Body.String())
+	}
 }
 
 func TestRouter_Register_WithAPIKey_Succeeds(t *testing.T) {
@@ -502,7 +532,7 @@ func TestRouter_TOTPRoutes_UnregisteredWhenNotConfigured(t *testing.T) {
 	client, apiKey := testutil.NewAPIClient(t, pool)
 	r := brokenHealthRouter(t, pool, rdb)
 
-	users := user.NewService(user.NewRepository(pool))
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := users.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
 	if err != nil {

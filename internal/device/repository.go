@@ -20,31 +20,29 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-// Upsert registers a device as trusted, or re-registers it (new token, new
-// pin, fresh expiry) if the same device_id already existed — registering a
+// Upsert registers a device as trusted, or re-registers it (new token,
+// fresh expiry) if the same device_id already existed — registering a
 // device is idempotent from the client's point of view.
-func (r *Repository) Upsert(ctx context.Context, userID, deviceID, deviceName, deviceTokenHash, pinHash string, expiresAt time.Time) (*Device, error) {
+func (r *Repository) Upsert(ctx context.Context, userID, deviceID, deviceName, deviceTokenHash string, expiresAt time.Time) (*Device, error) {
 	const q = `
-		INSERT INTO trusted_devices (user_id, device_id, device_name, device_token_hash, pin_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO trusted_devices (user_id, device_id, device_name, device_token_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5)
 		ON CONFLICT (device_id) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
 			device_name = EXCLUDED.device_name,
 			device_token_hash = EXCLUDED.device_token_hash,
-			pin_hash = EXCLUDED.pin_hash,
-			failed_pin_attempts = 0,
 			revoked = FALSE,
 			trusted_at = now(),
 			last_used_at = now(),
 			expires_at = EXCLUDED.expires_at,
 			updated_at = now()
-		RETURNING id, user_id, device_id, device_name, device_token_hash, pin_hash,
-			failed_pin_attempts, revoked, trusted_at, last_used_at, expires_at, created_at, updated_at`
+		RETURNING id, user_id, device_id, device_name, device_token_hash,
+			revoked, trusted_at, last_used_at, expires_at, created_at, updated_at`
 
 	d := &Device{}
-	err := r.pool.QueryRow(ctx, q, userID, deviceID, deviceName, deviceTokenHash, pinHash, expiresAt).Scan(
-		&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash, &d.PinHash,
-		&d.FailedPinAttempts, &d.Revoked, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
+	err := r.pool.QueryRow(ctx, q, userID, deviceID, deviceName, deviceTokenHash, expiresAt).Scan(
+		&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash,
+		&d.Revoked, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("upserting trusted device: %w", err)
@@ -54,14 +52,14 @@ func (r *Repository) Upsert(ctx context.Context, userID, deviceID, deviceName, d
 
 func (r *Repository) FindByDeviceID(ctx context.Context, deviceID string) (*Device, error) {
 	const q = `
-		SELECT id, user_id, device_id, device_name, device_token_hash, pin_hash,
-			failed_pin_attempts, revoked, COALESCE(push_token, ''), trusted_at, last_used_at, expires_at, created_at, updated_at
+		SELECT id, user_id, device_id, device_name, device_token_hash,
+			revoked, COALESCE(push_token, ''), trusted_at, last_used_at, expires_at, created_at, updated_at
 		FROM trusted_devices WHERE device_id = $1`
 
 	d := &Device{}
 	err := r.pool.QueryRow(ctx, q, deviceID).Scan(
-		&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash, &d.PinHash,
-		&d.FailedPinAttempts, &d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
+		&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash,
+		&d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -96,8 +94,8 @@ func (r *Repository) SetPushToken(ctx context.Context, id, userID, pushToken str
 // answers first.
 func (r *Repository) FindPushCapableByUser(ctx context.Context, userID string) ([]Device, error) {
 	const q = `
-		SELECT id, user_id, device_id, device_name, device_token_hash, pin_hash,
-			failed_pin_attempts, revoked, push_token, trusted_at, last_used_at, expires_at, created_at, updated_at
+		SELECT id, user_id, device_id, device_name, device_token_hash,
+			revoked, push_token, trusted_at, last_used_at, expires_at, created_at, updated_at
 		FROM trusted_devices
 		WHERE user_id = $1 AND revoked = FALSE AND expires_at > now() AND push_token IS NOT NULL AND push_token != ''`
 
@@ -111,8 +109,8 @@ func (r *Repository) FindPushCapableByUser(ctx context.Context, userID string) (
 	for rows.Next() {
 		var d Device
 		if err := rows.Scan(
-			&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash, &d.PinHash,
-			&d.FailedPinAttempts, &d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
+			&d.ID, &d.UserID, &d.DeviceID, &d.DeviceName, &d.DeviceTokenHash,
+			&d.Revoked, &d.PushToken, &d.TrustedAt, &d.LastUsedAt, &d.ExpiresAt, &d.CreatedAt, &d.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning push-capable device: %w", err)
 		}
@@ -145,41 +143,18 @@ func (r *Repository) ListByUser(ctx context.Context, userID string) ([]Info, err
 	return infos, rows.Err()
 }
 
-// MarkSuccess rotates the device token, resets the failed-attempt counter,
-// and extends the trust window (sliding expiration).
+// MarkSuccess rotates the device token and extends the trust window
+// (sliding expiration) — called after the account PIN that gates this
+// device checks out (see user.Service.VerifyPin, called separately by
+// auth.Service.DeviceLogin before this).
 func (r *Repository) MarkSuccess(ctx context.Context, id, newDeviceTokenHash string, newExpiresAt time.Time) error {
 	const q = `
 		UPDATE trusted_devices
-		SET device_token_hash = $2, failed_pin_attempts = 0, last_used_at = now(),
-			expires_at = $3, updated_at = now()
+		SET device_token_hash = $2, last_used_at = now(), expires_at = $3, updated_at = now()
 		WHERE id = $1`
 	_, err := r.pool.Exec(ctx, q, id, newDeviceTokenHash, newExpiresAt)
 	if err != nil {
 		return fmt.Errorf("marking trusted device success: %w", err)
-	}
-	return nil
-}
-
-// IncrementFailedAttempts bumps the counter and returns the new value.
-func (r *Repository) IncrementFailedAttempts(ctx context.Context, id string) (int, error) {
-	const q = `
-		UPDATE trusted_devices SET failed_pin_attempts = failed_pin_attempts + 1, updated_at = now()
-		WHERE id = $1
-		RETURNING failed_pin_attempts`
-	var attempts int
-	if err := r.pool.QueryRow(ctx, q, id).Scan(&attempts); err != nil {
-		return 0, fmt.Errorf("incrementing failed pin attempts: %w", err)
-	}
-	return attempts, nil
-}
-
-// Revoke invalidates a device unconditionally (used for lockouts after too
-// many failed PIN attempts).
-func (r *Repository) Revoke(ctx context.Context, id string) error {
-	const q = `UPDATE trusted_devices SET revoked = TRUE, updated_at = now() WHERE id = $1`
-	_, err := r.pool.Exec(ctx, q, id)
-	if err != nil {
-		return fmt.Errorf("revoking trusted device: %w", err)
 	}
 	return nil
 }

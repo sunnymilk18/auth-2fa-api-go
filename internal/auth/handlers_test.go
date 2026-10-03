@@ -690,13 +690,15 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 		t.Fatal("RegisterDevice response missing device_token")
 	}
 
-	// DeviceLogin: wrong pin -> 401
+	// DeviceLogin: wrong pin -> 403 (not 401 — see writePinError's doc
+	// comment: 401 is reserved for "access token expired, refresh and
+	// retry", which a wrong PIN is not).
 	wrongBody := jsonBody(t, map[string]string{"device_id": deviceID, "device_token": deviceToken, "pin": "000000"})
 	wrongReq := httptest.NewRequest(http.MethodPost, "/auth/devices/login", wrongBody)
 	wrongRec := httptest.NewRecorder()
 	h.DeviceLogin(wrongRec, wrongReq)
-	if wrongRec.Code != http.StatusUnauthorized {
-		t.Fatalf("DeviceLogin wrong pin status = %d, want %d", wrongRec.Code, http.StatusUnauthorized)
+	if wrongRec.Code != http.StatusForbidden {
+		t.Fatalf("DeviceLogin wrong pin status = %d, want %d, body=%s", wrongRec.Code, http.StatusForbidden, wrongRec.Body.String())
 	}
 
 	// DeviceLogin: success
@@ -997,5 +999,139 @@ func TestHandler_EnrollTOTP_NoBearerNoLoginToken_Unauthorized(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// --- Account PIN ---
+
+func setPin(t *testing.T, h *auth.Handlers, userID, email, pin, currentPin string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := jsonBody(t, map[string]string{"pin": pin, "current_pin": currentPin})
+	req := withUser(httptest.NewRequest(http.MethodPut, "/auth/pin", body), userID, email)
+	rec := httptest.NewRecorder()
+	h.SetPin(rec, req)
+	return rec
+}
+
+func verifyPin(t *testing.T, h *auth.Handlers, userID, email, pin string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := jsonBody(t, map[string]string{"pin": pin})
+	req := withUser(httptest.NewRequest(http.MethodPost, "/auth/pin/verify", body), userID, email)
+	rec := httptest.NewRecorder()
+	h.VerifyPin(rec, req)
+	return rec
+}
+
+// mustRegisterAndLogin registers, completes a full password+OTP login, and
+// returns the account's id — several PIN tests need the real id, not a
+// placeholder, since PIN state is read from Postgres by it.
+func mustRegisterAndLogin(t *testing.T, svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID, email, password string) string {
+	t.Helper()
+	mustRegister(t, svc, mailer, apiClientID, email, password)
+	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
+	if err != nil {
+		t.Fatalf("LoginStep1: %v", err)
+	}
+	sent, _ := mailer.Last()
+	code := testutil.ExtractOTPCode(sent.Body)
+	access, _, err := svc.LoginStep2(t.Context(), loginToken, code)
+	if err != nil {
+		t.Fatalf("LoginStep2: %v", err)
+	}
+	claims, err := tokens.ParseAccessToken(access)
+	if err != nil {
+		t.Fatalf("parsing access token: %v", err)
+	}
+	return claims.Subject
+}
+
+func TestHandler_SetPin_CreateThenChangeThenWrongCurrent(t *testing.T) {
+	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	// First PIN ever: no current_pin needed.
+	if rec := setPin(t, h, userID, email, "111111", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("create: status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+
+	// Changing it requires the correct current one.
+	if rec := setPin(t, h, userID, email, "222222", "111111"); rec.Code != http.StatusNoContent {
+		t.Fatalf("change with correct current_pin: status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+
+	// Wrong current_pin: 403 pin_invalid, not 401.
+	rec := setPin(t, h, userID, email, "333333", "111111") // 111111 no longer valid
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("change with wrong current_pin: status = %d, want %d, body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	if resp["code"] != "pin_invalid" {
+		t.Fatalf("change with wrong current_pin: code = %v, want pin_invalid", resp["code"])
+	}
+
+	// The second PIN (222222) still works — the failed attempt above didn't
+	// corrupt it.
+	if rec := verifyPin(t, h, userID, email, "222222"); rec.Code != http.StatusNoContent {
+		t.Fatalf("verify 222222 after a failed change attempt: status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+}
+
+func TestHandler_SetPin_InvalidFormat(t *testing.T) {
+	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	rec := setPin(t, h, userID, email, "12345", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+	if resp := decodeJSON(t, rec); resp["code"] != "pin_invalid_format" {
+		t.Fatalf("code = %v, want pin_invalid_format", resp["code"])
+	}
+}
+
+// VerifyPin must have no side effect beyond the shared lockout counter —
+// no session, no device token rotation, nothing for a caller (e.g.
+// empresa-backend, confirming a destructive action) to clean up either way.
+func TestHandler_VerifyPin_CorrectAndWrong(t *testing.T) {
+	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+	if rec := setPin(t, h, userID, email, "123456", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("setup SetPin: status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	if rec := verifyPin(t, h, userID, email, "123456"); rec.Code != http.StatusNoContent {
+		t.Fatalf("correct pin: status = %d, want %d, body=%s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if rec := verifyPin(t, h, userID, email, "123456"); rec.Body.Len() != 0 {
+		t.Fatalf("VerifyPin response body should be empty, got %q", rec.Body.String())
+	}
+
+	rec := verifyPin(t, h, userID, email, "000000")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("wrong pin: status = %d, want %d, body=%s", rec.Code, http.StatusForbidden, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	if resp["code"] != "pin_invalid" {
+		t.Fatalf("wrong pin: code = %v, want pin_invalid", resp["code"])
+	}
+	if _, ok := resp["attempts_left"]; !ok {
+		t.Fatalf("wrong pin response missing attempts_left: %v", resp)
+	}
+}
+
+func TestHandler_VerifyPin_NoPinSetYet(t *testing.T) {
+	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	rec := verifyPin(t, h, userID, email, "123456")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	if resp := decodeJSON(t, rec); resp["code"] != "pin_not_set" {
+		t.Fatalf("code = %v, want pin_not_set", resp["code"])
 	}
 }

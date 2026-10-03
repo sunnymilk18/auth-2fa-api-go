@@ -3,6 +3,7 @@ package user_test
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"auth-2fa-api/internal/testutil"
 	"auth-2fa-api/internal/user"
@@ -10,9 +11,14 @@ import (
 
 func newTestUserService(t *testing.T) (*user.Service, string) {
 	t.Helper()
+	return newTestUserServiceWithPinLimits(t, 5, 15*time.Minute)
+}
+
+func newTestUserServiceWithPinLimits(t *testing.T, pinMaxFailedTries int, pinLockDuration time.Duration) (*user.Service, string) {
+	t.Helper()
 	pool := testutil.PostgresPool(t)
 	client, _ := testutil.NewAPIClient(t, pool)
-	return user.NewService(user.NewRepository(pool)), client.ID
+	return user.NewService(user.NewRepository(pool), pinMaxFailedTries, pinLockDuration), client.ID
 }
 
 // Only a genuinely VERIFIED account blocks a duplicate registration — see
@@ -486,5 +492,145 @@ func TestListByAPIClient_EmptyAPIClientIDSpansEveryTenant(t *testing.T) {
 	}
 	if !found[userA.ID] || !found[userB.ID] {
 		t.Fatalf("unscoped listing missing users from one or both tenants: found=%v, want %s and %s", found, userA.ID, userB.ID)
+	}
+}
+
+// --- Account PIN ---
+
+func TestVerifyPin_LockoutAfterMaxFailedAttempts(t *testing.T) {
+	svc, apiClientID := newTestUserServiceWithPinLimits(t, 3, 50*time.Millisecond)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.SetPin(t.Context(), u.ID, "123456", ""); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	for i := 1; i <= 2; i++ {
+		if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+			t.Fatalf("failed attempt %d: err = %v, want a *user.PinInvalidError", i, err)
+		}
+	}
+	// 3rd failure crosses the threshold.
+	var locked *user.PinLockedError
+	if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, &locked) {
+		t.Fatalf("3rd failed attempt: err = %v, want a *user.PinLockedError", err)
+	}
+
+	// Locked: even the correct PIN is refused, and doesn't touch the counter.
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("correct pin while locked: err = %v, want a *user.PinLockedError", err)
+	}
+
+	time.Sleep(60 * time.Millisecond) // past the 50ms lock
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); err != nil {
+		t.Fatalf("correct pin after lock expired: unexpected error %v", err)
+	}
+}
+
+func TestVerifyPin_SuccessResetsFailedAttempts(t *testing.T) {
+	svc, apiClientID := newTestUserServiceWithPinLimits(t, 3, time.Minute)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.SetPin(t.Context(), u.ID, "123456", ""); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	// One failure, then a success — the counter must reset, so two more
+	// failures afterward shouldn't trip the maxFailedTries=3 limit on their
+	// own (1 + 2 = 3 total, but not consecutive since a success happened
+	// in between).
+	if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+		t.Fatalf("first failed attempt: err = %v, want a *user.PinInvalidError", err)
+	}
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); err != nil {
+		t.Fatalf("successful attempt: unexpected error %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+			t.Fatalf("failed attempt %d after success: err = %v, want a *user.PinInvalidError (not locked — counter should have reset)", i, err)
+		}
+	}
+}
+
+func TestVerifyPin_NotSet(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); err != user.ErrPinNotSet {
+		t.Fatalf("err = %v, want %v", err, user.ErrPinNotSet)
+	}
+}
+
+func TestSetPin_ChangeRequiresCorrectCurrentPin(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	// First PIN ever: no current_pin needed, even a wrong-looking one is ignored.
+	if err := svc.SetPin(t.Context(), u.ID, "111111", "whatever"); err != nil {
+		t.Fatalf("create: unexpected error %v", err)
+	}
+
+	if err := svc.SetPin(t.Context(), u.ID, "222222", "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+		t.Fatalf("change with wrong current_pin: err = %v, want a *user.PinInvalidError", err)
+	}
+	// The old PIN must still work — the failed change attempt didn't corrupt it.
+	if err := svc.VerifyPin(t.Context(), u.ID, "111111"); err != nil {
+		t.Fatalf("verify old pin after a failed change: unexpected error %v", err)
+	}
+
+	if err := svc.SetPin(t.Context(), u.ID, "222222", "111111"); err != nil {
+		t.Fatalf("change with correct current_pin: unexpected error %v", err)
+	}
+	if err := svc.VerifyPin(t.Context(), u.ID, "222222"); err != nil {
+		t.Fatalf("verify new pin: unexpected error %v", err)
+	}
+}
+
+func TestSetPin_RejectsMalformedPin(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	for _, pin := range []string{"", "12345", "1234567", "abcdef", "12 345"} {
+		if err := svc.SetPin(t.Context(), u.ID, pin, ""); err != user.ErrInvalidPinFormat {
+			t.Errorf("SetPin with pin %q: err = %v, want %v", pin, err, user.ErrInvalidPinFormat)
+		}
+	}
+}
+
+func TestEnsurePin_FirstDeviceSetsItSecondDeviceMustMatch(t *testing.T) {
+	svc, apiClientID := newTestUserService(t)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := svc.EnsurePin(t.Context(), u.ID, "123456"); err != nil {
+		t.Fatalf("EnsurePin (no pin yet): unexpected error %v", err)
+	}
+	hasPin, err := svc.HasPin(t.Context(), u.ID)
+	if err != nil || !hasPin {
+		t.Fatalf("HasPin after EnsurePin: hasPin=%v err=%v, want true", hasPin, err)
+	}
+
+	// A second "device" with a different pin must fail — it has to match
+	// the account's existing one now.
+	if err := svc.EnsurePin(t.Context(), u.ID, "654321"); !errors.As(err, new(*user.PinInvalidError)) {
+		t.Fatalf("EnsurePin with a different pin (account already has one): err = %v, want a *user.PinInvalidError", err)
+	}
+	// The matching pin succeeds, and changes nothing.
+	if err := svc.EnsurePin(t.Context(), u.ID, "123456"); err != nil {
+		t.Fatalf("EnsurePin with the matching pin: unexpected error %v", err)
 	}
 }
