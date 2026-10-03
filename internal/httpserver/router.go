@@ -141,9 +141,15 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// regardless of this limit.
 	pushStatusLimiter := middleware.NewRateLimiter(rdb, "login-push-status", 100, 15*time.Minute).AttachBlacklist(blacklist)
 	// On top of the account-level PIN lockout (user.Service.VerifyPin) —
-	// this one just bounds raw request volume against the endpoint itself,
-	// same reasoning as every other limiter here.
+	// these just bound raw request volume against the endpoint itself, same
+	// reasoning as every other limiter here. The account-level lockout
+	// alone only throttles guesses against ONE account; an attacker with
+	// several stolen access tokens could otherwise spray PIN guesses across
+	// many different accounts from the same IP without ever tripping any
+	// single account's own counter — these catch that.
 	pinVerifyLimiter := middleware.NewRateLimiter(rdb, "pin-verify", 30, 15*time.Minute).AttachBlacklist(blacklist)
+	pinSetLimiter := middleware.NewRateLimiter(rdb, "pin-set", 30, 15*time.Minute).AttachBlacklist(blacklist)
+	deviceRegisterLimiter := middleware.NewRateLimiter(rdb, "device-register", 30, 15*time.Minute).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -212,21 +218,21 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireAuth(tokens, accessRevocation))
-			r.Post("/devices/register", authHandlers.RegisterDevice)
+			r.With(deviceRegisterLimiter.Middleware).Post("/devices/register", authHandlers.RegisterDevice)
 			r.Get("/devices", authHandlers.ListDevices)
 			r.Delete("/devices/{id}", authHandlers.RevokeDevice)
 
 			// Account PIN: unlocks a trusted device (see RegisterDevice/
 			// DeviceLogin above) and, for a consuming system that wants it,
 			// confirms a sensitive action from any client — see
-			// Handlers.SetPin/VerifyPin's doc comments. /pin/verify has its
-			// own rate limiter on top of the account-level PIN lockout
+			// Handlers.SetPin/VerifyPin's doc comments. Each has its own
+			// rate limiter on top of the account-level PIN lockout
 			// (user.Service.VerifyPin) — keyed by IP like every other
-			// limiter here, so it shares the known, already-documented
+			// limiter here, so they share the known, already-documented
 			// limitation that every client IP currently looks the same in
 			// production (see the deferred trusted-proxy investigation) —
 			// not something to fix as part of this.
-			r.Put("/pin", authHandlers.SetPin)
+			r.With(pinSetLimiter.Middleware).Put("/pin", authHandlers.SetPin)
 			r.With(pinVerifyLimiter.Middleware).Post("/pin/verify", authHandlers.VerifyPin)
 
 			if pushEnabled {

@@ -363,22 +363,63 @@ func (r *Repository) SetPin(ctx context.Context, id, pinHash string) error {
 	return nil
 }
 
-// IncrementPinFailedAttempts bumps id's pin_failed_attempts and returns the
-// new value — mirrors device.Repository.IncrementFailedAttempts, now scoped
-// to the account instead of one device.
-func (r *Repository) IncrementPinFailedAttempts(ctx context.Context, id string) (int, error) {
-	const q = `UPDATE users SET pin_failed_attempts = pin_failed_attempts + 1, updated_at = now() WHERE id = $1 RETURNING pin_failed_attempts`
-	var attempts int
-	if err := r.pool.QueryRow(ctx, q, id).Scan(&attempts); err != nil {
-		return 0, fmt.Errorf("incrementing pin failed attempts: %w", err)
+// ReserveFailedPinAttempt atomically reserves one "attempt slot" against
+// id's account PIN — BEFORE the caller compares the guess with bcrypt. This
+// is what closes a race a batch of concurrent VerifyPin calls could
+// otherwise exploit: reading "not locked", then each comparing its own
+// guess with bcrypt independently, and only incrementing afterward, let N
+// simultaneous wrong guesses each get a full bcrypt compare before any of
+// them actually counted against the lockout — so the real budget was N
+// attempts per burst, not pinMaxFailedTries. Reserving the slot first,
+// atomically, means a guess that arrives once the budget's already spent
+// never reaches bcrypt at all — same pattern as RefreshRepository.
+// ConsumeIfValid's atomic consume-then-check.
+//
+// ok is false when the row didn't match — either no PIN is set yet, or
+// it's currently locked; the caller falls back to a plain PinState read to
+// tell those two apart for the error message (fine to be non-atomic there,
+// since the security decision already happened above).
+func (r *Repository) ReserveFailedPinAttempt(ctx context.Context, id string) (pinHash string, attempts int, ok bool, err error) {
+	const q = `
+		UPDATE users
+		SET pin_failed_attempts = CASE
+				WHEN pin_locked_until IS NOT NULL AND pin_locked_until <= now() THEN 1
+				ELSE pin_failed_attempts + 1
+			END,
+			-- A naturally-expired lock is cleared here, not just ignored by
+			-- the WHERE below — otherwise pin_failed_attempts resets to 1
+			-- (new window) but a stale pin_locked_until would still be
+			-- sitting there, doing nothing (it's already in the past) but
+			-- leaving the row in a confusing half-expired state.
+			pin_locked_until = CASE
+				WHEN pin_locked_until IS NOT NULL AND pin_locked_until <= now() THEN NULL
+				ELSE pin_locked_until
+			END,
+			updated_at = now()
+		WHERE id = $1 AND pin_hash IS NOT NULL AND (pin_locked_until IS NULL OR pin_locked_until <= now())
+		RETURNING pin_hash, pin_failed_attempts`
+	err = r.pool.QueryRow(ctx, q, id).Scan(&pinHash, &attempts)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", 0, false, nil
 	}
-	return attempts, nil
+	if err != nil {
+		return "", 0, false, fmt.Errorf("reserving pin attempt: %w", err)
+	}
+	return pinHash, attempts, true, nil
 }
 
 // LockPin sets id's pin_locked_until — called once pin_failed_attempts
-// crosses the configured threshold (see user.Service.VerifyPin).
+// crosses the configured threshold (see user.Service.VerifyPin). Only
+// writes when not already locked (pin_locked_until NULL or already past) —
+// first writer wins, and repeated calls (a defensive re-lock after
+// observing attempts already past the threshold, or continued guessing
+// during an active lockout) never push the expiry further out. Without
+// that guard, an attacker could keep an account locked indefinitely just
+// by continuing to guess — exactly the kind of self-inflicted-on-the-victim
+// denial-of-service this project already avoids elsewhere (see Ban's doc
+// comment on why failed logins never auto-ban an account).
 func (r *Repository) LockPin(ctx context.Context, id string, until time.Time) error {
-	const q = `UPDATE users SET pin_locked_until = $2, updated_at = now() WHERE id = $1`
+	const q = `UPDATE users SET pin_locked_until = $2, updated_at = now() WHERE id = $1 AND (pin_locked_until IS NULL OR pin_locked_until <= now())`
 	_, err := r.pool.Exec(ctx, q, id, until)
 	if err != nil {
 		return fmt.Errorf("locking pin: %w", err)
@@ -386,11 +427,18 @@ func (r *Repository) LockPin(ctx context.Context, id string, until time.Time) er
 	return nil
 }
 
-// ResetPinFailedAttempts clears the counter and any lock — called after a
-// correct PIN, same reasoning as LoginAttemptLimiter.Reset.
-func (r *Repository) ResetPinFailedAttempts(ctx context.Context, id string) error {
-	const q = `UPDATE users SET pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1`
-	_, err := r.pool.Exec(ctx, q, id)
+// ResetPinFailedAttemptsIfUnchanged clears the counter and any lock after a
+// correct PIN — but only if pin_failed_attempts still matches expected (the
+// value ReserveFailedPinAttempt returned for this same call). Without that
+// guard, a correct guess racing against a separate wrong one that just
+// crossed the threshold could silently clear the lock the wrong guess just
+// set — this account really did just get a bad guess, even though a
+// different, legitimate request also happened to succeed around the same
+// moment. A no-op (not an error) when the guard doesn't match: the counter
+// is simply left as whatever the interleaving request left it at.
+func (r *Repository) ResetPinFailedAttemptsIfUnchanged(ctx context.Context, id string, expected int) error {
+	const q = `UPDATE users SET pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1 AND pin_failed_attempts = $2`
+	_, err := r.pool.Exec(ctx, q, id, expected)
 	if err != nil {
 		return fmt.Errorf("resetting pin failed attempts: %w", err)
 	}

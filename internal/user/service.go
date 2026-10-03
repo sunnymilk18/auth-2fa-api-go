@@ -373,23 +373,53 @@ func (s *Service) HasPin(ctx context.Context, userID string) (bool, error) {
 // can't be used to skip the wait (see the project's standing reasoning
 // against letting repeated attempts punish anyone but the attacker,
 // e.g. Ban's doc comment on why failed logins never auto-ban an account).
+//
+// The attempt is reserved atomically (ReserveFailedPinAttempt) before pin
+// is ever compared — see its doc comment for the race this closes: without
+// it, a burst of concurrent calls could each get a full bcrypt compare in
+// before any of them actually counted against the lockout.
 func (s *Service) VerifyPin(ctx context.Context, userID, pin string) error {
-	pinHash, _, lockedUntil, err := s.repo.PinState(ctx, userID)
+	pinHash, attempts, ok, err := s.repo.ReserveFailedPinAttempt(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if pinHash == "" {
+	if !ok {
+		// No PIN set, or currently locked — tell those two apart with a
+		// plain (non-atomic) read; fine here, since no attempt was
+		// reserved and the security decision already happened above.
+		_, _, lockedUntil, stateErr := s.repo.PinState(ctx, userID)
+		if stateErr != nil {
+			return stateErr
+		}
+		if lockedUntil != nil && lockedUntil.After(time.Now()) {
+			return &PinLockedError{RetryAfter: time.Until(*lockedUntil)}
+		}
 		return ErrPinNotSet
 	}
-	if lockedUntil != nil && lockedUntil.After(time.Now()) {
-		return &PinLockedError{RetryAfter: time.Until(*lockedUntil)}
+
+	// attempts > max means a different, concurrent guess already crossed
+	// the threshold between our reservation and now — reject without ever
+	// touching bcrypt. attempts == max is this request's own last chance:
+	// it still gets compared below, same as single-threaded behavior
+	// always has.
+	//
+	// This still (defensively) calls LockPin even though some other
+	// request "should" have already locked it: that other request might
+	// have been a correct guess, which never locks on its own (see the
+	// success path below) — without this, attempts could keep climbing
+	// past max with pin_locked_until never actually set, leaving the
+	// account stuck rejecting every request forever with no real lock to
+	// eventually expire. LockPin itself is idempotent/first-writer-wins
+	// (see its doc comment), so this never re-extends a lock that's
+	// already in place.
+	if attempts > s.pinMaxFailedTries {
+		if lockErr := s.repo.LockPin(ctx, userID, time.Now().Add(s.pinLockDuration)); lockErr != nil {
+			return lockErr
+		}
+		return &PinLockedError{RetryAfter: s.pinLockDuration}
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(pinHash), []byte(pin)); err != nil {
-		attempts, incErr := s.repo.IncrementPinFailedAttempts(ctx, userID)
-		if incErr != nil {
-			return incErr
-		}
 		if attempts >= s.pinMaxFailedTries {
 			until := time.Now().Add(s.pinLockDuration)
 			if lockErr := s.repo.LockPin(ctx, userID, until); lockErr != nil {
@@ -400,7 +430,7 @@ func (s *Service) VerifyPin(ctx context.Context, userID, pin string) error {
 		return &PinInvalidError{AttemptsLeft: s.pinMaxFailedTries - attempts}
 	}
 
-	return s.repo.ResetPinFailedAttempts(ctx, userID)
+	return s.repo.ResetPinFailedAttemptsIfUnchanged(ctx, userID, attempts)
 }
 
 // SetPin creates (first PIN ever) or changes userID's account PIN.

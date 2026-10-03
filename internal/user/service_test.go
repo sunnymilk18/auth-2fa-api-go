@@ -2,6 +2,7 @@ package user_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -632,5 +633,124 @@ func TestEnsurePin_FirstDeviceSetsItSecondDeviceMustMatch(t *testing.T) {
 	// The matching pin succeeds, and changes nothing.
 	if err := svc.EnsurePin(t.Context(), u.ID, "123456"); err != nil {
 		t.Fatalf("EnsurePin with the matching pin: unexpected error %v", err)
+	}
+}
+
+// A burst of concurrent wrong guesses must not get more total tries than
+// pinMaxFailedTries — the race ReserveFailedPinAttempt closes: each
+// concurrent call used to read "not locked" and compare its own guess with
+// bcrypt before any of them had actually counted against the lockout, so
+// the real per-burst budget was however many requests arrived at once, not
+// pinMaxFailedTries.
+func TestVerifyPin_ConcurrentGuessesDontExceedTheBudget(t *testing.T) {
+	const maxTries = 5
+	const burst = 20
+	svc, apiClientID := newTestUserServiceWithPinLimits(t, maxTries, time.Minute)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.SetPin(t.Context(), u.ID, "123456", ""); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var invalidCount, lockedCount, otherCount int
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := svc.VerifyPin(t.Context(), u.ID, "000000")
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case errors.As(err, new(*user.PinInvalidError)):
+				invalidCount++
+			case errors.As(err, new(*user.PinLockedError)):
+				lockedCount++
+			default:
+				otherCount++
+			}
+		}()
+	}
+	wg.Wait()
+
+	if otherCount != 0 {
+		t.Fatalf("otherCount = %d, want 0 (every call should resolve to either pin_invalid or pin_locked)", otherCount)
+	}
+	// The attempt that reaches maxTries locks immediately instead of
+	// returning "invalid" (same as the single-threaded case — see
+	// TestVerifyPin_LockoutAfterMaxFailedAttempts), so only maxTries-1
+	// guesses ever see pin_invalid; everything else, including the one
+	// that crossed the threshold, sees pin_locked.
+	const wantInvalid = maxTries - 1
+	if invalidCount != wantInvalid {
+		t.Fatalf("invalidCount = %d, want exactly %d (the budget), got %d locked instead", invalidCount, wantInvalid, lockedCount)
+	}
+	if lockedCount != burst-wantInvalid {
+		t.Fatalf("lockedCount = %d, want %d", lockedCount, burst-wantInvalid)
+	}
+
+	// The account must actually be locked now — a correct guess right
+	// after the burst still fails.
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("correct pin immediately after the burst: err = %v, want a *user.PinLockedError", err)
+	}
+}
+
+// Once an account is locked, a burst of concurrent requests — including
+// ones with the CORRECT pin — must never erase that lock early.
+// ResetPinFailedAttemptsIfUnchanged's whole reason to exist: an
+// unconditional reset after any success would let a correct guess that
+// slips in during a lockout clear it ahead of time.
+func TestVerifyPin_ConcurrentActivityDuringLockoutNeverUnlocksEarly(t *testing.T) {
+	const maxTries = 3
+	svc, apiClientID := newTestUserServiceWithPinLimits(t, maxTries, time.Minute)
+	u, err := svc.Register(t.Context(), apiClientID, "pin-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := svc.SetPin(t.Context(), u.ID, "123456", ""); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+
+	// Drive it to locked, sequentially, so the lock is unambiguously in
+	// place before the concurrent burst starts.
+	for i := 0; i < maxTries-1; i++ {
+		if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+			t.Fatalf("priming attempt %d: err = %v, want a *user.PinInvalidError", i, err)
+		}
+	}
+	if err := svc.VerifyPin(t.Context(), u.ID, "000000"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("attempt that crosses the threshold: err = %v, want a *user.PinLockedError", err)
+	}
+
+	// Now race a mix of correct and wrong guesses against the already-locked
+	// account — every single one must come back locked, correct pin included.
+	const burst = 10
+	var wg sync.WaitGroup
+	results := make([]error, burst)
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		pin := "000000"
+		if i%2 == 0 {
+			pin = "123456" // the real one
+		}
+		go func(i int, pin string) {
+			defer wg.Done()
+			results[i] = svc.VerifyPin(t.Context(), u.ID, pin)
+		}(i, pin)
+	}
+	wg.Wait()
+
+	for i, err := range results {
+		if !errors.As(err, new(*user.PinLockedError)) {
+			t.Fatalf("result %d (pin %q): err = %v, want a *user.PinLockedError — the lockout must hold even against the correct pin", i, map[bool]string{true: "123456", false: "000000"}[i%2 == 0], err)
+		}
+	}
+
+	if err := svc.VerifyPin(t.Context(), u.ID, "123456"); !errors.As(err, new(*user.PinLockedError)) {
+		t.Fatalf("after the burst, account should still be locked: err = %v, want a *user.PinLockedError", err)
 	}
 }
