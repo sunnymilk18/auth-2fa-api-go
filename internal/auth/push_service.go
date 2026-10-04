@@ -204,31 +204,31 @@ func randInt(n int) (int, error) {
 // impersonating "the PC" necessarily already has that token (they're the
 // one who triggered the login), and still can't act on it without the real
 // phone owner independently choosing the same number on their own device.
-func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status string, displayNumber int, accessToken, refreshToken string, err error) {
+func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status string, displayNumber int, result LoginResult, err error) {
 	if s.pushLogin == nil {
-		return "", 0, "", "", ErrPushNotConfigured
+		return "", 0, LoginResult{}, ErrPushNotConfigured
 	}
 
 	sess, found, err := s.pushLogin.Peek(ctx, loginToken)
 	if err != nil {
-		return "", 0, "", "", err
+		return "", 0, LoginResult{}, err
 	}
 	if !found {
-		return "", 0, "", "", ErrLoginSessionNotFound
+		return "", 0, LoginResult{}, ErrLoginSessionNotFound
 	}
 
 	if sess.Status != pushLoginApproved {
-		return string(sess.Status), sess.CorrectNumber, "", "", nil
+		return string(sess.Status), sess.CorrectNumber, LoginResult{}, nil
 	}
 
 	if err := s.pushLogin.Consume(ctx, loginToken); err != nil {
-		return "", 0, "", "", err
+		return "", 0, LoginResult{}, err
 	}
-	accessToken, refreshToken, err = s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	result, err = s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
 	if err != nil {
-		return "", 0, "", "", err
+		return "", 0, LoginResult{}, err
 	}
-	return string(pushLoginApproved), sess.CorrectNumber, accessToken, refreshToken, nil
+	return string(pushLoginApproved), sess.CorrectNumber, result, nil
 }
 
 // AnswerPushLogin records the phone's tap. Unlike PollPushLogin (called by

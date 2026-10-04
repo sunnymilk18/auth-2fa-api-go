@@ -40,12 +40,12 @@ func TestResendLoginOTP_SendsFreshCodeUnderSameToken(t *testing.T) {
 
 	// The old code, issued before the resend, must no longer work — the
 	// session it belonged to was overwritten.
-	if _, _, err := svc.LoginStep2(t.Context(), loginToken, firstCode); err != auth.ErrInvalidCode {
+	if _, _, err := loginStep2Tokens(t, svc, loginToken, firstCode); err != auth.ErrInvalidCode {
 		t.Fatalf("LoginStep2 with the pre-resend code: err = %v, want ErrInvalidCode", err)
 	}
 
 	// The same loginToken, with the newly resent code, completes the login.
-	access, refresh, err := svc.LoginStep2(t.Context(), loginToken, secondCode)
+	access, refresh, err := loginStep2Tokens(t, svc, loginToken, secondCode)
 	if err != nil {
 		t.Fatalf("LoginStep2 with the resent code: %v", err)
 	}

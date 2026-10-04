@@ -135,6 +135,7 @@ services:
 
       PIN_MAX_FAILED_ATTEMPTS: "5"
       PIN_LOCK_MINUTES: "15"
+      LOGIN_PIN_TTL: 5m
 
       RESEND_API_KEY: ${RESEND_API_KEY}
       RESEND_FROM: ${RESEND_FROM:-onboarding@resend.dev}

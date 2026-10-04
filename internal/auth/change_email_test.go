@@ -97,7 +97,7 @@ func TestChangeEmail_RevokesExistingSessionsDevicesAndAccessTokens(t *testing.T)
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	otpSent, _ := mailer.Last()
-	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, testutil.ExtractOTPCode(otpSent.Body))
+	_, refreshTok, err := loginStep2Tokens(t, svc, loginToken, testutil.ExtractOTPCode(otpSent.Body))
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}

@@ -310,10 +310,30 @@ type verifyRequest struct {
 	Code       string `json:"code"`
 }
 
+// tokenResponse carries either a real token pair (PinRequired omitted,
+// false) or, for an account with PinRequiredAtLogin set, a pending PIN
+// step (PinRequired true, no tokens at all) — see LoginResult and
+// loginResultResponse. PinSet is a pointer so "pin_set": false (the
+// account has no PIN yet) can be told apart from "absent" (not a pending
+// PIN step at all) in the JSON.
 type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
+	AccessToken  string `json:"access_token,omitempty"`
+	RefreshToken string `json:"refresh_token,omitempty"`
+	TokenType    string `json:"token_type,omitempty"`
+	PinRequired  bool   `json:"pin_required,omitempty"`
+	PinToken     string `json:"pin_token,omitempty"`
+	PinSet       *bool  `json:"pin_set,omitempty"`
+}
+
+// loginResultResponse renders a LoginResult as the HTTP response body every
+// login-completing endpoint (VerifyOTP, ConfirmTOTP's login_token branch,
+// LoginPin) shares — see tokenResponse's doc comment for the two shapes.
+func loginResultResponse(result LoginResult) tokenResponse {
+	if result.PinRequired {
+		pinSet := result.PinSet
+		return tokenResponse{PinRequired: true, PinToken: result.PinToken, PinSet: &pinSet}
+	}
+	return tokenResponse{AccessToken: result.AccessToken, RefreshToken: result.RefreshToken, TokenType: "Bearer"}
 }
 
 func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +347,7 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	access, refresh, err := h.svc.LoginStep2(r.Context(), req.LoginToken, req.Code)
+	result, err := h.svc.LoginStep2(r.Context(), req.LoginToken, req.Code)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrLoginSessionNotFound):
@@ -343,11 +363,51 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, tokenResponse{
-		AccessToken:  access,
-		RefreshToken: refresh,
-		TokenType:    "Bearer",
-	})
+	writeJSON(w, http.StatusOK, loginResultResponse(result))
+}
+
+// --- Login pin step (see LoginResult/Service.LoginPinStep) ---
+
+type loginPinRequest struct {
+	PinToken string `json:"pin_token"`
+	Pin      string `json:"pin"`
+	// Create: the account has no PIN yet (LoginResult.PinSet was false) —
+	// pin becomes its new one instead of being verified against an
+	// existing one. See Service.LoginPinStep's doc comment.
+	Create bool `json:"create"`
+}
+
+// LoginPin completes a login that VerifyOTP/ConfirmTOTP/PushLoginStatus
+// reported pin_required for — see Service.LoginPinStep's doc comment. A
+// wrong PIN uses the same {error, code, ...} shape as every other
+// PIN-touching route (see writePinError), never 401 — 401 here is reserved
+// for pin_token itself being invalid, used or expired.
+func (h *Handlers) LoginPin(w http.ResponseWriter, r *http.Request) {
+	var req loginPinRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.PinToken == "" || req.Pin == "" {
+		writeError(w, http.StatusBadRequest, "pin_token y pin son obligatorios")
+		return
+	}
+
+	result, err := h.svc.LoginPinStep(r.Context(), req.PinToken, req.Pin, req.Create)
+	if err != nil {
+		if errors.Is(err, ErrLoginSessionNotFound) {
+			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
+			return
+		}
+		if writePinError(w, err) {
+			return
+		}
+		log.Printf("login pin step error: %v", err)
+		writeError(w, http.StatusInternalServerError, "no se pudo verificar el PIN")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, loginResultResponse(result))
 }
 
 // --- Refresh ---
@@ -606,6 +666,13 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, ErrAccountBanned) {
 			writeError(w, http.StatusForbidden, "esta cuenta está bloqueada")
+			return
+		}
+		if errors.Is(err, ErrLoginPinStepRequired) {
+			writeJSON(w, http.StatusForbidden, map[string]any{
+				"error": "esta cuenta requiere iniciar sesión con contraseña y segundo factor, el acceso directo por dispositivo está desactivado para ella",
+				"code":  "login_pin_step_required",
+			})
 			return
 		}
 		if writePinError(w, err) {
@@ -869,6 +936,13 @@ type pushStatusResponse struct {
 	AccessToken  string `json:"access_token,omitempty"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	TokenType    string `json:"token_type,omitempty"`
+	// PinRequired/PinToken/PinSet: same pending-PIN-step shape as
+	// tokenResponse — set only once Status == "approved" for an account
+	// with PinRequiredAtLogin (see LoginResult), in place of the token
+	// fields above.
+	PinRequired bool   `json:"pin_required,omitempty"`
+	PinToken    string `json:"pin_token,omitempty"`
+	PinSet      *bool  `json:"pin_set,omitempty"`
 }
 
 // PushLoginStatus is polled from the PC side (~every 2s, see README's
@@ -884,7 +958,7 @@ func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, number, access, refresh, err := h.svc.PollPushLogin(r.Context(), loginToken)
+	status, number, result, err := h.svc.PollPushLogin(r.Context(), loginToken)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPushNotConfigured):
@@ -899,9 +973,14 @@ func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := pushStatusResponse{Status: status, Number: number}
-	if access != "" {
-		resp.AccessToken = access
-		resp.RefreshToken = refresh
+	if result.PinRequired {
+		pinSet := result.PinSet
+		resp.PinRequired = true
+		resp.PinToken = result.PinToken
+		resp.PinSet = &pinSet
+	} else if result.AccessToken != "" {
+		resp.AccessToken = result.AccessToken
+		resp.RefreshToken = result.RefreshToken
 		resp.TokenType = "Bearer"
 	}
 	writeJSON(w, http.StatusOK, resp)

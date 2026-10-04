@@ -74,6 +74,29 @@ func (h *AdminHandlers) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type setLoginPinRequiredRequest struct {
+	Required bool `json:"required"`
+}
+
+// SetLoginPinRequired flips the account's PinRequiredAtLogin switch — see
+// Service.AdminSetLoginPinRequired's doc comment.
+func (h *AdminHandlers) SetLoginPinRequired(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var req setLoginPinRequiredRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	if err := h.svc.AdminSetLoginPinRequired(r.Context(), apiClientID, id, req.Required); err != nil {
+		writeAdminUserActionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ResetPin clears the account's PIN and revokes its trusted devices and
 // sessions — see Service.AdminResetPin's doc comment.
 func (h *AdminHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +160,7 @@ type userListItem struct {
 	IsActive              bool      `json:"is_active"`
 	EmailVerified         bool      `json:"email_verified"`
 	TwoFactorMethodChosen bool      `json:"two_factor_method_chosen"`
+	PinRequiredAtLogin    bool      `json:"pin_required_at_login"`
 	CreatedAt             time.Time `json:"created_at"`
 }
 
@@ -183,6 +207,7 @@ func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 			IsActive:              u.IsActive,
 			EmailVerified:         u.EmailVerified,
 			TwoFactorMethodChosen: u.TwoFactorMethodChosen,
+			PinRequiredAtLogin:    u.PinRequiredAtLogin,
 			CreatedAt:             u.CreatedAt,
 		})
 	}

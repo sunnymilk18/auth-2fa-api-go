@@ -69,11 +69,11 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 			SET password_hash = EXCLUDED.password_hash, username = EXCLUDED.username, rut = EXCLUDED.rut,
 				email_verified = FALSE, two_factor_method_chosen = FALSE, updated_at = now()
 			WHERE users.email_verified = FALSE
-		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, created_at, updated_at`
+		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, created_at, updated_at`
 
 	u := &User{}
 	err := r.pool.QueryRow(ctx, q, apiClientID, email, passwordHash, username, rut).Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEmailTaken
@@ -87,12 +87,12 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 	return u, nil
 }
 
-const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, created_at, updated_at"
+const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, created_at, updated_at"
 
 func scanUser(row pgx.Row) (*User, error) {
 	u := &User{}
 	err := row.Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -217,7 +217,7 @@ func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, of
 	for rows.Next() {
 		u := &User{}
 		if err := rows.Scan(
-			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.CreatedAt, &u.UpdatedAt,
+			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
 			&total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning user row: %w", err)
@@ -332,6 +332,23 @@ func (r *Repository) MarkTwoFactorMethodChosen(ctx context.Context, id string) e
 	_, err := r.pool.Exec(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("marking two-factor method chosen: %w", err)
+	}
+	return nil
+}
+
+// SetPinRequiredAtLogin flips pin_required_at_login — see
+// auth.Service.AdminSetLoginPinRequired. Doesn't touch sessions, trusted
+// devices or the PIN itself either way: turning the switch on doesn't
+// revoke what already exists, and turning it off just stops asking for the
+// extra step going forward.
+func (r *Repository) SetPinRequiredAtLogin(ctx context.Context, id string, required bool) error {
+	const q = `UPDATE users SET pin_required_at_login = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, required)
+	if err != nil {
+		return fmt.Errorf("updating pin_required_at_login: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

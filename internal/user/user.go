@@ -31,6 +31,17 @@ type User struct {
 	// and stays true forever after (switching methods later, from an
 	// already-authenticated session, never resets it).
 	TwoFactorMethodChosen bool
-	CreatedAt             time.Time
-	UpdatedAt             time.Time
+	// PinRequiredAtLogin, when true, makes auth.Service.LoginStep2 (and
+	// every other second-factor completion: TOTP, push, the first-login
+	// TOTP setup) withhold tokens and instead hand back a pending
+	// LoginResult — the account must also pass auth.Service.LoginPinStep
+	// before it gets a token pair. Go itself has no notion of why: this is
+	// just a switch a consuming system's own admin panel manages via
+	// PUT /system-admin/users/{id}/login-pin-required, for whichever of its
+	// own accounts it decides needs the extra step (e.g. its superadmins).
+	// Defaults false — every account behaves exactly as before this field
+	// existed until something explicitly turns it on.
+	PinRequiredAtLogin bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }

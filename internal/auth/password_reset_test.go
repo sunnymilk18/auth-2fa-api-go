@@ -166,7 +166,7 @@ func TestPasswordReset_RevokesExistingSessions(t *testing.T) {
 	}
 	otpSent, _ := mailer.Last()
 	otpCode := testutil.ExtractOTPCode(otpSent.Body)
-	_, refreshTok, err := svc.LoginStep2(t.Context(), loginToken, otpCode)
+	_, refreshTok, err := loginStep2Tokens(t, svc, loginToken, otpCode)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestPasswordReset_RevokesTrustedDevices(t *testing.T) {
 	}
 	otpSent, _ := mailer.Last()
 	otpCode := testutil.ExtractOTPCode(otpSent.Body)
-	access, _, err := svc.LoginStep2(t.Context(), loginToken, otpCode)
+	access, _, err := loginStep2Tokens(t, svc, loginToken, otpCode)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}

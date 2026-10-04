@@ -124,7 +124,9 @@ func run(logger *slog.Logger) error {
 	// expired on its own anyway — see AccessRevocationStore's doc comment.
 	accessRevocation := auth.NewAccessRevocationStore(rdb, cfg.AccessTokenTTL)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, changeEmailStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, cfg.ChangeEmailTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation, apiClientSvc, cfg.PanelBaseURL)
+	loginPinStore := auth.NewPinLoginStore(rdb, cfg.LoginPinTTL)
+
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, changeEmailStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, cfg.ChangeEmailTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation, apiClientSvc, cfg.PanelBaseURL, loginPinStore)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op

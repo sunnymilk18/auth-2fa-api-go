@@ -666,7 +666,7 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	}
 	sent, _ := mailer.Last()
 	code := testutil.ExtractOTPCode(sent.Body)
-	access, _, err := svc.LoginStep2(t.Context(), loginToken, code)
+	access, _, err := loginStep2Tokens(t, svc, loginToken, code)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -1034,7 +1034,7 @@ func mustRegisterAndLogin(t *testing.T, svc *auth.Service, tokens *auth.TokenMan
 	}
 	sent, _ := mailer.Last()
 	code := testutil.ExtractOTPCode(sent.Body)
-	access, _, err := svc.LoginStep2(t.Context(), loginToken, code)
+	access, _, err := loginStep2Tokens(t, svc, loginToken, code)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}

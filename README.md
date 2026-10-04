@@ -37,7 +37,7 @@ Todas las rutas `/auth/*` requieren el header `X-API-Key` (ver [Multi-tenant](#m
    - **Primer login de la cuenta** (y solo si el servidor tiene `TOTP_ENCRYPTION_KEY` configurada — ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional)): no manda ningún código todavía. La respuesta trae `needs_2fa_setup: true` + un `login_token` — el cliente le muestra al usuario la elección ("¿correo o app autenticadora?") y sigue por uno de los dos caminos descritos ahí. Esto pasa una sola vez por cuenta.
    - **Cualquier otro caso** (ya eligió método antes, o el servidor no tiene TOTP configurada): genera un código OTP, lo guarda (hasheado) en Redis con expiración, lo envía por correo y devuelve `login_token` (`needs_2fa_setup: false`) — el comportamiento de siempre.
    - **Además**, si la cuenta tiene un dispositivo con aprobación por notificación push habilitada (ver [Aprobación por notificación push](#aprobación-por-notificación-push-opcional) más abajo), la respuesta también trae `push_approval_offered: true` — el cliente puede hacer polling de `GET /auth/login/push-status` con ese mismo `login_token` y dejar que el usuario apruebe desde el celular. **A diferencia de TOTP, en este caso el código NO se manda por correo todavía** — mismo criterio que sistemas como Microsoft Authenticator o Duo: push es el desafío por defecto, el correo queda como respaldo bajo demanda (`POST /auth/login/request-email-code`), no algo que se dispara en cada login tenga o no sentido. Nunca junto con `needs_2fa_setup: true` — recién en el primer login no hay ningún dispositivo emparejado todavía.
-3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token`. El mismo endpoint sirve tanto si la cuenta usa el código por correo como si activó una app autenticadora (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional) más abajo) — el cliente no necesita saber cuál de los dos aplica, el paso 2 ya decide eso por dentro.
+3. `POST /auth/verify-otp` — recibe `login_token` + `code`. Si coincide, emite `access_token` + `refresh_token` — **salvo que la cuenta tenga activo el PIN obligatorio de login** (ver más abajo), en cuyo caso no emite tokens todavía: responde `{"pin_required": true, "pin_token": "...", "pin_set": true|false}` y el cliente debe completar `POST /auth/login/pin` antes de tener una sesión. El mismo endpoint sirve tanto si la cuenta usa el código por correo como si activó una app autenticadora (ver [Verificación por app autenticadora](#verificación-por-app-autenticadora-totp-opcional) más abajo) — el cliente no necesita saber cuál de los dos aplica, el paso 2 ya decide eso por dentro.
    - **"No recibí el código"**: `POST /auth/login/resend-code` con el mismo `login_token` reenvía un código nuevo por correo (invalida el anterior) para el caso normal del paso 2 (sin push). Siempre disponible, a diferencia de `/auth/login/request-email-code` (que necesita una sesión de push) — no depende de ninguna variable opcional. Para una cuenta con TOTP no hay nada que reenviar (el código sale de la app del usuario, no del servidor): devuelve `409`.
 4. `POST /auth/refresh` — recibe `refresh_token` válido, emite un nuevo par de tokens (rotación).
 5. `POST /auth/logout` — revoca un `refresh_token`.
@@ -59,6 +59,23 @@ La confianza del dispositivo dura 30 días desde el último uso (ventana desliza
 - `GET /me` incluye `pin_set: boolean`.
 
 Un único contador de intentos fallidos por cuenta (no por dispositivo) se comparte entre **todos** los usos del PIN — cambiarlo, verificarlo, registrar o loguear un dispositivo: `PIN_MAX_FAILED_ATTEMPTS` (default 5) fallos seguidos bloquean el PIN por `PIN_LOCK_MINUTES` (default 15) — durante el bloqueo, hasta el PIN correcto responde bloqueado, y no se vuelve a contar ningún intento hasta que pase. El intento se reserva de forma atómica (`UPDATE ... RETURNING`, mismo patrón que `RefreshRepository.ConsumeIfValid`) **antes** de comparar el PIN — sin eso, una ráfaga de intentos simultáneos podría colarse: cada uno leería "no bloqueado" y compararía su propio PIN antes de que cualquiera contara contra el límite, así que el presupuesto real por ráfaga terminaría siendo la cantidad de intentos simultáneos, no `PIN_MAX_FAILED_ATTEMPTS`. Las rutas de PIN usan una convención de error aditiva, `{"error": "...", "code": "..."}` (`pin_invalid` con `attempts_left`, `pin_locked` con `retry_after_seconds` vía `423`, `pin_not_set` vía `409`, `pin_invalid_format` vía `400`, `device_not_trusted` vía `401`) — un PIN incorrecto nunca responde `401`, ya que los clientes ya interpretan ese código como "el access token venció, renovar y reintentar".
+
+### PIN obligatorio al final del login (opcional, por cuenta)
+
+Pensado para paneles de administración que quieren que ciertas cuentas (ej. sus propios superadmins) tengan que confirmar el PIN de cuenta además de password + segundo factor, antes de recibir tokens — Go en sí no conoce roles ni por qué una cuenta lo necesita, es solo un interruptor que un sistema consumidor (su propio panel) sincroniza sobre la cuenta.
+
+- `PUT /system-admin/users/{id}/login-pin-required` (`X-System-Admin-Token`, o su espejo sin acotar `/admin/users/{id}/login-pin-required` con `X-Admin-Token`) — recibe `{"required": true|false}`, responde `204`. `404` si el usuario no existe (o pertenece a otro tenant). Activarlo no revoca nada existente (ni sesiones ni dispositivos de confianza) — solo afecta logins nuevos, desde ese momento. `GET /system-admin/users` (y su espejo `/admin/users`) incluye `pin_required_at_login` en cada cuenta de la lista, para que el panel pueda reconciliar su propio estado.
+- Con el interruptor activo, **ninguna vía de login entrega tokens sin pasar por el paso del PIN**: ni el código por correo, ni TOTP, ni la aprobación por notificación push, ni el primer login eligiendo TOTP como método. El paso 2 (`/auth/verify-otp`, `/auth/totp/confirm` en su modo de primer login, `/auth/login/push-status` una vez aprobado) responde `{"pin_required": true, "pin_token": "...", "pin_set": true|false}` en vez de tokens. El atajo de dispositivo de confianza (`/auth/devices/login`) queda directamente desactivado para estas cuentas (responde `403` con `code: "login_pin_step_required"`) — nunca pasó por un segundo factor, así que no puede sustituir este paso.
+- `POST /auth/login/pin` (público, solo `X-API-Key`) — recibe `{"pin_token": "...", "pin": "123456"}` y completa el login, emitiendo `access_token`/`refresh_token` normales. Si la cuenta todavía no tiene PIN (`pin_set: false` en la respuesta anterior), se agrega `"create": true` al cuerpo para crearlo en el mismo paso (misma validación de formato que crear el PIN por las vías de siempre). Un PIN incorrecto usa la misma convención aditiva `{"error": "...", "code": "..."}` que el resto de las rutas de PIN (`pin_invalid` con `attempts_left`, `pin_locked` con `retry_after_seconds`) — los intentos fallidos de este paso cuentan contra el mismo bloqueo compartido de la cuenta, no uno aparte. `pin_token` dura pocos minutos (`LOGIN_PIN_TTL`, default 5 minutos) y es de un solo uso **solo al tener éxito** — un PIN incorrecto no lo consume, se puede reintentar con el mismo token hasta el límite de intentos. Un `pin_token` ya usado, vencido o inexistente responde `401`.
+- Recuperación de contraseña y corrección de correo nunca emiten tokens por sí mismas (la cuenta igual tiene que loguear después, donde este paso ya aplica) — no necesitan ningún cambio aparte.
+
+```bash
+curl -X PUT https://tu-api/system-admin/users/<id>/login-pin-required -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY" \
+  -d '{"required":true}'
+
+curl -X POST https://tu-api/auth/login/pin -H "X-API-Key: $API_KEY" \
+  -d '{"pin_token":"<de la respuesta anterior>","pin":"123456"}'
+```
 
 ### Recuperación de contraseña
 
@@ -252,6 +269,11 @@ curl -X POST https://tu-api/admin/users/<id>/unban            -H "X-Admin-Token:
 curl -X POST https://tu-api/admin/users/<id>/disable-totp     -H "X-Admin-Token: $ADMIN_API_TOKEN"
 curl -X POST https://tu-api/admin/users/<id>/revoke-sessions  -H "X-Admin-Token: $ADMIN_API_TOKEN"
 curl -X POST https://tu-api/admin/users/<id>/reset-pin        -H "X-Admin-Token: $ADMIN_API_TOKEN"
+
+# Exigir el paso de PIN al final del login para esta cuenta (ver "PIN
+# obligatorio al final del login" más abajo).
+curl -X PUT https://tu-api/admin/users/<id>/login-pin-required -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -d '{"required":true}'
 
 # Corregir el correo de una cuenta (para quien se equivocó al escribirlo al
 # registrarse y, como consecuencia, nunca pudo verificarlo ni recuperar su

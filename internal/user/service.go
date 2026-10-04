@@ -290,6 +290,12 @@ func (s *Service) Unban(ctx context.Context, userID string) error {
 	return s.repo.SetActive(ctx, userID, true)
 }
 
+// SetLoginPinRequired is a thin passthrough — see
+// Repository.SetPinRequiredAtLogin's doc comment.
+func (s *Service) SetLoginPinRequired(ctx context.Context, userID string, required bool) error {
+	return s.repo.SetPinRequiredAtLogin(ctx, userID, required)
+}
+
 // defaultPageSize and maxPageSize bound ListByAPIClient's page parameter —
 // see its doc comment.
 const (

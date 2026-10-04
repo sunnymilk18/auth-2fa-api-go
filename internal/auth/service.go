@@ -47,6 +47,15 @@ type Service struct {
 	apiClients   *apiclient.Service
 	panelBaseURL string
 
+	// loginPin backs the mandatory-PIN-after-second-factor step (see
+	// LoginResult, LoginPinStep, AdminSetLoginPinRequired) — nilable the
+	// same way accessRevocation is: every account defaults to
+	// PinRequiredAtLogin == false, so a test or deployment that never
+	// touches that feature can leave this nil and nothing reaches it (the
+	// gate itself only ever calls into loginPin once it already confirmed
+	// the account's flag is set).
+	loginPin *PinLoginStore
+
 	// totp/totpLogin are both nil when TOTP_ENCRYPTION_KEY isn't configured
 	// (see cmd/api/main.go) — the feature is opt-in at the deployment level,
 	// same as ADMIN_API_TOKEN gating /admin/*. Always constructed together
@@ -122,6 +131,7 @@ func NewService(
 	accessRevocation *AccessRevocationStore,
 	apiClients *apiclient.Service,
 	panelBaseURL string,
+	loginPin *PinLoginStore,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -152,6 +162,7 @@ func NewService(
 		accessRevocation:     accessRevocation,
 		apiClients:           apiClients,
 		panelBaseURL:         panelBaseURL,
+		loginPin:             loginPin,
 	}
 }
 
@@ -423,11 +434,11 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 // either way; which verification path applies is decided here, by which
 // store recognizes loginToken (see LoginStep1), not by anything the client
 // has to specify.
-func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (accessToken, refreshToken string, err error) {
+func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (LoginResult, error) {
 	if s.totpLogin != nil {
 		sess, found, err := s.totpLogin.Peek(ctx, loginToken)
 		if err != nil {
-			return "", "", err
+			return LoginResult{}, err
 		}
 		if found {
 			return s.verifyTOTPLogin(ctx, loginToken, sess, code)
@@ -436,9 +447,9 @@ func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (acce
 
 	userID, apiClientID, email, err := s.otp.VerifyCode(ctx, loginToken, code)
 	if err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
-	return s.issueTokenPair(ctx, userID, apiClientID, email)
+	return s.finishLogin(ctx, userID, apiClientID, email)
 }
 
 // ResendLoginOTP re-issues a fresh code under the same login_token for a
@@ -501,6 +512,118 @@ func (s *Service) issueTokenPair(ctx context.Context, userID, apiClientID, email
 		return "", "", err
 	}
 	return accessToken, refreshToken, nil
+}
+
+// LoginResult is what a login's final step (LoginStep2, PollPushLogin,
+// ConfirmTOTPEnrollmentAndLogin, LoginPinStep) resolves to. Exactly one of
+// two shapes:
+//   - PinRequired == false: AccessToken/RefreshToken carry a real token
+//     pair, same as before this feature existed.
+//   - PinRequired == true: no tokens — the account has PinRequiredAtLogin
+//     set, so password + second factor alone isn't enough. PinToken is a
+//     short-lived, single-use token for LoginPinStep; PinSet reports
+//     whether the account already has an account PIN (false means
+//     LoginPinStep's caller must pass create: true to set one).
+type LoginResult struct {
+	AccessToken  string
+	RefreshToken string
+	PinRequired  bool
+	PinToken     string
+	PinSet       bool
+}
+
+// finishLogin is the single point every login path funnels through once
+// password + whichever second factor already checked out — see
+// LoginResult's doc comment for the two shapes this can resolve to. Reads
+// the account fresh (never from a cached pendingLoginSession, which never
+// carries PinRequiredAtLogin) specifically to make this decision.
+func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email string) (LoginResult, error) {
+	u, err := s.users.FindByID(ctx, userID)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if u.PinRequiredAtLogin {
+		pinToken, err := s.loginPin.StartSession(ctx, userID, apiClientID, email)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		hasPin, err := s.users.HasPin(ctx, userID)
+		if err != nil {
+			return LoginResult{}, err
+		}
+		return LoginResult{PinRequired: true, PinToken: pinToken, PinSet: hasPin}, nil
+	}
+
+	accessToken, refreshToken, err := s.issueTokenPair(ctx, userID, apiClientID, email)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	return LoginResult{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+// LoginPinStep completes a login that finishLogin reported PinRequired for
+// — the last step before tokens are issued for an account with
+// PinRequiredAtLogin set. pinToken is single-use ONLY on success: a wrong
+// PIN leaves the session alone (same as a wrong email-OTP code doesn't burn
+// login_token — see LoginStep2), so the client can retry with the same
+// pinToken up to the account PIN's own shared lockout
+// (user.Service.VerifyPin) — this step's failed attempts count against
+// that same counter, not a separate one.
+//
+// create selects which of the account PIN's two states pinToken's holder
+// is in, exactly like RegisterDevice's own pin parameter
+// (user.Service.EnsurePin): false verifies pin against an existing account
+// PIN (the common case); true means the account has none yet (LoginResult.
+// PinSet was false) and pin becomes its new one — same format validation as
+// every other PIN creation. Passing create: true for an account that
+// already has a PIN just verifies against it instead, same dual-meaning
+// reuse EnsurePin already has.
+func (s *Service) LoginPinStep(ctx context.Context, pinToken, pin string, create bool) (LoginResult, error) {
+	sess, found, err := s.loginPin.Peek(ctx, pinToken)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if !found {
+		return LoginResult{}, ErrLoginSessionNotFound
+	}
+
+	var pinErr error
+	if create {
+		pinErr = s.users.EnsurePin(ctx, sess.UserID, pin)
+	} else {
+		pinErr = s.users.VerifyPin(ctx, sess.UserID, pin)
+	}
+	if pinErr != nil {
+		s.logger.Warn("login pin step failed", "user_id", sess.UserID, "error", pinErr)
+		return LoginResult{}, pinErr
+	}
+
+	if err := s.loginPin.Consume(ctx, pinToken); err != nil {
+		return LoginResult{}, err
+	}
+	accessToken, refreshToken, err := s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	if err != nil {
+		return LoginResult{}, err
+	}
+	s.logger.Info("login pin step succeeded", "user_id", sess.UserID)
+	return LoginResult{AccessToken: accessToken, RefreshToken: refreshToken}, nil
+}
+
+// AdminSetLoginPinRequired flips PinRequiredAtLogin for userID (scoped to
+// apiClientID — see checkUserScope). Doesn't revoke anything either way:
+// turning it on doesn't touch existing sessions/trusted devices (see
+// finishLogin — only a NEW login, from here on, goes through the extra
+// step), and turning it off just stops asking for it going forward.
+func (s *Service) AdminSetLoginPinRequired(ctx context.Context, apiClientID, userID string, required bool) error {
+	u, err := s.checkUserScope(ctx, apiClientID, userID)
+	if err != nil {
+		return err
+	}
+	if err := s.users.SetLoginPinRequired(ctx, userID, required); err != nil {
+		return err
+	}
+	s.logger.Info("login pin requirement changed", "user_id", userID, "api_client_id", u.APIClientID, "required", required)
+	return nil
 }
 
 // Refresh validates a refresh token and issues a new access token, rotating
@@ -821,6 +944,16 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 	if !u.IsActive {
 		return "", "", "", ErrAccountBanned
 	}
+	// The trusted-device shortcut replaces password+second-factor entirely
+	// with device possession + the account PIN — an account that requires
+	// the PIN step ON TOP OF a full password+second-factor login can't be
+	// satisfied by this path at all, since no second factor was ever
+	// checked here. Same "no path around it" rule as finishLogin: the
+	// client has to fall back to the regular /auth/login flow, which does
+	// enforce the step (see LoginResult).
+	if u.PinRequiredAtLogin {
+		return "", "", "", ErrLoginPinStepRequired
+	}
 
 	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.APIClientID, u.Email)
 	if err != nil {
@@ -1011,3 +1144,9 @@ var ErrUnauthorized = errors.New("unauthorized")
 // trusted-device shortcut, which bypasses password+OTP entirely and so
 // never went through that check on its own.
 var ErrAccountBanned = errors.New("account is banned")
+
+// ErrLoginPinStepRequired is returned by DeviceLogin when the account
+// behind an otherwise-valid device_token+pin also has PinRequiredAtLogin
+// set — see DeviceLogin's own doc comment for why that shortcut can't
+// satisfy this account's requirement on its own.
+var ErrLoginPinStepRequired = errors.New("this account requires the full login flow (password + second factor + pin)")

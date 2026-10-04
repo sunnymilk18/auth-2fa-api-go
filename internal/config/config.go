@@ -109,6 +109,13 @@ type Config struct {
 	PinMaxFailedAttempts int
 	PinLockMinutes       int
 
+	// LoginPinTTL bounds how long a pin_token from the mandatory
+	// login-pin step (see auth.Service.LoginResult/LoginPinStep,
+	// PinRequiredAtLogin) stays valid — short, like a login_token: a few
+	// minutes is plenty for someone to type their PIN right after
+	// finishing the second factor.
+	LoginPinTTL time.Duration
+
 	// Resend (https://resend.com) — HTTP API, not SMTP, so it isn't at
 	// risk of a host blocking/filtering an outbound SMTP port (this
 	// project hit exactly that on Render). ResendFrom defaults to
@@ -263,6 +270,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.PinLockMinutes, err = getEnvInt("PIN_LOCK_MINUTES", 15); err != nil {
+		return nil, err
+	}
+	if cfg.LoginPinTTL, err = getEnvDuration("LOGIN_PIN_TTL", 5*time.Minute); err != nil {
 		return nil, err
 	}
 	if cfg.PushLoginTTL, err = getEnvDuration("PUSH_LOGIN_TTL", 60*time.Second); err != nil {

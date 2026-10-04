@@ -72,44 +72,44 @@ func (s *Service) SendLoginEmailCode(ctx context.Context, loginToken string) err
 // which loginAttempts already tracks separately in LoginStep1. Called only
 // from LoginStep2 (service.go), once it already confirmed loginToken
 // belongs to a pending TOTP login, not the email-OTP flow.
-func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess pendingLoginSession, code string) (accessToken, refreshToken string, err error) {
+func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess pendingLoginSession, code string) (LoginResult, error) {
 	lockoutKey := "totp:" + loginToken
 
 	locked, _, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
 	if err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
 	if locked {
 		_ = s.totpLogin.Consume(ctx, loginToken)
-		return "", "", ErrTooManyAttempts
+		return LoginResult{}, ErrTooManyAttempts
 	}
 
 	encryptedSecret, enabled, err := s.users.GetTOTPSecret(ctx, sess.UserID)
 	if err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
 	if !enabled || encryptedSecret == "" {
 		// The account disabled TOTP after LoginStep1 issued this token
 		// (e.g. from another device/tab) — nothing left to verify against.
 		_ = s.totpLogin.Consume(ctx, loginToken)
-		return "", "", ErrInvalidTOTPCode
+		return LoginResult{}, ErrInvalidTOTPCode
 	}
 
 	secret, err := s.totp.Decrypt(encryptedSecret)
 	if err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
 
 	if !s.totp.ValidateCode(secret, code) {
 		_ = s.loginAttempts.RecordFailure(ctx, sess.APIClientID, lockoutKey)
-		return "", "", ErrInvalidTOTPCode
+		return LoginResult{}, ErrInvalidTOTPCode
 	}
 
 	_ = s.loginAttempts.Reset(ctx, sess.APIClientID, lockoutKey)
 	if err := s.totpLogin.Consume(ctx, loginToken); err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
-	return s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
 }
 
 // StartTOTPEnrollment generates a new TOTP secret for the already
@@ -199,25 +199,25 @@ func (s *Service) PeekTwoFactorSetup(ctx context.Context, loginToken string) (us
 // login right there, issuing a token pair directly. There's no separate
 // VerifyOTP step for this path: confirming the code both activates TOTP and
 // finishes the login in one call.
-func (s *Service) ConfirmTOTPEnrollmentAndLogin(ctx context.Context, loginToken, code string) (accessToken, refreshToken string, err error) {
+func (s *Service) ConfirmTOTPEnrollmentAndLogin(ctx context.Context, loginToken, code string) (LoginResult, error) {
 	if s.twoFactorSetup == nil {
-		return "", "", ErrTOTPNotConfigured
+		return LoginResult{}, ErrTOTPNotConfigured
 	}
 	sess, found, err := s.twoFactorSetup.Peek(ctx, loginToken)
 	if err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
 	if !found {
-		return "", "", ErrLoginSessionNotFound
+		return LoginResult{}, ErrLoginSessionNotFound
 	}
 
 	if err := s.ConfirmTOTPEnrollment(ctx, sess.UserID, code); err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
 	if err := s.twoFactorSetup.Consume(ctx, loginToken); err != nil {
-		return "", "", err
+		return LoginResult{}, err
 	}
-	return s.issueTokenPair(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
 }
 
 // DisableTOTP turns the TOTP second factor off — login falls back to the

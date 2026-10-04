@@ -151,6 +151,9 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	pinVerifyLimiter := middleware.NewRateLimiter(rdb, "pin-verify", 30, 15*time.Minute).AttachBlacklist(blacklist)
 	pinSetLimiter := middleware.NewRateLimiter(rdb, "pin-set", 30, 15*time.Minute).AttachBlacklist(blacklist)
 	deviceRegisterLimiter := middleware.NewRateLimiter(rdb, "device-register", 30, 15*time.Minute).AttachBlacklist(blacklist)
+	// Same reasoning as pinVerifyLimiter — a request volume bound on top of
+	// the account-level PIN lockout, not a replacement for it.
+	loginPinLimiter := middleware.NewRateLimiter(rdb, "login-pin", 30, 15*time.Minute).AttachBlacklist(blacklist)
 
 	r.Route("/auth", func(r chi.Router) {
 		// Every /auth/* call must identify which consuming system it's from —
@@ -160,6 +163,13 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.With(registerLimiter.Middleware).Post("/register", authHandlers.Register)
 		r.With(loginLimiter.Middleware).Post("/login", authHandlers.Login)
 		r.With(otpLimiter.Middleware).Post("/verify-otp", authHandlers.VerifyOTP)
+
+		// Completes a login VerifyOTP/ConfirmTOTP/PushLoginStatus reported
+		// pin_required for (see LoginResult) — an account with
+		// PinRequiredAtLogin gets no tokens from any of those until this
+		// also succeeds. Public like them (X-API-Key only, no Bearer yet).
+		r.With(loginPinLimiter.Middleware).Post("/login/pin", authHandlers.LoginPin)
+
 		r.With(refreshLimiter.Middleware).Post("/refresh", authHandlers.Refresh)
 		r.Post("/logout", authHandlers.Logout)
 
@@ -307,6 +317,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
 			r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 			r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
+			r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a
@@ -350,6 +361,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
 		r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 		r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
+		r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
 	})
 
 	r.Group(func(r chi.Router) {

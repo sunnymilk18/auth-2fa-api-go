@@ -42,7 +42,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
 
@@ -490,7 +490,7 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
@@ -548,7 +548,7 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
@@ -623,6 +623,101 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 	}
 }
 
+// TestSystemAdminSetLoginPinRequired_ScopedToTenant covers
+// PUT /system-admin/users/{id}/login-pin-required: it flips
+// PinRequiredAtLogin for the right account, 404s for a user that belongs
+// to a different tenant's key (same isolation rule as every other Admin*
+// route), and 404s for an id that doesn't exist at all.
+func TestSystemAdminSetLoginPinRequired_ScopedToTenant(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
+
+	clientA, _, err := apiClients.Create(t.Context(), "login-pin-required-a-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client A: %v", err)
+	}
+	clientB, _, err := apiClients.Create(t.Context(), "login-pin-required-b-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client B: %v", err)
+	}
+	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client A: %v", err)
+	}
+	systemAdminKeyB, err := apiClients.RotateSystemAdminKey(t.Context(), clientB.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client B: %v", err)
+	}
+
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	u, err := svc.Register(t.Context(), clientA.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+
+	putRequired := func(id, key string, required bool) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]bool{"required": required})
+		req := httptest.NewRequest(http.MethodPut, "/system-admin/users/"+id+"/login-pin-required", bytes.NewReader(body))
+		req.Header.Set("X-System-Admin-Token", key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A second tenant's scoped key can't touch the first tenant's user.
+	crossRec := putRequired(u.ID, systemAdminKeyB, true)
+	if crossRec.Code != http.StatusNotFound {
+		t.Fatalf("set login-pin-required from another tenant: status = %d, want %d", crossRec.Code, http.StatusNotFound)
+	}
+
+	// Unknown id -> 404.
+	notFoundRec := putRequired("00000000-0000-0000-0000-000000000000", systemAdminKeyA, true)
+	if notFoundRec.Code != http.StatusNotFound {
+		t.Fatalf("set login-pin-required for unknown id: status = %d, want %d", notFoundRec.Code, http.StatusNotFound)
+	}
+
+	// The real tenant's key works, and it actually flips the flag.
+	onRec := putRequired(u.ID, systemAdminKeyA, true)
+	if onRec.Code != http.StatusNoContent {
+		t.Fatalf("set login-pin-required true: status = %d, body = %s", onRec.Code, onRec.Body.String())
+	}
+	updated, err := users.FindByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("FindByID after enabling: %v", err)
+	}
+	if !updated.PinRequiredAtLogin {
+		t.Fatal("PinRequiredAtLogin after enabling = false, want true")
+	}
+
+	offRec := putRequired(u.ID, systemAdminKeyA, false)
+	if offRec.Code != http.StatusNoContent {
+		t.Fatalf("set login-pin-required false: status = %d, body = %s", offRec.Code, offRec.Body.String())
+	}
+	updated, err = users.FindByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("FindByID after disabling: %v", err)
+	}
+	if updated.PinRequiredAtLogin {
+		t.Fatal("PinRequiredAtLogin after disabling = true, want false")
+	}
+}
+
 // TestSystemAdminChangeEmail_EndToEndAndScopedToTenant covers both new
 // routes together: the admin starts the correction (POST .../change-email,
 // system-admin-token-gated, scoped to its own tenant like reset-pin above),
@@ -644,7 +739,7 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
@@ -739,7 +834,7 @@ func TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured(t *testing.T) {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil, apiClients, "",
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil, apiClients, "", nil,
 	)
 
 	clientWithPanel, _, err := apiClients.Create(t.Context(), "change-email-panel-"+testutil.UniqueSuffix(t))

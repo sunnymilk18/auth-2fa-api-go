@@ -243,6 +243,57 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /auth/login/pin:
+    post:
+      tags: [auth]
+      summary: Completa un login pendiente del PIN obligatorio
+      description: >
+        Solo aplica cuando VerifyOTP, ConfirmTOTP (en su modo de primer
+        login) o PushLoginStatus devolvieron pin_required: true — ver
+        PUT /system-admin/users/{id}/login-pin-required. Un PIN incorrecto
+        no consume pin_token (se puede reintentar hasta el límite de
+        intentos compartido con /auth/pin/verify); solo se consume al
+        tener éxito.
+      security:
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginPinRequest"
+      responses:
+        "200":
+          description: PIN válido (o creado), tokens emitidos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "400":
+          description: Faltan campos, o formato de PIN inválido (code pin_invalid_format)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: pin_token inexistente, ya usado o expirado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "403":
+          description: PIN incorrecto (code pin_invalid, con attempts_left)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "423":
+          description: PIN de la cuenta bloqueado temporalmente (code pin_locked, con retry_after_seconds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /auth/login/send-email-code:
     post:
       tags: [totp]
@@ -1406,6 +1457,48 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /system-admin/users/{id}/login-pin-required:
+    put:
+      tags: [system-admin]
+      summary: Exige (o deja de exigir) el PIN obligatorio al final del login
+      description: >
+        No revoca nada existente al activarlo — solo afecta logins nuevos
+        desde ese momento. Go no sabe por qué una cuenta lo necesita, es un
+        interruptor que tu propio panel sincroniza (ver "PIN obligatorio al
+        final del login" en el README).
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetLoginPinRequiredRequest"
+      responses:
+        "204":
+          description: Interruptor actualizado
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
   /system-admin/users/{id}/change-email:
     post:
       tags: [system-admin]
@@ -1682,6 +1775,13 @@ components:
 
     TokenResponse:
       type: object
+      description: >
+        access_token/refresh_token/token_type vienen presentes salvo que la
+        cuenta tenga el PIN obligatorio de login activo (ver
+        PUT /system-admin/users/{id}/login-pin-required) — en ese caso
+        ninguno de los tres viene presente, y en su lugar aparecen
+        pin_required/pin_token/pin_set: el cliente debe completar
+        POST /auth/login/pin con ese pin_token antes de tener tokens.
       properties:
         access_token:
           type: string
@@ -1692,6 +1792,18 @@ components:
         token_type:
           type: string
           example: Bearer
+        pin_required:
+          type: boolean
+          description: Presente y true solo cuando la cuenta requiere el paso de PIN descrito arriba.
+        pin_token:
+          type: string
+          description: Token de un solo uso para POST /auth/login/pin — solo presente junto con pin_required.
+        pin_set:
+          type: boolean
+          description: >
+            Solo presente junto con pin_required. false significa que la
+            cuenta todavía no tiene PIN propio: POST /auth/login/pin debe
+            incluir "create": true para crearlo en el mismo paso.
 
     UserResponse:
       type: object
@@ -1739,6 +1851,11 @@ components:
           description: >
             false para una cuenta que nunca completó su primer login — ve
             User.TwoFactorMethodChosen en el código para más contexto.
+        pin_required_at_login:
+          type: boolean
+          description: >
+            Ver PUT /system-admin/users/{id}/login-pin-required — incluido
+            acá para que un panel pueda reconciliar su propio estado.
         created_at:
           type: string
           format: date-time
@@ -1827,6 +1944,30 @@ components:
         pin:
           type: string
           example: "123456"
+
+    LoginPinRequest:
+      type: object
+      required: [pin_token, pin]
+      properties:
+        pin_token:
+          type: string
+          description: El pin_token de un TokenResponse con pin_required true.
+        pin:
+          type: string
+          example: "123456"
+        create:
+          type: boolean
+          description: >
+            true cuando el TokenResponse anterior trajo pin_set: false —
+            crea el PIN de la cuenta con este valor en el mismo paso, en
+            vez de verificarlo contra uno existente.
+
+    SetLoginPinRequiredRequest:
+      type: object
+      required: [required]
+      properties:
+        required:
+          type: boolean
 
     RegisterDeviceResponse:
       type: object
