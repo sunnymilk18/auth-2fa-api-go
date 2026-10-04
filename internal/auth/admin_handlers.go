@@ -86,6 +86,41 @@ func (h *AdminHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type changeEmailRequest struct {
+	NewEmail string `json:"new_email"`
+}
+
+// ChangeEmail starts an email correction — see Service.AdminChangeEmail's
+// doc comment for why this only sends a code and never changes anything
+// itself.
+func (h *AdminHandlers) ChangeEmail(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var req changeEmailRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.NewEmail == "" {
+		writeError(w, http.StatusBadRequest, "new_email es obligatorio")
+		return
+	}
+
+	if err := h.svc.AdminChangeEmail(r.Context(), apiClientID, id, req.NewEmail); err != nil {
+		switch {
+		case errors.Is(err, user.ErrInvalidEmail):
+			writeError(w, http.StatusBadRequest, "el correo no tiene un formato válido")
+		case errors.Is(err, user.ErrEmailTaken):
+			writeError(w, http.StatusConflict, "ese correo ya está en uso en este sistema")
+		default:
+			writeAdminUserActionError(w, err)
+		}
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // userListItem is deliberately a narrow projection of user.User — no
 // PasswordHash, no TOTP secret (it isn't even on user.User — see its doc
 // comment), same "never leaves the server" rule the rest of this package

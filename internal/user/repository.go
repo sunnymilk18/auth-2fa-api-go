@@ -33,6 +33,8 @@ func uniqueViolationErr(err error) error {
 		return ErrUsernameTaken
 	case "idx_users_api_client_rut":
 		return ErrRUTTaken
+	case "idx_users_api_client_email":
+		return ErrEmailTaken
 	default:
 		return err
 	}
@@ -453,6 +455,31 @@ func (r *Repository) ClearPin(ctx context.Context, id string) error {
 	_, err := r.pool.Exec(ctx, q, id)
 	if err != nil {
 		return fmt.Errorf("clearing pin: %w", err)
+	}
+	return nil
+}
+
+// UpdateEmail replaces id's email and marks it verified — used once an
+// admin-initiated email correction is confirmed (see auth.Service.
+// ConfirmChangeEmail): the account just proved control of the new address
+// by returning the code sent to it, so there's no reason to leave
+// email_verified false afterward — getting an account unstuck that could
+// never confirm its original, typo'd email is the whole point of that
+// flow. The unique index on (api_client_id, email) is the actual guard
+// against a race where someone else registered this email in the meantime
+// — mapped to ErrEmailTaken via uniqueViolationErr, same as Register's
+// username/rut conflicts.
+func (r *Repository) UpdateEmail(ctx context.Context, id, newEmail string) error {
+	const q = `UPDATE users SET email = $2, email_verified = TRUE, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, newEmail)
+	if err != nil {
+		if mapped := uniqueViolationErr(err); mapped != err {
+			return mapped
+		}
+		return fmt.Errorf("updating email: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

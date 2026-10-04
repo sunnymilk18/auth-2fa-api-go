@@ -87,7 +87,7 @@ func newTestRouter(t *testing.T) (router http.Handler, apiKey, accessToken strin
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, nil, nil, nil, nil, testLogger(), accessRevocation)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, testLogger(), accessRevocation)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
@@ -137,7 +137,7 @@ func newTestRouterWithChoice(t *testing.T) (router http.Handler, apiKey string, 
 	twoFactorSetup := auth.NewTwoFactorSetupStore(rdb, 5*time.Minute)
 	mailer = testutil.NewFakeMailer()
 
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, testLogger(), nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, testLogger(), nil)
 	handlers := auth.NewHandlers(svc)
 
 	r := httpserver.NewRouter(handlers, svc, tokens, nil, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", true, false, testLogger())
@@ -250,8 +250,9 @@ func brokenHealthRouter(t *testing.T, pgPool *pgxpool.Pool, rdb *redis.Client) h
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil,
 	)
 	handlers := auth.NewHandlers(svc)
 	return httpserver.NewRouter(handlers, svc, tokens, nil, users, pgPool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())

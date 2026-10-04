@@ -253,6 +253,13 @@ curl -X POST https://tu-api/admin/users/<id>/disable-totp     -H "X-Admin-Token:
 curl -X POST https://tu-api/admin/users/<id>/revoke-sessions  -H "X-Admin-Token: $ADMIN_API_TOKEN"
 curl -X POST https://tu-api/admin/users/<id>/reset-pin        -H "X-Admin-Token: $ADMIN_API_TOKEN"
 
+# Corregir el correo de una cuenta (para quien se equivocó al escribirlo al
+# registrarse y, como consecuencia, nunca pudo verificarlo ni recuperar su
+# contraseña). No cambia nada todavía: le manda un código al correo NUEVO —
+# ver "Corrección de correo" más abajo para cómo se confirma.
+curl -X POST https://tu-api/admin/users/<id>/change-email -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -d '{"new_email":"correo.correcto@example.com"}'
+
 # Listar cuentas de TODOS los sistemas a la vez (page/page_size/q — ver la sección
 # de listado más abajo para el detalle de estos parámetros). A diferencia de las
 # cuatro rutas de arriba, esta no requiere conocer el id de antemano — es la forma
@@ -286,9 +293,24 @@ curl -X POST https://tu-api/system-admin/users/<id>/unban           -H "X-System
 curl -X POST https://tu-api/system-admin/users/<id>/disable-totp    -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
 curl -X POST https://tu-api/system-admin/users/<id>/revoke-sessions -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
 curl -X POST https://tu-api/system-admin/users/<id>/reset-pin       -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+curl -X POST https://tu-api/system-admin/users/<id>/change-email    -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY" \
+  -d '{"new_email":"correo.correcto@example.com"}'
 ```
 
 Si `<id>` pertenece a otro sistema, la respuesta es `404` (no `403`) — indistinguible de un id que directamente no existe.
+
+### Corrección de correo
+
+Para una cuenta que se equivocó al escribir su correo al registrarse: nunca recibió el código de verificación, así que no puede loguear ni usar la recuperación de contraseña (ambos requieren un correo que funcione). `POST /system-admin/users/{id}/change-email` (o su versión sin acotar, `/admin/users/{id}/change-email`) inicia la corrección — **no cambia nada todavía**, solo valida el correo nuevo (formato y que no esté en uso en ese sistema) y le envía un código.
+
+El administrador **nunca ve ese código**. Quien lo confirma es la propia cuenta, con una ruta pública (solo `X-API-Key`, sin token de administrador ni sesión — la persona puede estar completamente bloqueada de la cuenta en este punto):
+
+```bash
+curl -X POST https://tu-api/auth/change-email/confirm -H "X-API-Key: $API_KEY" \
+  -d '{"email":"correo.correcto@example.com","code":"123456"}'
+```
+
+Al confirmarse: se aplica el cambio, se marca la cuenta como verificada (el problema que esto resuelve de raíz), y se revocan todas sus sesiones, refresh tokens y dispositivos de confianza — mismo criterio que un reset de contraseña. Solo puede haber un cambio pendiente por cuenta a la vez; pedir otro reemplaza al anterior, sin importar si apunta a un correo distinto.
 
 La misma credencial también sirve para listar las cuentas del tenant — la única ruta de este grupo sin `{id}`, ya que las cuatro de arriba solo actúan sobre una cuenta que ya se conoce por su id:
 

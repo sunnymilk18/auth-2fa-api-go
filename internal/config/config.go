@@ -71,6 +71,17 @@ type Config struct {
 	EmailVerificationCodeLength int
 	EmailVerificationMaxTries   int
 
+	// Admin-initiated email correction (POST /system-admin/users/{id}/
+	// change-email + the public POST /auth/change-email/confirm) — same
+	// short-numeric-code shape as the other two above, sent to the NEW
+	// email rather than the account's current one. TTL short like
+	// password reset (not a day like email verification): unlike a new
+	// signup, this is an admin acting right now on a known, specific
+	// problem, not something to leave pending indefinitely.
+	ChangeEmailTTL        time.Duration
+	ChangeEmailCodeLength int
+	ChangeEmailMaxTries   int
+
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
 	// account. A temporary throttle, not a permanent lockout — see
@@ -219,6 +230,15 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.EmailVerificationMaxTries, err = getEnvInt("EMAIL_VERIFICATION_MAX_TRIES", 5); err != nil {
+		return nil, err
+	}
+	if cfg.ChangeEmailTTL, err = getEnvDuration("CHANGE_EMAIL_TTL", time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.ChangeEmailCodeLength, err = getEnvInt("CHANGE_EMAIL_CODE_LENGTH", 6); err != nil {
+		return nil, err
+	}
+	if cfg.ChangeEmailMaxTries, err = getEnvInt("CHANGE_EMAIL_MAX_TRIES", 5); err != nil {
 		return nil, err
 	}
 	if cfg.LoginMaxFailedAttempts, err = getEnvInt("LOGIN_MAX_FAILED_ATTEMPTS", 10); err != nil {

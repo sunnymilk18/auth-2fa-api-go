@@ -38,8 +38,9 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
 	)
 	handlers := auth.NewHandlers(svc)
 
@@ -485,8 +486,9 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
@@ -542,8 +544,9 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
 		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
@@ -615,6 +618,102 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 	}
 	if rec := meReq(); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /me with the pre-reset access token: status = %d, want %d (sessions must be revoked too)", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestSystemAdminChangeEmail_EndToEndAndScopedToTenant covers both new
+// routes together: the admin starts the correction (POST .../change-email,
+// system-admin-token-gated, scoped to its own tenant like reset-pin above),
+// and the account itself confirms it (POST /auth/change-email/confirm, a
+// public route — no admin token, no Bearer session, just the API key and
+// the code that arrived at the new address).
+func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	mailer := testutil.NewFakeMailer()
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
+
+	clientA, apiKeyA, err := apiClients.Create(t.Context(), "change-email-a-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client A: %v", err)
+	}
+	clientB, _, err := apiClients.Create(t.Context(), "change-email-b-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client B: %v", err)
+	}
+	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client A: %v", err)
+	}
+	systemAdminKeyB, err := apiClients.RotateSystemAdminKey(t.Context(), clientB.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key for client B: %v", err)
+	}
+
+	oldEmail := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
+	u, err := svc.Register(t.Context(), clientA.ID, oldEmail, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+	newEmail := "fixed-" + testutil.UniqueSuffix(t) + "@example.com"
+
+	// A second tenant's scoped key can't touch the first tenant's user.
+	crossReq := httptest.NewRequest(http.MethodPost, "/system-admin/users/"+u.ID+"/change-email", bytes.NewBufferString(`{"new_email":"`+newEmail+`"}`))
+	crossReq.Header.Set("X-System-Admin-Token", systemAdminKeyB)
+	crossReq.Header.Set("Content-Type", "application/json")
+	crossRec := httptest.NewRecorder()
+	r.ServeHTTP(crossRec, crossReq)
+	if crossRec.Code != http.StatusNotFound {
+		t.Fatalf("change-email from another tenant: status = %d, want %d", crossRec.Code, http.StatusNotFound)
+	}
+
+	// The real tenant's key starts it.
+	startReq := httptest.NewRequest(http.MethodPost, "/system-admin/users/"+u.ID+"/change-email", bytes.NewBufferString(`{"new_email":"`+newEmail+`"}`))
+	startReq.Header.Set("X-System-Admin-Token", systemAdminKeyA)
+	startReq.Header.Set("Content-Type", "application/json")
+	startRec := httptest.NewRecorder()
+	r.ServeHTTP(startRec, startReq)
+	if startRec.Code != http.StatusNoContent {
+		t.Fatalf("change-email: status = %d, body = %s", startRec.Code, startRec.Body.String())
+	}
+
+	sent, ok := mailer.Last()
+	if !ok || sent.To != newEmail {
+		t.Fatalf("expected a code sent to %q, got %+v (ok=%v)", newEmail, sent, ok)
+	}
+	code := testutil.ExtractChangeEmailCode(sent.Body)
+
+	// The account confirms it itself — public route, API key only.
+	confirmRec := doRequest(r, http.MethodPost, "/auth/change-email/confirm", apiKeyA, "", map[string]string{
+		"email": newEmail, "code": code,
+	})
+	if confirmRec.Code != http.StatusNoContent {
+		t.Fatalf("change-email/confirm: status = %d, body = %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	updated, err := users.FindByID(t.Context(), u.ID)
+	if err != nil {
+		t.Fatalf("FindByID after confirm: %v", err)
+	}
+	if updated.Email != newEmail {
+		t.Fatalf("email after confirm = %q, want %q", updated.Email, newEmail)
+	}
+	if !updated.EmailVerified {
+		t.Fatal("email_verified after confirm = false, want true")
 	}
 }
 

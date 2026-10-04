@@ -72,3 +72,9 @@ func ExtractResetCode(body string) string {
 func ExtractVerificationCode(body string) string {
 	return otpCodePattern.FindString(body)
 }
+
+// ExtractChangeEmailCode pulls the numeric change-email code out of its
+// email body — same shape and same regex as ExtractOTPCode/ExtractResetCode.
+func ExtractChangeEmailCode(body string) string {
+	return otpCodePattern.FindString(body)
+}

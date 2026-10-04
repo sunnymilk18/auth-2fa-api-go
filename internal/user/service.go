@@ -216,6 +216,14 @@ func (s *Service) FindByEmail(ctx context.Context, apiClientID, email string) (*
 
 // UpdatePassword bcrypt-hashes newPassword and replaces userID's stored
 // hash.
+// UpdateEmail replaces userID's email (normalized) and marks it verified —
+// see Repository.UpdateEmail's doc comment. The format itself is validated
+// earlier, by auth.Service.AdminChangeEmail, before a code is ever sent;
+// this is only ever reached once that code comes back correct.
+func (s *Service) UpdateEmail(ctx context.Context, userID, newEmail string) error {
+	return s.repo.UpdateEmail(ctx, userID, NormalizeEmail(newEmail))
+}
+
 func (s *Service) UpdatePassword(ctx context.Context, userID, newPassword string) error {
 	// Same invariant as Register's — the password-reset flow (auth.Service.
 	// ResetPassword) used to only check this in the handler too. ResetPassword

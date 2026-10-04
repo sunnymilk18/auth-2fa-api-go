@@ -25,12 +25,14 @@ type Service struct {
 	devices              *device.Service
 	passwordReset        *PasswordResetStore
 	emailVerification    *EmailVerificationStore
+	changeEmail          *ChangeEmailStore
 	loginAttempts        *LoginAttemptLimiter
 	mailer               mailer.Mailer
 	otpTTL               time.Duration
 	refreshTTL           time.Duration
 	passwordResetTTL     time.Duration
 	emailVerificationTTL time.Duration
+	changeEmailTTL       time.Duration
 
 	// totp/totpLogin are both nil when TOTP_ENCRYPTION_KEY isn't configured
 	// (see cmd/api/main.go) — the feature is opt-in at the deployment level,
@@ -89,12 +91,14 @@ func NewService(
 	devices *device.Service,
 	passwordReset *PasswordResetStore,
 	emailVerification *EmailVerificationStore,
+	changeEmail *ChangeEmailStore,
 	loginAttempts *LoginAttemptLimiter,
 	m mailer.Mailer,
 	otpTTL time.Duration,
 	refreshTTL time.Duration,
 	passwordResetTTL time.Duration,
 	emailVerificationTTL time.Duration,
+	changeEmailTTL time.Duration,
 	totpManager *TOTPManager,
 	totpLogin *TOTPLoginStore,
 	twoFactorSetup *TwoFactorSetupStore,
@@ -115,12 +119,14 @@ func NewService(
 		devices:              devices,
 		passwordReset:        passwordReset,
 		emailVerification:    emailVerification,
+		changeEmail:          changeEmail,
 		loginAttempts:        loginAttempts,
 		mailer:               m,
 		otpTTL:               otpTTL,
 		refreshTTL:           refreshTTL,
 		passwordResetTTL:     passwordResetTTL,
 		emailVerificationTTL: emailVerificationTTL,
+		changeEmailTTL:       changeEmailTTL,
 		totp:                 totpManager,
 		totpLogin:            totpLogin,
 		twoFactorSetup:       twoFactorSetup,
@@ -837,6 +843,84 @@ func (s *Service) AdminResetPin(ctx context.Context, apiClientID, userID string)
 		return err
 	}
 	return s.markAccessTokensRevoked(ctx, userID)
+}
+
+// AdminChangeEmail starts an admin-initiated email correction for userID
+// (scoped to apiClientID — see checkUserScope): for an account that typo'd
+// its email at registration and, as a result, can never confirm it or use
+// password reset to get back in. Doesn't change anything yet — validates
+// newEmail, sends it a code, and leaves the change pending. The admin
+// never sees that code: ConfirmChangeEmail (a public /auth/* route, not
+// gated by any admin token — see Handlers.ConfirmChangeEmail) is what
+// actually applies the change, called by the account itself once it
+// proves control of newEmail.
+func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, newEmail string) error {
+	u, err := s.checkUserScope(ctx, apiClientID, userID)
+	if err != nil {
+		return err
+	}
+
+	newEmail = user.NormalizeEmail(newEmail)
+	if !user.ValidateEmail(newEmail) {
+		return user.ErrInvalidEmail
+	}
+	if _, err := s.users.FindByEmail(ctx, u.APIClientID, newEmail); err == nil {
+		return user.ErrEmailTaken
+	} else if !errors.Is(err, user.ErrNotFound) {
+		return err
+	}
+
+	code, err := s.changeEmail.StartChange(ctx, u.ID, u.APIClientID, u.Email, newEmail)
+	if err != nil {
+		return err
+	}
+
+	body := fmt.Sprintf(
+		"Un administrador solicitó corregir el correo de tu cuenta. Usa este código para confirmarlo: %s\n\nExpira en %s. Si no reconoces esta solicitud, ignora este correo — el cambio no se aplica sin él.",
+		code, s.changeEmailTTL.String(),
+	)
+	if err := s.mailer.Send(ctx, newEmail, "Confirma tu nuevo correo", body); err != nil {
+		return fmt.Errorf("sending change-email code: %w", err)
+	}
+	return nil
+}
+
+// ConfirmChangeEmail applies a pending email change — proving control of
+// newEmail with the code AdminChangeEmail sent it. On success it marks the
+// account's email verified (the whole point: an account that could never
+// confirm its typo'd original email is unstuck), and revokes every
+// refresh token, trusted device and already-issued access token the
+// account has — same reasoning as ResetPassword: a new email is a new
+// identity for this account going forward, nothing from before (possibly
+// including whoever caused the need for this correction) should keep
+// working. The previous address is notified that the change happened, in
+// case it wasn't the account's own owner who requested it — best-effort:
+// a failure there doesn't undo an otherwise-successful change.
+func (s *Service) ConfirmChangeEmail(ctx context.Context, apiClientID, newEmail, code string) error {
+	newEmail = user.NormalizeEmail(newEmail)
+	userID, oldEmail, err := s.changeEmail.ConsumeCode(ctx, apiClientID, newEmail, code)
+	if err != nil {
+		return err
+	}
+
+	if err := s.users.UpdateEmail(ctx, userID, newEmail); err != nil {
+		return err
+	}
+	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
+		return err
+	}
+	if err := s.markAccessTokensRevoked(ctx, userID); err != nil {
+		return err
+	}
+
+	body := fmt.Sprintf("El correo de tu cuenta cambió a %s. Si no reconoces este cambio, contacta a soporte de inmediato.", newEmail)
+	if err := s.mailer.Send(ctx, oldEmail, "El correo de tu cuenta cambió", body); err != nil {
+		s.logger.Error("sending change-email notice to the old address failed", "user_id", userID, "error", err)
+	}
+	return nil
 }
 
 // ListDevices returns the authenticated user's trusted devices.

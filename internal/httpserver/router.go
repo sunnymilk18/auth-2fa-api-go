@@ -114,6 +114,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	passwordResetRequestLimiter := middleware.NewRateLimiter(rdb, "password-reset-request", 5, time.Hour).AttachBlacklist(blacklist)
 	passwordResetConfirmLimiter := middleware.NewRateLimiter(rdb, "password-reset-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
 	verifyEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "verify-email-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
+	changeEmailConfirmLimiter := middleware.NewRateLimiter(rdb, "change-email-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
 	verifyEmailResendLimiter := middleware.NewRateLimiter(rdb, "verify-email-resend", 5, time.Hour).AttachBlacklist(blacklist)
 	totpConfirmLimiter := middleware.NewRateLimiter(rdb, "totp-confirm", 10, 15*time.Minute).AttachBlacklist(blacklist)
 	sendLoginEmailCodeLimiter := middleware.NewRateLimiter(rdb, "login-send-email-code", 10, 15*time.Minute).AttachBlacklist(blacklist)
@@ -193,6 +194,13 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 
 		r.With(verifyEmailConfirmLimiter.Middleware).Post("/verify-email/confirm", authHandlers.ConfirmEmailVerification)
 		r.With(verifyEmailResendLimiter.Middleware).Post("/verify-email/resend", authHandlers.ResendEmailVerification)
+
+		// Confirms an email correction an admin started — see
+		// AdminHandlers.ChangeEmail (under /system-admin/users below) and
+		// Handlers.ConfirmChangeEmail's own doc comment for why this is
+		// public: the admin never sees the code, only the account itself
+		// (proving control of its new address) can apply the change.
+		r.With(changeEmailConfirmLimiter.Middleware).Post("/change-email/confirm", authHandlers.ConfirmChangeEmail)
 
 		if totpEnabled {
 			// First-login "choose email or authenticator" screen (see
@@ -297,6 +305,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
 			r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
 			r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
+			r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a
@@ -339,6 +348,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
 		r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
 		r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
+		r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
 	})
 
 	r.Group(func(r chi.Router) {

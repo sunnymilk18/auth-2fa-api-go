@@ -481,6 +481,56 @@ func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// --- Change email (admin-initiated, self-confirmed) ---
+
+type changeEmailConfirmRequest struct {
+	Email string `json:"email"`
+	Code  string `json:"code"`
+}
+
+// ConfirmChangeEmail applies a pending email correction an admin started
+// (Service.AdminChangeEmail) — called by the account itself, proving
+// control of its new email with the code that was sent there. A public
+// route, like password reset: no admin token, no Bearer session (the
+// account may not even be able to log in yet, which is usually why this
+// got started in the first place).
+func (h *Handlers) ConfirmChangeEmail(w http.ResponseWriter, r *http.Request) {
+	var req changeEmailConfirmRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if req.Email == "" || req.Code == "" {
+		writeError(w, http.StatusBadRequest, "el correo y el código son obligatorios")
+		return
+	}
+
+	apiClientID, ok := APIClientIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "falta la API key o no es válida")
+		return
+	}
+
+	if err := h.svc.ConfirmChangeEmail(r.Context(), apiClientID, req.Email, req.Code); err != nil {
+		switch {
+		case errors.Is(err, ErrChangeEmailNotFound):
+			writeError(w, http.StatusUnauthorized, "no hay un cambio de correo pendiente para esa dirección, o expiró")
+		case errors.Is(err, ErrChangeEmailInvalidCode):
+			writeError(w, http.StatusUnauthorized, "código inválido")
+		case errors.Is(err, ErrChangeEmailTooManyTries):
+			writeError(w, http.StatusTooManyRequests, "demasiados intentos, pide que te envíen un código nuevo")
+		case errors.Is(err, user.ErrEmailTaken):
+			writeError(w, http.StatusConflict, "ese correo ya está en uso en este sistema")
+		default:
+			log.Printf("confirm change email error: %v", err)
+			writeError(w, http.StatusInternalServerError, "no se pudo confirmar el cambio de correo")
+		}
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- Trusted devices + PIN (shortcut around password+OTP on a known device) ---
 
 type registerDeviceRequest struct {

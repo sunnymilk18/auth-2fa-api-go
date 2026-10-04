@@ -91,6 +91,7 @@ func run(logger *slog.Logger) error {
 	refreshRepo := auth.NewRefreshRepository(pgPool)
 	passwordResetStore := auth.NewPasswordResetStore(rdb, cfg.PasswordResetTTL, cfg.PasswordResetMaxTries, cfg.PasswordResetCodeLength)
 	emailVerificationStore := auth.NewEmailVerificationStore(rdb, cfg.EmailVerificationTTL, cfg.EmailVerificationMaxTries, cfg.EmailVerificationCodeLength)
+	changeEmailStore := auth.NewChangeEmailStore(rdb, cfg.ChangeEmailTTL, cfg.ChangeEmailMaxTries, cfg.ChangeEmailCodeLength)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, cfg.LoginMaxFailedAttempts, cfg.LoginLockoutWindow)
 
 	deviceRepo := device.NewRepository(pgPool)
@@ -123,7 +124,7 @@ func run(logger *slog.Logger) error {
 	// expired on its own anyway — see AccessRevocationStore's doc comment.
 	accessRevocation := auth.NewAccessRevocationStore(rdb, cfg.AccessTokenTTL)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation)
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, changeEmailStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, cfg.ChangeEmailTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation)
 	authHandlers := auth.NewHandlers(authSvc)
 
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
