@@ -130,6 +130,22 @@ func (s *Service) RevokeSystemAdminKey(ctx context.Context, id string) error {
 	return s.repo.SetSystemAdminKeyHash(ctx, id, nil)
 }
 
+// FindByID looks up a client by its own id.
+func (s *Service) FindByID(ctx context.Context, id string) (*APIClient, error) {
+	return s.repo.FindByID(ctx, id)
+}
+
+// SetPanelBaseURL configures where this tenant's admin panel is deployed
+// (e.g. "https://panel.example.com"), used to build a link in the
+// admin-initiated change-email email — see auth.Service.AdminChangeEmail.
+// url == "" clears it, going back to no link at all.
+func (s *Service) SetPanelBaseURL(ctx context.Context, id, url string) error {
+	if url == "" {
+		return s.repo.SetPanelBaseURL(ctx, id, nil)
+	}
+	return s.repo.SetPanelBaseURL(ctx, id, &url)
+}
+
 // HashKey is a high-entropy-secret hash (like refresh/device tokens) —
 // not bcrypt, since API keys are random and long, not low-entropy
 // user-chosen secrets that need slow hashing.

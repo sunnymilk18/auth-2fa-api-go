@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,7 +42,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
 	)
 	handlers := auth.NewHandlers(svc)
 
@@ -488,7 +490,7 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, testLogger())
@@ -546,7 +548,7 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
@@ -642,7 +644,7 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation,
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "",
 	)
 	handlers := auth.NewHandlers(svc)
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, testLogger())
@@ -714,6 +716,77 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 	}
 	if !updated.EmailVerified {
 		t.Fatal("email_verified after confirm = false, want true")
+	}
+}
+
+// TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured covers the
+// optional panel link in the email sent to the new address: present
+// (pointing at /confirmar-correo?email=<new email, URL-encoded>, without
+// the code) when the tenant has configured its own panel_base_url, absent
+// when it hasn't — same route, same handler, only the tenant's own config
+// changes the email's body.
+func TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	mailer := testutil.NewFakeMailer()
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), nil, apiClients, "",
+	)
+
+	clientWithPanel, _, err := apiClients.Create(t.Context(), "change-email-panel-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
+	if err := apiClients.SetPanelBaseURL(t.Context(), clientWithPanel.ID, "https://panel.example.com/"); err != nil {
+		t.Fatalf("SetPanelBaseURL: %v", err)
+	}
+	clientWithoutPanel, _, err := apiClients.Create(t.Context(), "change-email-no-panel-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
+
+	oldEmailWith := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
+	userWith, err := svc.Register(t.Context(), clientWithPanel.ID, oldEmailWith, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user (with panel): %v", err)
+	}
+	newEmailWith := "fixed-" + testutil.UniqueSuffix(t) + "@example.com"
+	if err := svc.AdminChangeEmail(t.Context(), clientWithPanel.ID, userWith.ID, newEmailWith); err != nil {
+		t.Fatalf("AdminChangeEmail (with panel): %v", err)
+	}
+	sentWith, ok := mailer.Last()
+	if !ok || sentWith.To != newEmailWith {
+		t.Fatalf("expected a code sent to %q, got %+v (ok=%v)", newEmailWith, sentWith, ok)
+	}
+	wantLink := "https://panel.example.com/confirmar-correo?email=" + url.QueryEscape(newEmailWith)
+	if !strings.Contains(sentWith.Body, wantLink) {
+		t.Fatalf("email body = %q, want it to contain panel link %q", sentWith.Body, wantLink)
+	}
+
+	oldEmailWithout := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
+	userWithout, err := svc.Register(t.Context(), clientWithoutPanel.ID, oldEmailWithout, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user (without panel): %v", err)
+	}
+	newEmailWithout := "fixed-" + testutil.UniqueSuffix(t) + "@example.com"
+	if err := svc.AdminChangeEmail(t.Context(), clientWithoutPanel.ID, userWithout.ID, newEmailWithout); err != nil {
+		t.Fatalf("AdminChangeEmail (without panel): %v", err)
+	}
+	sentWithout, ok := mailer.Last()
+	if !ok || sentWithout.To != newEmailWithout {
+		t.Fatalf("expected a code sent to %q, got %+v (ok=%v)", newEmailWithout, sentWithout, ok)
+	}
+	if strings.Contains(sentWithout.Body, "/confirmar-correo") {
+		t.Fatalf("email body = %q, want no panel link when panel_base_url isn't configured", sentWithout.Body)
 	}
 }
 

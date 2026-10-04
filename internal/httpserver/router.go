@@ -280,6 +280,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/deactivate", adminHandlers.Deactivate)
 			r.Post("/{id}/activate", adminHandlers.Activate)
 			r.Post("/{id}/rotate", adminHandlers.Rotate)
+			r.Put("/{id}/panel-base-url", adminHandlers.SetPanelBaseURL)
 
 			// Provisions/revokes the credential a client's own operators
 			// use against /system-admin/users below — an operator-only

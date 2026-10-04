@@ -82,6 +82,13 @@ type Config struct {
 	ChangeEmailCodeLength int
 	ChangeEmailMaxTries   int
 
+	// PanelBaseURL is a deployment-wide fallback for the per-tenant
+	// api_clients.panel_base_url (see apiclient.Service.SetPanelBaseURL) —
+	// used only when a tenant hasn't configured its own. Empty by default:
+	// the change-email email then goes out with no link at all, same as
+	// before this feature existed.
+	PanelBaseURL string
+
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
 	// account. A temporary throttle, not a permanent lockout — see
@@ -190,6 +197,8 @@ func Load() (*Config, error) {
 		ResendFrom:   getEnv("RESEND_FROM", "onboarding@resend.dev"),
 
 		AdminAPIToken: getEnv("ADMIN_API_TOKEN", ""),
+
+		PanelBaseURL: getEnv("PANEL_BASE_URL", ""),
 
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),

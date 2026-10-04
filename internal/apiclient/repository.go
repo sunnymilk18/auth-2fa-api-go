@@ -19,13 +19,13 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-const selectClientColumns = "id, name, api_key_hash, active, created_at, updated_at, system_admin_key_hash, system_admin_key_last_used_at"
+const selectClientColumns = "id, name, api_key_hash, active, created_at, updated_at, system_admin_key_hash, system_admin_key_last_used_at, panel_base_url"
 
 func scanClient(row pgx.Row) (*APIClient, error) {
 	c := &APIClient{}
 	err := row.Scan(
 		&c.ID, &c.Name, &c.APIKeyHash, &c.Active, &c.CreatedAt, &c.UpdatedAt,
-		&c.SystemAdminKeyHash, &c.SystemAdminKeyLastUsed,
+		&c.SystemAdminKeyHash, &c.SystemAdminKeyLastUsed, &c.PanelBaseURL,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -73,6 +73,21 @@ func (r *Repository) FindBySystemAdminKeyHash(ctx context.Context, apiKeyHash st
 	}
 	if err != nil {
 		return nil, fmt.Errorf("querying api client by system admin key: %w", err)
+	}
+	return c, nil
+}
+
+// FindByID looks up a client by its own id — used by auth.Service to read
+// its PanelBaseURL when building the admin-initiated change-email link.
+func (r *Repository) FindByID(ctx context.Context, id string) (*APIClient, error) {
+	q := "SELECT " + selectClientColumns + " FROM api_clients WHERE id = $1"
+
+	c, err := scanClient(r.pool.QueryRow(ctx, q, id))
+	if errors.Is(err, ErrNotFound) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying api client by id: %w", err)
 	}
 	return c, nil
 }
@@ -137,6 +152,21 @@ func (r *Repository) SetSystemAdminKeyHash(ctx context.Context, id string, hash 
 	tag, err := r.pool.Exec(ctx, q, id, hash)
 	if err != nil {
 		return fmt.Errorf("updating api client system admin key: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetPanelBaseURL configures (or clears, with url == nil) which panel this
+// tenant's admin-initiated change-email emails should link to — see
+// Service.SetPanelBaseURL.
+func (r *Repository) SetPanelBaseURL(ctx context.Context, id string, url *string) error {
+	const q = `UPDATE api_clients SET panel_base_url = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, url)
+	if err != nil {
+		return fmt.Errorf("updating api client panel base url: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

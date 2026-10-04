@@ -52,7 +52,7 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	// account, which is exactly the condition that flips LoginStep1's
 	// behavior. See newTestServiceWithChoice for the few tests that
 	// actually exercise this flow.
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, changeEmail, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, changeEmail, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil, nil, "")
 	return svc, tokens, mailer, client.ID
 }
 
@@ -84,7 +84,7 @@ func newTestServiceWithChoice(t *testing.T) (svc *auth.Service, tokens *auth.Tok
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 	twoFactorSetup := auth.NewTwoFactorSetupStore(rdb, 5*time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, nil, nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, nil, nil, nil, "")
 	return svc, tokens, mailer, client.ID
 }
 
@@ -634,7 +634,7 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer := testutil.NewFakeMailer()
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "")
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
@@ -935,7 +935,7 @@ func TestStartTOTPEnrollment_NotConfigured(t *testing.T) {
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer := testutil.NewFakeMailer()
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "")
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
@@ -1136,7 +1136,7 @@ func newTestServiceWithAccessRevocation(t *testing.T) (svc *auth.Service, tokens
 	mailer = testutil.NewFakeMailer()
 	accessRevocation = auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, accessRevocation)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, accessRevocation, nil, "")
 	return svc, tokens, pool, accessRevocation, mailer, client.ID
 }
 

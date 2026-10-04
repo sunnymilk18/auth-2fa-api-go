@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
+	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/mailer"
 	"auth-2fa-api/internal/push"
@@ -33,6 +36,16 @@ type Service struct {
 	passwordResetTTL     time.Duration
 	emailVerificationTTL time.Duration
 	changeEmailTTL       time.Duration
+
+	// apiClients and panelBaseURL are used only to build the panel link in
+	// AdminChangeEmail's email — see changeEmailPanelLink. apiClients reads
+	// each tenant's own api_clients.panel_base_url; panelBaseURL is a
+	// deployment-wide fallback (config.PanelBaseURL) used when a tenant
+	// hasn't configured its own. Both can be left unset (apiClients nil,
+	// panelBaseURL "") — the email is then sent with no link, same as
+	// before this feature existed.
+	apiClients   *apiclient.Service
+	panelBaseURL string
 
 	// totp/totpLogin are both nil when TOTP_ENCRYPTION_KEY isn't configured
 	// (see cmd/api/main.go) — the feature is opt-in at the deployment level,
@@ -107,6 +120,8 @@ func NewService(
 	pushRequestLimiter *PushRequestLimiter,
 	logger *slog.Logger,
 	accessRevocation *AccessRevocationStore,
+	apiClients *apiclient.Service,
+	panelBaseURL string,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -135,6 +150,8 @@ func NewService(
 		pushRequestLimiter:   pushRequestLimiter,
 		logger:               logger,
 		accessRevocation:     accessRevocation,
+		apiClients:           apiClients,
+		panelBaseURL:         panelBaseURL,
 	}
 }
 
@@ -879,10 +896,34 @@ func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, new
 		"Un administrador solicitó corregir el correo de tu cuenta. Usa este código para confirmarlo: %s\n\nExpira en %s. Si no reconoces esta solicitud, ignora este correo — el cambio no se aplica sin él.",
 		code, s.changeEmailTTL.String(),
 	)
+	if link := s.changeEmailPanelLink(ctx, u.APIClientID, newEmail); link != "" {
+		body += fmt.Sprintf("\n\nTambién puedes abrir este enlace e ingresar el código ahí: %s", link)
+	}
 	if err := s.mailer.Send(ctx, newEmail, "Confirma tu nuevo correo", body); err != nil {
 		return fmt.Errorf("sending change-email code: %w", err)
 	}
 	return nil
+}
+
+// changeEmailPanelLink builds the link to the tenant's panel confirmation
+// screen for AdminChangeEmail's email — "" if neither the tenant nor the
+// deployment has a panel configured. Deliberately carries only the new
+// email (URL-encoded) in the query string, never the code: the code stays
+// typed by hand from the email body, so it never ends up in browser
+// history or server logs. Best-effort — a failure to look up the tenant's
+// own panel_base_url just falls back to the deployment-wide one (or no
+// link at all), never blocks sending the code itself.
+func (s *Service) changeEmailPanelLink(ctx context.Context, apiClientID, newEmail string) string {
+	base := s.panelBaseURL
+	if s.apiClients != nil {
+		if c, err := s.apiClients.FindByID(ctx, apiClientID); err == nil && c.PanelBaseURL != nil && *c.PanelBaseURL != "" {
+			base = *c.PanelBaseURL
+		}
+	}
+	if base == "" {
+		return ""
+	}
+	return strings.TrimRight(base, "/") + "/confirmar-correo?email=" + url.QueryEscape(newEmail)
 }
 
 // ConfirmChangeEmail applies a pending email change — proving control of

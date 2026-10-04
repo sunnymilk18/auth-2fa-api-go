@@ -312,6 +312,13 @@ curl -X POST https://tu-api/auth/change-email/confirm -H "X-API-Key: $API_KEY" \
 
 Al confirmarse: se aplica el cambio, se marca la cuenta como verificada (el problema que esto resuelve de raíz), y se revocan todas sus sesiones, refresh tokens y dispositivos de confianza — mismo criterio que un reset de contraseña. Solo puede haber un cambio pendiente por cuenta a la vez; pedir otro reemplaza al anterior, sin importar si apunta a un correo distinto.
 
+El correo que recibe el correo **nuevo** puede incluir, además del código, un enlace a la pantalla de confirmación del panel (`/confirmar-correo?email=<correo nuevo, con URL-encoding>`) — nunca lleva el código, que sigue escribiéndose a mano desde el cuerpo del correo. El enlace solo aparece si hay un panel configurado: por tenant (`PUT /admin/clients/{id}/panel-base-url`, con `{"panel_base_url":"https://panel.tu-tenant.com"}`) o, como respaldo general, con la variable de entorno `PANEL_BASE_URL`. Sin ninguno configurado, el correo sale igual que antes, sin enlace. El aviso al correo **anterior** nunca lleva este enlace.
+
+```bash
+curl -X PUT https://tu-api/admin/clients/<id>/panel-base-url -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -d '{"panel_base_url":"https://panel.tu-tenant.com"}'
+```
+
 La misma credencial también sirve para listar las cuentas del tenant — la única ruta de este grupo sin `{id}`, ya que las cuatro de arriba solo actúan sobre una cuenta que ya se conoce por su id:
 
 ```bash

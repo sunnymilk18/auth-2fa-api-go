@@ -37,15 +37,19 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // clientResponse deliberately omits APIKeyHash — even hashed, there's no
 // reason for it to ever leave the server.
 type clientResponse struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Active    bool      `json:"active"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	Active       bool      `json:"active"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	PanelBaseURL *string   `json:"panel_base_url,omitempty"`
 }
 
 func toResponse(c *APIClient) clientResponse {
-	return clientResponse{ID: c.ID, Name: c.Name, Active: c.Active, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
+	return clientResponse{
+		ID: c.ID, Name: c.Name, Active: c.Active, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+		PanelBaseURL: c.PanelBaseURL,
+	}
 }
 
 // --- Create ---
@@ -159,6 +163,32 @@ func (h *Handlers) RotateSystemAdminKey(w http.ResponseWriter, r *http.Request) 
 func (h *Handlers) RevokeSystemAdminKey(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := h.svc.RevokeSystemAdminKey(r.Context(), id); err != nil {
+		writeClientActionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- Panel base URL (per-client) ---
+
+type setPanelBaseURLRequest struct {
+	// "" clears it — the email then goes out without a link, same as a
+	// tenant that never configured one.
+	PanelBaseURL string `json:"panel_base_url"`
+}
+
+// SetPanelBaseURL configures where this tenant's admin panel is deployed —
+// used to build the link in the admin-initiated change-email email.
+func (h *Handlers) SetPanelBaseURL(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req setPanelBaseURLRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	if err := h.svc.SetPanelBaseURL(r.Context(), id, req.PanelBaseURL); err != nil {
 		writeClientActionError(w, err)
 		return
 	}

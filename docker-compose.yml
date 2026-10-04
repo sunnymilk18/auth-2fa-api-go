@@ -123,6 +123,11 @@ services:
       CHANGE_EMAIL_CODE_LENGTH: "6"
       CHANGE_EMAIL_MAX_TRIES: "5"
 
+      # Optional, deployment-wide fallback for the change-email panel link
+      # — see .env.example. Left unset, a tenant with no panel_base_url of
+      # its own just gets the email without a link.
+      PANEL_BASE_URL: ${PANEL_BASE_URL:-}
+
       LOGIN_MAX_FAILED_ATTEMPTS: "10"
       LOGIN_LOCKOUT_WINDOW: 15m
 

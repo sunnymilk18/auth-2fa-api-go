@@ -20,4 +20,11 @@ type APIClient struct {
 	// to only ever act on this client's own users.
 	SystemAdminKeyHash     *string
 	SystemAdminKeyLastUsed *time.Time
+
+	// PanelBaseURL is nil until an operator configures where this tenant's
+	// own admin panel is deployed — see Service.SetPanelBaseURL. When set,
+	// auth.Service.AdminChangeEmail includes a link to it (its
+	// /confirmar-correo screen) in the email it sends to confirm a
+	// corrected address.
+	PanelBaseURL *string
 }
