@@ -203,7 +203,7 @@ func (s *Service) sendVerificationEmail(ctx context.Context, u *user.User) error
 
 	body := fmt.Sprintf(
 		"Confirma tu correo con este código: %s\n\nExpira en %s.",
-		code, s.emailVerificationTTL.String(),
+		code, humanDuration(s.emailVerificationTTL),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Confirma tu correo electrónico", body); err != nil {
 		return fmt.Errorf("sending email verification: %w", err)
@@ -397,7 +397,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		}
 		body := fmt.Sprintf(
 			"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
-			code, s.otpTTL.String(),
+			code, humanDuration(s.otpTTL),
 		)
 		if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
 			return "", false, false, fmt.Errorf("sending otp email: %w", err)
@@ -477,7 +477,7 @@ func (s *Service) ResendLoginOTP(ctx context.Context, loginToken string) error {
 	}
 	body := fmt.Sprintf(
 		"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
-		code, s.otpTTL.String(),
+		code, humanDuration(s.otpTTL),
 	)
 	if err := s.mailer.Send(ctx, sess.Email, "Tu código de verificación", body); err != nil {
 		return fmt.Errorf("sending otp email: %w", err)
@@ -613,7 +613,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 
 	body := fmt.Sprintf(
 		"Usa este código para restablecer tu contraseña: %s\n\nExpira en %s. Si no solicitaste esto, ignora este correo.",
-		code, s.passwordResetTTL.String(),
+		code, humanDuration(s.passwordResetTTL),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Restablece tu contraseña", body); err != nil {
 		return fmt.Errorf("sending password reset email: %w", err)
@@ -892,13 +892,14 @@ func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, new
 		return err
 	}
 
-	body := fmt.Sprintf(
-		"Un administrador solicitó corregir el correo de tu cuenta. Usa este código para confirmarlo: %s\n\nExpira en %s. Si no reconoces esta solicitud, ignora este correo — el cambio no se aplica sin él.",
-		code, s.changeEmailTTL.String(),
-	)
+	how := `Ingresa el código en la pantalla "Confirmar correo nuevo" del panel.`
 	if link := s.changeEmailPanelLink(ctx, u.APIClientID, newEmail); link != "" {
-		body += fmt.Sprintf("\n\nTambién puedes abrir este enlace e ingresar el código ahí: %s", link)
+		how = fmt.Sprintf("Para confirmarlo, abre este enlace e ingresa el código: %s.", link)
 	}
+	body := fmt.Sprintf(
+		"Un administrador solicitó corregir el correo de tu cuenta. Tu código de confirmación es: %s. %s El código expira en %s. Si no reconoces esta solicitud, ignora este correo: el cambio no se aplica sin él.",
+		code, how, humanDuration(s.changeEmailTTL),
+	)
 	if err := s.mailer.Send(ctx, newEmail, "Confirma tu nuevo correo", body); err != nil {
 		return fmt.Errorf("sending change-email code: %w", err)
 	}
@@ -924,6 +925,28 @@ func (s *Service) changeEmailPanelLink(ctx context.Context, apiClientID, newEmai
 		return ""
 	}
 	return strings.TrimRight(base, "/") + "/confirmar-correo?email=" + url.QueryEscape(newEmail)
+}
+
+// humanDuration renders d in plain Spanish ("1 hora", "60 minutos") for the
+// change-email email, instead of Go's own "1h0m0s" — only whole hours or
+// whole minutes get a human form; anything else falls back to d.String().
+func humanDuration(d time.Duration) string {
+	switch {
+	case d > 0 && d%time.Hour == 0:
+		h := int(d / time.Hour)
+		if h == 1 {
+			return "1 hora"
+		}
+		return fmt.Sprintf("%d horas", h)
+	case d > 0 && d%time.Minute == 0:
+		m := int(d / time.Minute)
+		if m == 1 {
+			return "1 minuto"
+		}
+		return fmt.Sprintf("%d minutos", m)
+	default:
+		return d.String()
+	}
 }
 
 // ConfirmChangeEmail applies a pending email change — proving control of

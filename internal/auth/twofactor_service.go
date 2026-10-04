@@ -55,7 +55,7 @@ func (s *Service) SendLoginEmailCode(ctx context.Context, loginToken string) err
 
 	body := fmt.Sprintf(
 		"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
-		code, s.otpTTL.String(),
+		code, humanDuration(s.otpTTL),
 	)
 	if err := s.mailer.Send(ctx, sess.Email, "Tu código de verificación", body); err != nil {
 		return fmt.Errorf("sending otp email: %w", err)
