@@ -611,9 +611,13 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 		return err
 	}
 
+	how := `Ingresa el código en la pantalla "Recuperar contraseña" del panel, opción "Ya tengo un código".`
+	if link := s.panelLink(ctx, u.APIClientID, "/forgot-password", u.Email); link != "" {
+		how = fmt.Sprintf("Para hacerlo, abre este enlace e ingresa el código: %s.", link)
+	}
 	body := fmt.Sprintf(
-		"Usa este código para restablecer tu contraseña: %s\n\nExpira en %s. Si no solicitaste esto, ignora este correo.",
-		code, humanDuration(s.passwordResetTTL),
+		"Usa este código para restablecer tu contraseña: %s. %s El código expira en %s. Si no solicitaste esto, ignora este correo.",
+		code, how, humanDuration(s.passwordResetTTL),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Restablece tu contraseña", body); err != nil {
 		return fmt.Errorf("sending password reset email: %w", err)
@@ -893,7 +897,7 @@ func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, new
 	}
 
 	how := `Ingresa el código en la pantalla "Confirmar correo nuevo" del panel.`
-	if link := s.changeEmailPanelLink(ctx, u.APIClientID, newEmail); link != "" {
+	if link := s.panelLink(ctx, u.APIClientID, "/confirmar-correo", newEmail); link != "" {
 		how = fmt.Sprintf("Para confirmarlo, abre este enlace e ingresa el código: %s.", link)
 	}
 	body := fmt.Sprintf(
@@ -906,15 +910,15 @@ func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, new
 	return nil
 }
 
-// changeEmailPanelLink builds the link to the tenant's panel confirmation
-// screen for AdminChangeEmail's email — "" if neither the tenant nor the
-// deployment has a panel configured. Deliberately carries only the new
-// email (URL-encoded) in the query string, never the code: the code stays
+// panelLink builds a link to the tenant's panel at path, carrying only
+// email (URL-encoded) in the query string — never a code: the code stays
 // typed by hand from the email body, so it never ends up in browser
-// history or server logs. Best-effort — a failure to look up the tenant's
-// own panel_base_url just falls back to the deployment-wide one (or no
-// link at all), never blocks sending the code itself.
-func (s *Service) changeEmailPanelLink(ctx context.Context, apiClientID, newEmail string) string {
+// history or server logs. Returns "" if neither the tenant nor the
+// deployment has a panel configured (see AdminChangeEmail's and
+// RequestPasswordReset's own callers). Best-effort — a failure to look up
+// the tenant's own panel_base_url just falls back to the deployment-wide
+// one (or no link at all), never blocks sending the code itself.
+func (s *Service) panelLink(ctx context.Context, apiClientID, path, email string) string {
 	base := s.panelBaseURL
 	if s.apiClients != nil {
 		if c, err := s.apiClients.FindByID(ctx, apiClientID); err == nil && c.PanelBaseURL != nil && *c.PanelBaseURL != "" {
@@ -924,7 +928,7 @@ func (s *Service) changeEmailPanelLink(ctx context.Context, apiClientID, newEmai
 	if base == "" {
 		return ""
 	}
-	return strings.TrimRight(base, "/") + "/confirmar-correo?email=" + url.QueryEscape(newEmail)
+	return strings.TrimRight(base, "/") + path + "?email=" + url.QueryEscape(email)
 }
 
 // humanDuration renders d in plain Spanish ("1 hora", "60 minutos") for the
