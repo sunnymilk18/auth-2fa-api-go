@@ -311,7 +311,7 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // accounts aren't affected by this either way — that code was never
 // server-sent to begin with, it comes from the account's own authenticator
 // app.
-func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, pushOffered bool, err error) {
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, pushOffered bool, method string, err error) {
 	lockoutKey := identifier
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
 		lockoutKey = resolved.ID
@@ -319,10 +319,10 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 
 	locked, retryAfter, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
 	if err != nil {
-		return "", false, false, err
+		return "", false, false, "", err
 	}
 	if locked {
-		return "", false, false, &LockedOutError{RetryAfter: retryAfter}
+		return "", false, false, "", &LockedOutError{RetryAfter: retryAfter}
 	}
 
 	u, err := s.users.VerifyPassword(ctx, apiClientID, identifier, password)
@@ -332,7 +332,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// wrong-password response into a 500.
 			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, lockoutKey)
 		}
-		return "", false, false, err
+		return "", false, false, "", err
 	}
 	// Best-effort for the same reason — a stale counter after this just
 	// means a slightly stricter throttle later, not a security hole.
@@ -347,19 +347,21 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	// otherwise logs in exactly as normal, emailing that real owner an OTP
 	// code on every attempt they never asked for.
 	if !u.EmailVerified {
-		return "", false, false, ErrEmailNotVerified
+		return "", false, false, "", ErrEmailNotVerified
 	}
 
 	// First login ever, and there's actually something to choose between —
 	// hand back a pending-choice token instead of defaulting to email. See
 	// this method's doc comment for the full shape of what happens next.
-	// Push is never offered here — see startPushLogin's doc comment.
+	// Push is never offered here — see startPushLogin's doc comment. method
+	// is "" here (and whenever pushOffered ends up true below): neither
+	// case has an actual pending code yet for Handlers.Login to report.
 	if !u.TwoFactorMethodChosen && s.twoFactorSetup != nil {
 		token, err := s.twoFactorSetup.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 		if err != nil {
-			return "", false, false, err
+			return "", false, false, "", err
 		}
-		return token, true, false, nil
+		return token, true, false, "", nil
 	}
 
 	candidate := pushLoginCandidate{ID: u.ID, APIClientID: u.APIClientID, Email: u.Email}
@@ -376,18 +378,23 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// deployment after some accounts already enrolled — not a
 			// normal state, but worth a clear error over a nil-pointer
 			// panic or silently falling back to a weaker factor.
-			return "", false, false, ErrTOTPNotConfigured
+			return "", false, false, "", ErrTOTPNotConfigured
 		}
 		token, err := s.totpLogin.StartSession(ctx, u.ID, u.APIClientID, u.Email)
 		if err != nil {
-			return "", false, false, err
+			return "", false, false, "", err
 		}
-		return token, false, s.startPushLogin(ctx, token, candidate), nil
+		pushOffered := s.startPushLogin(ctx, token, candidate)
+		method := "totp"
+		if pushOffered {
+			method = ""
+		}
+		return token, false, pushOffered, method, nil
 	}
 
 	loginToken, err = generateToken(32)
 	if err != nil {
-		return "", false, false, fmt.Errorf("generating login token: %w", err)
+		return "", false, false, "", fmt.Errorf("generating login token: %w", err)
 	}
 
 	// Push is checked BEFORE the OTP email, deliberately, and the email is
@@ -404,14 +411,14 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	if !pushOffered {
 		code, err := s.otp.StartSessionWithToken(ctx, loginToken, u.ID, u.APIClientID, u.Email)
 		if err != nil {
-			return "", false, false, err
+			return "", false, false, "", err
 		}
 		body := fmt.Sprintf(
 			"Tu código de verificación es: %s\n\nExpira en %s. Si no solicitaste este código, ignora este correo.",
 			code, humanDuration(s.otpTTL),
 		)
 		if err := s.mailer.Send(ctx, u.Email, "Tu código de verificación", body); err != nil {
-			return "", false, false, fmt.Errorf("sending otp email: %w", err)
+			return "", false, false, "", fmt.Errorf("sending otp email: %w", err)
 		}
 	}
 
@@ -425,7 +432,11 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		_ = s.users.MarkTwoFactorMethodChosen(ctx, u.ID)
 	}
 
-	return loginToken, false, pushOffered, nil
+	method = "email"
+	if pushOffered {
+		method = ""
+	}
+	return loginToken, false, pushOffered, method, nil
 }
 
 // LoginStep2 verifies the code — emailed OTP or, for accounts with an

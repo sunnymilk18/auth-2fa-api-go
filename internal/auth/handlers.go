@@ -248,6 +248,13 @@ type loginResponse struct {
 	// this same login_token to fall back to the emailed code. Always false
 	// alongside NeedsTwoFactorSetup.
 	PushApprovalOffered bool `json:"push_approval_offered"`
+	// Method is "totp" or "email" — which second factor the just-started
+	// login is waiting on. Omitted whenever there's no pending code yet to
+	// name: NeedsTwoFactorSetup true (nothing chosen yet) or
+	// PushApprovalOffered true (push is the default challenge here; the
+	// underlying base method hasn't actually sent/expected a code until
+	// the client falls back to it — see LoginStep1's doc comment).
+	Method string `json:"method,omitempty"`
 }
 
 func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
@@ -267,7 +274,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, needsSetup, pushOffered, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
+	loginToken, needsSetup, pushOffered, method, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
 	if err != nil {
 		var lockedErr *LockedOutError
 		switch {
@@ -300,6 +307,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		Message:             message,
 		NeedsTwoFactorSetup: needsSetup,
 		PushApprovalOffered: pushOffered,
+		Method:              method,
 	})
 }
 

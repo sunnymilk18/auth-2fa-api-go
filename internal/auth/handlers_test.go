@@ -409,6 +409,93 @@ func TestHandler_Login_Success(t *testing.T) {
 	}
 }
 
+// TestHandler_Login_Success_MethodEmail covers the common case: an account
+// with no authenticator app enrolled gets method: "email" alongside its
+// login_token. newTestHandlers' Service leaves the first-login "choose your
+// method" screen disabled (see newTestService's doc comment), so even this
+// account's very first login goes straight to the email path, same as every
+// other test in this file assumes.
+func TestHandler_Login_Success_MethodEmail(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	rec := httptest.NewRecorder()
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	if method, _ := resp["method"].(string); method != "email" {
+		t.Fatalf("response %v: method = %q, want %q", resp, method, "email")
+	}
+}
+
+// TestHandler_Login_Success_MethodTOTP covers the authenticator-app case —
+// method: "totp" once the account has confirmed one (see
+// ConfirmTOTPEnrollment), and no OTP email is sent for it.
+func TestHandler_Login_Success_MethodTOTP(t *testing.T) {
+	h, svc, tokens, mailer, apiClientID := newTestHandlers(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+	userID, _, _ := mustLoginFull(t, svc, tokens, mailer, apiClientID, email, "correcthorsebattery")
+
+	otpauthURL, err := svc.StartTOTPEnrollment(t.Context(), userID, email)
+	if err != nil {
+		t.Fatalf("StartTOTPEnrollment: %v", err)
+	}
+	if err := svc.ConfirmTOTPEnrollment(t.Context(), userID, totpCodeFromOTPAuthURL(t, otpauthURL)); err != nil {
+		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
+	}
+
+	sentBefore := len(mailer.Sent())
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	rec := httptest.NewRecorder()
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	if method, _ := resp["method"].(string); method != "totp" {
+		t.Fatalf("response %v: method = %q, want %q", resp, method, "totp")
+	}
+	if len(mailer.Sent()) != sentBefore {
+		t.Fatalf("a TOTP-enabled account's Login must not send an OTP email, got %d -> %d sent", sentBefore, len(mailer.Sent()))
+	}
+}
+
+// TestHandler_Login_FirstTime_OmitsMethod covers that the first-login
+// "choose your method" response never carries method — there's no pending
+// code at all yet, only a choice still to be made (see
+// TestHandler_Login_FirstTime_NeedsSetup for the rest of that response's
+// shape).
+func TestHandler_Login_FirstTime_OmitsMethod(t *testing.T) {
+	h, svc, _, mailer, apiClientID := newTestHandlersWithChoice(t)
+	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
+	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
+
+	req := withAPIClient(httptest.NewRequest(http.MethodPost, "/auth/login", jsonBody(t, map[string]string{
+		"identifier": email, "password": "correcthorsebattery",
+	})), apiClientID)
+	rec := httptest.NewRecorder()
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	resp := decodeJSON(t, rec)
+	if _, present := resp["method"]; present {
+		t.Fatalf("response %v: method present, want omitted (needs_2fa_setup is true)", resp)
+	}
+}
+
 // --- VerifyOTP (step 2) ---
 
 func TestHandler_VerifyOTP_MissingFields(t *testing.T) {
@@ -442,7 +529,7 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -660,7 +747,7 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -1028,7 +1115,7 @@ func verifyPin(t *testing.T, h *auth.Handlers, userID, email, pin string) *httpt
 func mustRegisterAndLogin(t *testing.T, svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID, email, password string) string {
 	t.Helper()
 	mustRegister(t, svc, mailer, apiClientID, email, password)
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

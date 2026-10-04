@@ -36,10 +36,10 @@ func TestChangeEmail_FullFlow(t *testing.T) {
 	}
 
 	// The account logs in with the new email now; the old one is free.
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
 		t.Fatalf("LoginStep1 with the new email: unexpected error %v", err)
 	}
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != user.ErrInvalidCredentials {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != user.ErrInvalidCredentials {
 		t.Fatalf("LoginStep1 with the old email: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
 
@@ -67,7 +67,7 @@ func TestChangeEmail_MarksEmailVerified(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	// Deliberately never verified — that's the scenario this flow exists for.
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != auth.ErrEmailNotVerified {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != auth.ErrEmailNotVerified {
 		t.Fatalf("sanity check, LoginStep1 before any fix: err = %v, want %v", err, auth.ErrEmailNotVerified)
 	}
 
@@ -81,7 +81,7 @@ func TestChangeEmail_MarksEmailVerified(t *testing.T) {
 		t.Fatalf("ConfirmChangeEmail: %v", err)
 	}
 
-	if _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
 		t.Fatalf("LoginStep1 after the fix: unexpected error %v (email_verified should now be true)", err)
 	}
 }
@@ -92,7 +92,7 @@ func TestChangeEmail_RevokesExistingSessionsDevicesAndAccessTokens(t *testing.T)
 	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, oldEmail, "correcthorsebattery")
 
 	// A session + trusted device from before the change.
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

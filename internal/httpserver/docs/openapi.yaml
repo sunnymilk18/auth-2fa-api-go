@@ -168,7 +168,9 @@ paths:
         y `/auth/totp/enroll`/`confirm` (con `login_token`). Si la cuenta
         además tiene un dispositivo con push habilitado (nunca junto con
         `needs_2fa_setup: true`), la respuesta también trae
-        `push_approval_offered: true` — ver el tag `push`.
+        `push_approval_offered: true` — ver el tag `push`. Fuera de esos dos
+        casos, la respuesta también trae `method` ("totp" o "email") —
+        ver `LoginResponse`.
       security:
         - apiKeyAuth: []
       requestBody:
@@ -1692,6 +1694,15 @@ components:
             mismo login_token para pedirlo recién ahí. Siempre false junto
             con needs_2fa_setup: true, y siempre false si el servidor no
             tiene FIREBASE_CREDENTIALS_PATH configurada.
+        method:
+          type: string
+          enum: [totp, email]
+          description: >
+            Qué segundo factor está pendiente: "totp" si la cuenta activó
+            una app autenticadora, "email" si el código se mandó (o se
+            manda, según push_approval_offered) por correo. Ausente cuando
+            needs_2fa_setup o push_approval_offered son true — en esos dos
+            casos todavía no hay ningún código pendiente que nombrar.
 
     VerifyOTPRequest:
       type: object

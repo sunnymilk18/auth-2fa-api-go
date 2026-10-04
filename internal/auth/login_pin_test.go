@@ -62,7 +62,7 @@ func TestLoginPinStep_FullFlow(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestLoginPinStep_CreatesPinWhenNotSet(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestLoginPinStep_CreatesPinWhenNotSet(t *testing.T) {
 
 	// The PIN really was created — a second login now requires IT, not a
 	// fresh create.
-	loginToken2, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken2, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("second LoginStep1: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestLoginPinStep_WrongPinLocksOut(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestLoginPinStep_ReusedOrExpiredToken(t *testing.T) {
 		t.Fatalf("unknown pin_token: err = %v, want %v", err, auth.ErrLoginSessionNotFound)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestVerifyTOTPLogin_RequiresPinStep(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

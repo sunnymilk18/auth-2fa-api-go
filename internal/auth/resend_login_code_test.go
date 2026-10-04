@@ -13,7 +13,7 @@ func TestResendLoginOTP_SendsFreshCodeUnderSameToken(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestResendLoginOTP_TOTPAccount_ReturnsClearError(t *testing.T) {
 		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
 	}
 
-	loginToken, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
 	if err != nil {
 		t.Fatalf("LoginStep1 after enabling TOTP: %v", err)
 	}
