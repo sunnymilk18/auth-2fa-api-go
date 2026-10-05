@@ -10,8 +10,8 @@
 #           Grafana.
 #
 # En producción, si Loki termina en el MISMO proyecto de Dokploy que el
-# otel-collector y Grafana, usá el nombre de servicio "loki" directo en
-# vez de un dominio, y sacá el `ports:` de abajo.
+# otel-collector y Grafana, usa el nombre de servicio "loki" directo en
+# vez de un dominio, y saca el `ports:` de abajo.
 
 services:
   loki:

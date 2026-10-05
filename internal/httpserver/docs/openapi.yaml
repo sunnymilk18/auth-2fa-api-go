@@ -89,7 +89,7 @@ paths:
         el resultado, pero refrescándolo cada tanto — no solo una vez) para
         verificar la firma RS256 de un access token sin llamar de vuelta a
         esta API. Normalmente devuelve una sola clave, pero durante una
-        rotación de claves puede devolver dos a la vez — elegí la que
+        rotación de claves puede devolver dos a la vez — elige la que
         corresponda al `kid` del header del JWT que estás verificando, nunca
         asumas que hay una sola ni tomes la primera del array.
       responses:
@@ -140,7 +140,7 @@ paths:
           description: >
             El email, el username o el rut ya están registrados. Si es el
             username, el mensaje de error incluye una alternativa libre
-            sugerida (ej. "el usuario 'juan.perez' ya está en uso, probá
+            sugerida (ej. "el usuario 'juan.perez' ya está en uso, prueba
             con 'juan.perez2'") — email y rut no se sugieren, porque no
             tiene sentido inventarle a alguien un email o un documento de
             identidad distinto al que puso.
@@ -1594,7 +1594,7 @@ components:
         finales) y de X-Admin-Token (el operador de toda la
         infraestructura, no de tu sistema). Se provisiona con
         POST /admin/clients/{id}/system-admin-key/rotate (requiere
-        X-Admin-Token, la pide el operador por vos). Contra un usuario de
+        X-Admin-Token, la pide el operador por ti). Contra un usuario de
         otro sistema, todo endpoint bajo /system-admin/* responde 404.
 
 
@@ -1654,7 +1654,7 @@ components:
             Acepta el email, el username o el rut de la cuenta — el backend
             prueba las tres columnas en una sola consulta
             (email = ? OR username = ? OR rut = ?), sin adivinar antes cuál
-            es cuál. No hay que ofrecer un selector de "con qué querés
+            es cuál. No hay que ofrecer un selector de "con qué quieres
             loguear" en el cliente: un solo campo alcanza para los tres.
           example: juan.perez
         password:

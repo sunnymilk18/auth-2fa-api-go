@@ -112,7 +112,7 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusConflict, "el rut ya está registrado")
 		case errors.As(err, &usernameTaken):
 			writeError(w, http.StatusConflict, fmt.Sprintf(
-				"el usuario %q ya está en uso, probá con %q", usernameTaken.Requested, usernameTaken.Suggested,
+				"el usuario %q ya está en uso, prueba con %q", usernameTaken.Requested, usernameTaken.Suggested,
 			))
 		case errors.Is(err, user.ErrInvalidUsername):
 			writeError(w, http.StatusBadRequest, "el usuario debe tener entre 8 y 32 caracteres, al menos una letra, no puede tener forma de rut ni contener \"@\"")
@@ -298,9 +298,9 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 	message := "código de verificación enviado por correo"
 	switch {
 	case needsSetup:
-		message = "elegí cómo proteger tu cuenta: correo o app autenticadora"
+		message = "elige cómo proteger tu cuenta: correo o app autenticadora"
 	case pushOffered:
-		message = "aprueba desde tu celular, o pedí el código por correo"
+		message = "aprueba desde tu celular, o pide el código por correo"
 	}
 	writeJSON(w, http.StatusOK, loginResponse{
 		LoginToken:          loginToken,

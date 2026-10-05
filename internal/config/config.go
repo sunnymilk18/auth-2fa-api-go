@@ -16,7 +16,8 @@ type Config struct {
 	PostgresDSN string
 
 	// RedisURL supports redis:// (plain) and rediss:// (TLS) schemes, e.g.
-	// rediss://default:<password>@<host>:<port> as provided by Upstash.
+	// rediss://default:<password>@<host>:<port> as provided by most managed
+	// Redis hosts.
 	RedisURL string
 
 	// Access tokens are signed with RS256 using this private key; the

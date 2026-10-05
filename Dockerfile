@@ -25,9 +25,9 @@ RUN go build -ldflags="-s -w" -o /out/api ./cmd/api && \
 # ---- runtime stage ------------------------------------------------------
 FROM alpine:3.20
 
-# ca-certificates: needed for outbound TLS to Neon/Upstash/Resend (or
-# whatever Postgres/Redis/mailer endpoints POSTGRES_DSN/REDIS_URL/
-# RESEND_API_KEY point at) — without it those handshakes fail.
+# ca-certificates: needed for outbound TLS to Resend (or whatever
+# Postgres/Redis/mailer endpoints POSTGRES_DSN/REDIS_URL/RESEND_API_KEY
+# point at) — without it those handshakes fail.
 # wget: used by the HEALTHCHECK below, already in the base image otherwise.
 RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 appuser
