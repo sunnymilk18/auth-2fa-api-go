@@ -37,7 +37,13 @@ import (
 // are registered at all — same opt-in-at-deployment pattern as totpEnabled
 // (see config.Config.FirebaseCredentialsPath's doc comment): unset means
 // 404, not "exists but always fails".
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, logger *slog.Logger) http.Handler {
+// trustedProxyCIDRs is the validated (already-parsed, invalid entries
+// already dropped by the caller — see middleware.ValidateTrustedProxyCIDRs)
+// form of TRUSTED_PROXY_CIDRS. Empty means trust nothing: chi's
+// ClientIPFromXFF middleware isn't registered at all in that case, so
+// middleware.ClientIP falls back to the real RemoteAddr for every request,
+// same as if this parameter didn't exist.
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -53,7 +59,23 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	}))
 
 	r.Use(chimw.RequestID)
-	r.Use(chimw.RealIP)
+
+	// Resolves the real client IP from X-Forwarded-For, walking it
+	// right-to-left and skipping any hop inside trustedProxyCIDRs — the
+	// opposite of chi's own chimw.RealIP (deliberately NOT used here: it's
+	// deprecated upstream as vulnerable to IP spoofing, GHSA-3fxj-6jh8-hvhx/
+	// GHSA-rjr7-jggh-pgcp/GHSA-9g5q-2w5x-hmxf — it blindly trusts the
+	// leftmost XFF value, or True-Client-IP/X-Real-IP, from ANY request,
+	// letting anyone dodge the rate limits and the IP blacklist just by
+	// setting a header). Read via middleware.ClientIP, never r.RemoteAddr
+	// directly. Only registered when there's actually something to trust —
+	// with nothing configured, no middleware here at all, so RemoteAddr
+	// (the real TCP peer) is what every request resolves to, same as if
+	// TRUSTED_PROXY_CIDRS never existed.
+	if len(trustedProxyCIDRs) > 0 {
+		r.Use(chimw.ClientIPFromXFF(trustedProxyCIDRs...))
+	}
+
 	r.Use(middleware.RequestLogger(logger))
 	r.Use(chimw.Recoverer)
 	r.Use(chimw.Timeout(15 * time.Second))

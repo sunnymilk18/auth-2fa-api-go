@@ -30,7 +30,7 @@ func RequestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 				"bytes", ww.BytesWritten(),
 				"duration_ms", time.Since(start).Milliseconds(),
 				"request_id", chimw.GetReqID(r.Context()),
-				"remote_addr", r.RemoteAddr,
+				"remote_addr", ClientIP(r),
 			)
 		})
 	}

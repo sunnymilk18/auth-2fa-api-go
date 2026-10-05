@@ -9,6 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
+
 	"auth-2fa-api/internal/testutil"
 )
 
@@ -110,6 +112,52 @@ func TestRateLimiter_IgnoresXForwardedFor(t *testing.T) {
 	}
 	if code := do("3.3.3.3"); code != http.StatusTooManyRequests {
 		t.Fatalf("request 3 (forged X-Forwarded-For): want 429, got %d", code)
+	}
+}
+
+// With TRUSTED_PROXY_CIDRS covering the connecting RemoteAddr (e.g. the
+// internal Docker network a proxying backend like empresa-backend sits on),
+// the limiter must count by the real client IP that proxy reports via
+// X-Forwarded-For — not by the proxy's own address, which would otherwise
+// make every user behind it share one budget (the exact bug TRUSTED_PROXY_
+// CIDRS exists to fix). Mirrors how router.go wires chi's ClientIPFromXFF
+// ahead of this middleware in production.
+func TestRateLimiter_TrustedProxy_CountsByRealClientIP(t *testing.T) {
+	t.Cleanup(func() { ValidateTrustedProxyCIDRs("") })
+	ValidateTrustedProxyCIDRs("10.0.1.0/24")
+
+	rdb := testutil.RedisClient(t)
+	rl := NewRateLimiter(rdb, "test-trusted", 1, time.Minute)
+
+	handler := chimw.ClientIPFromXFF("10.0.1.0/24")(rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+
+	do := func(realClientIP string) int {
+		req := httptest.NewRequest(http.MethodPost, "/", nil)
+		req.RemoteAddr = "10.0.1.249:12345" // the proxy's own connection, trusted
+		req.Header.Set("X-Forwarded-For", realClientIP)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	// Two different real clients behind the same trusted proxy each get
+	// their own budget.
+	if code := do("152.172.68.141"); code != http.StatusOK {
+		t.Fatalf("client A request 1: want 200, got %d", code)
+	}
+	if code := do("203.0.113.9"); code != http.StatusOK {
+		t.Fatalf("client B request 1: want 200, got %d (must not share client A's budget)", code)
+	}
+	// The same real client hitting the limit (1/min configured above) gets
+	// throttled on their second request.
+	if code := do("152.172.68.141"); code != http.StatusTooManyRequests {
+		t.Fatalf("client A request 2: want 429 (limit is 1/min), got %d", code)
+	}
+	// Client B is unaffected by client A's own limit.
+	if code := do("203.0.113.9"); code != http.StatusTooManyRequests {
+		t.Fatalf("client B request 2: want 429 (its own limit, not borrowed from client A), got %d", code)
 	}
 }
 

@@ -58,8 +58,9 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	if invalid := middleware.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs); len(invalid) > 0 {
-		logger.Warn("TRUSTED_PROXY_CIDRS has invalid entries, ignoring them", "invalid", invalid)
+	trustedProxyCIDRs, invalidProxyCIDRs := middleware.ValidateTrustedProxyCIDRs(cfg.TrustedProxyCIDRs)
+	if len(invalidProxyCIDRs) > 0 {
+		logger.Warn("TRUSTED_PROXY_CIDRS has invalid entries, ignoring them", "invalid", invalidProxyCIDRs)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -149,7 +150,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, logger)
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

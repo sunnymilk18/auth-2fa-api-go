@@ -84,7 +84,7 @@ Cada una de estas, sin configurar, deja las rutas que habilita sin existir (404)
 - **`FIREBASE_CREDENTIALS_PATH`** / **`FIREBASE_CREDENTIALS_JSON_BASE64`**: habilitan la aprobación de login por notificación push. La variante base64 tiene prioridad y es preferible en plataformas sin filesystem persistente/escribible.
 - **`PUSH_LOGIN_TTL`** / **`PUSH_MAX_REQUESTS`** / **`PUSH_REQUEST_WINDOW`**: ventana de espera y límite de solicitudes push por cuenta (defaults `60s`, `5` cada `15m`).
 - **`OTEL_EXPORTER_OTLP_ENDPOINT`**: exporta métricas/logs a un collector de OpenTelemetry — ver [`DEPLOY.md`](DEPLOY.md).
-- **`TRUSTED_PROXY_CIDRS`**: redes autorizadas a indicar la IP real del cliente vía `X-Forwarded-For` — necesario cuando un backend propio hace de intermediario entre los usuarios reales y esta API. Sin configurar, el header nunca se consulta.
+- **`TRUSTED_PROXY_CIDRS`**: redes autorizadas a indicar la IP real del cliente vía `X-Forwarded-For` (CIDR, separadas por coma) — necesario cuando un backend propio hace de intermediario entre los usuarios reales y esta API. Tiene que incluir **todas** las redes de proxies propios que están delante de la API (cada salto, no solo el primero) — si falta alguno, ese tramo se trata como no confiable y la IP real se pierde ahí. La IP del header solo se usa cuando la conexión TCP misma viene de una de estas redes; los headers de cualquier otro origen se ignoran siempre, sin importar qué digan. Sin configurar, el header nunca se consulta — se usa la IP de la conexión tal cual, igual que si esta variable no existiera.
 
 ## Base de datos
 
