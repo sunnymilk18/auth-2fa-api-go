@@ -86,6 +86,12 @@ type unbanRequest struct {
 	Reason string `json:"reason"`
 }
 
+// maxUnbanReasonLength caps the optional reason field — it's never read
+// back, only written to the log line below, so nothing past this length
+// adds any value; truncated rather than rejected since it's informational,
+// not something worth a 400 over.
+const maxUnbanReasonLength = 500
+
 // Unban lifts ip's ban — but only when it's owned by the caller's own
 // tenant (see middleware.Blacklist.UnbanOwned's doc comment); 404 rather
 // than 403 otherwise, same "never confirm or deny what exists for someone
@@ -102,6 +108,9 @@ func (h *blacklistHandlers) Unban(w http.ResponseWriter, r *http.Request) {
 
 	var req unbanRequest
 	_ = json.NewDecoder(r.Body).Decode(&req) // optional body — a missing/empty one is fine
+	if runes := []rune(req.Reason); len(runes) > maxUnbanReasonLength {
+		req.Reason = string(runes[:maxUnbanReasonLength])
+	}
 
 	found, err := h.bl.UnbanOwned(r.Context(), apiClientID, ip)
 	if err != nil {

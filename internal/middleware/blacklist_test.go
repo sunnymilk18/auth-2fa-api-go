@@ -498,6 +498,74 @@ func TestBlacklist_AllowlistRemoveAndList_ScopedToOwner(t *testing.T) {
 	}
 }
 
+// Unban (the operator's unscoped /admin/blacklist route) must fully clear
+// detailsKey and the owner's index, not just bannedKey — otherwise a ban the
+// operator just lifted would keep showing up in its owning tenant's own
+// /system-admin/blacklist listing until detailsKey's TTL caught up.
+func TestBlacklist_Unban_RemovesFromOwnersListingImmediately(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ctx := t.Context()
+
+	if err := bl.RecordViolation(ctx, "198.51.100.9", "tenant-a"); err != nil {
+		t.Fatalf("RecordViolation: %v", err)
+	}
+	bans, err := bl.ListOwned(ctx, "tenant-a", 200)
+	if err != nil {
+		t.Fatalf("ListOwned before unban: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("ListOwned before unban = %+v, want exactly one ban", bans)
+	}
+
+	if err := bl.Unban(ctx, "198.51.100.9"); err != nil {
+		t.Fatalf("Unban: %v", err)
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "198.51.100.9"); banned {
+		t.Fatal("ban should be lifted after Unban")
+	}
+
+	bans, err = bl.ListOwned(ctx, "tenant-a", 200)
+	if err != nil {
+		t.Fatalf("ListOwned after unban: %v", err)
+	}
+	if len(bans) != 0 {
+		t.Fatalf("ListOwned(tenant-a) after operator's Unban = %+v, want empty immediately, not just after detailsKey's TTL", bans)
+	}
+}
+
+// AllowlistAdd calls Unban internally to lift any existing ban — that must
+// carry the same full cleanup, so allowlisting a banned IP also removes it
+// from its owning tenant's listing right away.
+func TestBlacklist_AllowlistAdd_RemovesLiftedBanFromOwnersListingImmediately(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ctx := t.Context()
+
+	if err := bl.RecordViolation(ctx, "198.51.100.10", "tenant-a"); err != nil {
+		t.Fatalf("RecordViolation: %v", err)
+	}
+	bans, err := bl.ListOwned(ctx, "tenant-a", 200)
+	if err != nil {
+		t.Fatalf("ListOwned before allowlisting: %v", err)
+	}
+	if len(bans) != 1 {
+		t.Fatalf("ListOwned before allowlisting = %+v, want exactly one ban", bans)
+	}
+
+	if err := bl.AllowlistAdd(ctx, "operator", "198.51.100.10"); err != nil {
+		t.Fatalf("AllowlistAdd: %v", err)
+	}
+
+	bans, err = bl.ListOwned(ctx, "tenant-a", 200)
+	if err != nil {
+		t.Fatalf("ListOwned after allowlisting: %v", err)
+	}
+	if len(bans) != 0 {
+		t.Fatalf("ListOwned(tenant-a) after AllowlistAdd lifted its ban = %+v, want empty immediately", bans)
+	}
+}
+
 // RateLimiter denials must feed Blacklist's strike counter when attached —
 // this is the integration point router.go relies on.
 func TestRateLimiter_DenialFeedsAttachedBlacklist(t *testing.T) {

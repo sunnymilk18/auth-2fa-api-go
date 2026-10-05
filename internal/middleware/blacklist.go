@@ -378,24 +378,32 @@ func (bl *Blacklist) UnbanOwned(ctx context.Context, apiClientID, ip string) (fo
 	if err := bl.Unban(ctx, ip); err != nil {
 		return false, err
 	}
-	if err := bl.rdb.Del(ctx, bl.detailsKey(ip)).Err(); err != nil {
-		return false, fmt.Errorf("clearing blacklist ban details: %w", err)
-	}
-	if err := bl.rdb.ZRem(ctx, bl.ownedKey(apiClientID), ip).Err(); err != nil {
-		return false, fmt.Errorf("removing blacklist ban from owner index: %w", err)
-	}
 	return true, nil
 }
 
 // Unban lifts a ban early and clears its strike/level history — the manual
 // override for a false positive, most commonly a shared IP where the
 // original offender is long gone but everyone behind that IP is still
-// paying for it. Operator-level (middleware.RequireAdminToken's
-// /admin/blacklist route): doesn't touch per-owner index/details — use
-// UnbanOwned for the tenant-scoped /system-admin/blacklist route instead.
+// paying for it. Also clears detailsKey and removes ip from its owner's
+// ownedKey index when the ban had one, so a lifted ban stops appearing in
+// that system's /system-admin/blacklist listing right away instead of
+// lingering until detailsKey's own TTL catches up — both the operator's
+// /admin/blacklist/{ip} route and AllowlistAdd call this directly and rely
+// on that full cleanup; UnbanOwned does too, after confirming ownership.
 func (bl *Blacklist) Unban(ctx context.Context, ip string) error {
-	if err := bl.rdb.Del(ctx, bl.bannedKey(ip), bl.strikesKey(ip), bl.levelKey(ip)).Err(); err != nil {
+	owner, err := bl.rdb.HGet(ctx, bl.detailsKey(ip), "owner").Result()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("reading blacklist ban owner: %w", err)
+	}
+
+	if err := bl.rdb.Del(ctx, bl.bannedKey(ip), bl.strikesKey(ip), bl.levelKey(ip), bl.detailsKey(ip)).Err(); err != nil {
 		return fmt.Errorf("unbanning ip: %w", err)
+	}
+
+	if owner != "" {
+		if err := bl.rdb.ZRem(ctx, bl.ownedKey(owner), ip).Err(); err != nil {
+			return fmt.Errorf("removing blacklist ban from owner index: %w", err)
+		}
 	}
 	return nil
 }
