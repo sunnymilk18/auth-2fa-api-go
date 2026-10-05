@@ -128,6 +128,12 @@ services:
       # its own just gets the email without a link.
       PANEL_BASE_URL: ${PANEL_BASE_URL:-}
 
+      # Optional — networks trusted to supply the real client IP via
+      # X-Forwarded-For (e.g. a proxying backend of your own on this same
+      # Docker network). See .env.example. Left unset, X-Forwarded-For is
+      # never consulted.
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
+
       LOGIN_MAX_FAILED_ATTEMPTS: "10"
       LOGIN_LOCKOUT_WINDOW: 15m
 

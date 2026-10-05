@@ -89,6 +89,15 @@ type Config struct {
 	// before this feature existed.
 	PanelBaseURL string
 
+	// TrustedProxyCIDRs, comma-separated (e.g. "10.0.1.0/24"), is the set of
+	// networks allowed to tell this API the real client IP via
+	// X-Forwarded-For — only a request whose RemoteAddr falls inside one of
+	// these ranges gets the header trusted; everyone else's RemoteAddr is
+	// used as-is, exactly like before this setting existed. Empty by default
+	// (no proxy trusted at all) — see middleware.ClientIP's doc comment for
+	// why a blanket trust-the-header flag isn't safe.
+	TrustedProxyCIDRs string
+
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
 	// account. A temporary throttle, not a permanent lockout — see
@@ -206,6 +215,8 @@ func Load() (*Config, error) {
 		AdminAPIToken: getEnv("ADMIN_API_TOKEN", ""),
 
 		PanelBaseURL: getEnv("PANEL_BASE_URL", ""),
+
+		TrustedProxyCIDRs: getEnv("TRUSTED_PROXY_CIDRS", ""),
 
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),

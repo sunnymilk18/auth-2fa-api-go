@@ -19,6 +19,7 @@ import (
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/mailer"
+	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/push"
 	"auth-2fa-api/internal/telemetry"
 	"auth-2fa-api/internal/user"
@@ -55,6 +56,10 @@ func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
+	}
+
+	if invalid := middleware.SetTrustedProxyCIDRs(cfg.TrustedProxyCIDRs); len(invalid) > 0 {
+		logger.Warn("TRUSTED_PROXY_CIDRS has invalid entries, ignoring them", "invalid", invalid)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
