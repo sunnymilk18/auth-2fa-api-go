@@ -246,10 +246,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// Handlers.SetPin/VerifyPin's doc comments. Each has its own
 			// rate limiter on top of the account-level PIN lockout
 			// (user.Service.VerifyPin) — keyed by IP like every other
-			// limiter here, so they share the known, already-documented
-			// limitation that every client IP currently looks the same in
-			// production (see the deferred trusted-proxy investigation) —
-			// not something to fix as part of this.
+			// limiter here (middleware.ClientIP, see TRUSTED_PROXY_CIDRS).
 			r.With(pinSetLimiter.Middleware).Put("/pin", authHandlers.SetPin)
 			r.With(pinVerifyLimiter.Middleware).Post("/pin/verify", authHandlers.VerifyPin)
 

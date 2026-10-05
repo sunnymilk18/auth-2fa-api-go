@@ -79,9 +79,10 @@ func TestRateLimiter_Middleware_BlocksOverLimit(t *testing.T) {
 	}
 }
 
-// ClientIP never consults X-Forwarded-For at all (see its own doc comment
-// on why) — a forged one must have zero effect on which counter a request
-// hits, always the real connection's address.
+// With no TRUSTED_PROXY_CIDRS configured (the default — see ClientIP's own
+// doc comment), X-Forwarded-For is never consulted — a forged one must
+// have zero effect on which counter a request hits, always the real
+// connection's address.
 func TestRateLimiter_IgnoresXForwardedFor(t *testing.T) {
 	rdb := testutil.RedisClient(t)
 	rl := NewRateLimiter(rdb, "test", 1, time.Minute)
