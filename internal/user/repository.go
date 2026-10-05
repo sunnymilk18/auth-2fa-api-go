@@ -464,6 +464,21 @@ func (r *Repository) ResetPinFailedAttemptsIfUnchanged(ctx context.Context, id s
 	return nil
 }
 
+// ClearPinLockout resets id's PIN failed-attempt counter and lifts any
+// active lock, without touching the PIN itself — see auth.Service.
+// AdminClearLockouts. Unlike ResetPinFailedAttemptsIfUnchanged, this is an
+// explicit admin action: there's no concurrent "correct guess" to race
+// against, so it doesn't need the optimistic-concurrency guard. Distinct
+// from ClearPin (which also deletes the PIN, the "I forgot my PIN" reset).
+func (r *Repository) ClearPinLockout(ctx context.Context, id string) error {
+	const q = `UPDATE users SET pin_failed_attempts = 0, pin_locked_until = NULL, updated_at = now() WHERE id = $1`
+	_, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("clearing pin lockout: %w", err)
+	}
+	return nil
+}
+
 // ClearPin removes id's account PIN entirely (admin reset) — see
 // auth.Service.AdminResetPin, which also revokes the account's trusted
 // devices and sessions alongside this.

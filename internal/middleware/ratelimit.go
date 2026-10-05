@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"auth-2fa-api/internal/auth"
 )
 
 // formatWait renders a retry-after duration as a short Spanish phrase for
@@ -121,8 +123,13 @@ func (rl *RateLimiter) MiddlewareByKey(key func(*http.Request) string) func(http
 					// Best-effort, same fail-open spirit as everything else on
 					// this path — a Redis hiccup here just means one strike
 					// goes unrecorded, not a request that should have failed
-					// open turning into a 500.
-					_ = rl.blacklist.RecordViolation(r.Context(), rl.clientIP(r))
+					// open turning into a 500. ownerAPIClientID is "" when
+					// this route has no X-API-Key context (see Blacklist.
+					// RecordViolation's doc comment on ownership) — every
+					// rate-limited route today sits behind RequireAPIKey, so
+					// that's not the common case.
+					ownerAPIClientID, _ := auth.APIClientIDFromContext(r.Context())
+					_ = rl.blacklist.RecordViolation(r.Context(), rl.clientIP(r), ownerAPIClientID)
 				}
 				w.Header().Set("Retry-After", fmt.Sprintf("%.0f", retryAfter.Seconds()))
 				http.Error(w, fmt.Sprintf(`{"error":"demasiadas solicitudes, intenta de nuevo en %s"}`, formatWait(retryAfter)), http.StatusTooManyRequests)

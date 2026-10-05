@@ -99,6 +99,14 @@ type Config struct {
 	// why a blanket trust-the-header flag isn't safe.
 	TrustedProxyCIDRs string
 
+	// BanReferenceSecret derives the short "reference" code
+	// GET /system-admin/blacklist shows for a ban instead of the raw IP —
+	// see middleware.Blacklist.Reference's doc comment. Empty (the
+	// default) disables it: the field is simply omitted from responses,
+	// not a startup failure. Deliberately its own secret, not reused from
+	// JWT_REFRESH_SECRET or anything else already in this project.
+	BanReferenceSecret string
+
 	// Per-account login throttle (on top of the per-IP rate limiter) —
 	// catches password guessing spread across many IPs against one
 	// account. A temporary throttle, not a permanent lockout — see
@@ -218,6 +226,8 @@ func Load() (*Config, error) {
 		PanelBaseURL: getEnv("PANEL_BASE_URL", ""),
 
 		TrustedProxyCIDRs: getEnv("TRUSTED_PROXY_CIDRS", ""),
+
+		BanReferenceSecret: getEnv("BAN_REFERENCE_SECRET", ""),
 
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),

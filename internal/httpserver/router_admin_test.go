@@ -46,7 +46,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	)
 	handlers := auth.NewHandlers(svc)
 
-	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), adminToken, false, false, nil, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), adminToken, false, false, nil, nil, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
@@ -493,7 +493,7 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, nil, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, nil, nil, testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
@@ -551,7 +551,7 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, testLogger())
 
 	clientA, _, err := apiClients.Create(t.Context(), "reset-pin-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -645,7 +645,7 @@ func TestSystemAdminSetLoginPinRequired_ScopedToTenant(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, testLogger())
 
 	clientA, _, err := apiClients.Create(t.Context(), "login-pin-required-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -742,7 +742,7 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, testLogger())
 
 	clientA, apiKeyA, err := apiClients.Create(t.Context(), "change-email-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -882,6 +882,248 @@ func TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured(t *testing.T) {
 	}
 	if strings.Contains(sentWithout.Body, "/confirmar-correo") {
 		t.Fatalf("email body = %q, want no panel link when panel_base_url isn't configured", sentWithout.Body)
+	}
+}
+
+// TestSystemAdminLockouts_ScopedToTenant covers GET .../lockouts and
+// POST .../clear-lockouts: the response shape for an account with nothing
+// locked, validation of the "which" field, and that neither route can be
+// used against another tenant's account. The lockout mechanisms themselves
+// (LoginAttemptLimiter, the PIN lockout) already have their own dedicated
+// tests elsewhere — this is about routing and isolation, not re-proving
+// the underlying throttle logic.
+func TestSystemAdminLockouts_ScopedToTenant(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+
+	clientA := createTestClient(t, r, "lockouts-a")
+	clientB := createTestClient(t, r, "lockouts-b")
+	userA := registerTestUser(t, r, clientA.APIKey)
+
+	systemAdminKeyA := rotateSystemAdminKey(t, r, clientA.ID)
+	systemAdminKeyB := rotateSystemAdminKey(t, r, clientB.ID)
+
+	getLockouts := func(id, key string) *httptest.ResponseRecorder {
+		return systemAdminRequest(r, http.MethodGet, "/system-admin/users/"+id+"/lockouts", key)
+	}
+	clearLockouts := func(id, key, which string) *httptest.ResponseRecorder {
+		var body []byte
+		if which != "" {
+			body, _ = json.Marshal(map[string]string{"which": which})
+		}
+		req := httptest.NewRequest(http.MethodPost, "/system-admin/users/"+id+"/clear-lockouts", bytes.NewReader(body))
+		req.Header.Set("X-System-Admin-Token", key)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// A second tenant's scoped key can't see or clear the first tenant's
+	// account lockouts.
+	if rec := getLockouts(userA.id, systemAdminKeyB); rec.Code != http.StatusNotFound {
+		t.Fatalf("GET lockouts from another tenant: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+	if rec := clearLockouts(userA.id, systemAdminKeyB, "all"); rec.Code != http.StatusNotFound {
+		t.Fatalf("clear-lockouts from another tenant: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// The real tenant's key works, and a fresh account has nothing locked.
+	rec := getLockouts(userA.id, systemAdminKeyA)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET lockouts: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var status struct {
+		Login struct {
+			Locked bool `json:"locked"`
+		} `json:"login"`
+		Pin struct {
+			Locked bool `json:"locked"`
+		} `json:"pin"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatalf("decoding lockouts response: %v", err)
+	}
+	if status.Login.Locked || status.Pin.Locked {
+		t.Fatalf("fresh account lockouts = %+v, want both false", status)
+	}
+
+	// which must be one of the three accepted values.
+	if rec := clearLockouts(userA.id, systemAdminKeyA, "nonsense"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("clear-lockouts with invalid which: status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	// Each accepted value works against the real tenant's own account.
+	for _, which := range []string{"login", "pin", "all"} {
+		if rec := clearLockouts(userA.id, systemAdminKeyA, which); rec.Code != http.StatusNoContent {
+			t.Fatalf("clear-lockouts which=%q: status = %d, body = %s", which, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Unknown id -> 404, same as every other /system-admin/users/{id}/* route.
+	if rec := getLockouts("00000000-0000-0000-0000-000000000000", systemAdminKeyA); rec.Code != http.StatusNotFound {
+		t.Fatalf("GET lockouts for unknown id: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// rotateSystemAdminKey provisions (or rotates) clientID's scoped
+// X-System-Admin-Token via the operator's own X-Admin-Token — the same
+// setup step several tests above already repeat inline.
+func rotateSystemAdminKey(t *testing.T, r http.Handler, clientID string) string {
+	t.Helper()
+	rec := adminRequest(r, http.MethodPost, "/admin/clients/"+clientID+"/system-admin-key/rotate", testAdminToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotating system admin key for %s: status = %d, body = %s", clientID, rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		SystemAdminKey string `json:"system_admin_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding system-admin-key response: %v", err)
+	}
+	return resp.SystemAdminKey
+}
+
+// TestSystemAdminBlacklist_ScopedToTenant covers GET /system-admin/blacklist
+// and DELETE /system-admin/blacklist/{ip}: a ban is only visible to and
+// liftable by the tenant whose own traffic triggered it — a different
+// tenant's scoped key gets a 404, same as every other /system-admin/*
+// route, never a 403 that would confirm the ban exists elsewhere. Triggers
+// a real ban through the actual rate limiter (password-reset/request, the
+// lowest limit in the router: 5/hour) rather than reaching into
+// middleware.Blacklist directly — this is the thing that proves the whole
+// chain (RateLimiter -> Blacklist.RecordViolation -> owner attribution) is
+// wired correctly end to end, which middleware package's own unit tests
+// can't cover on their own.
+func TestSystemAdminBlacklist_ScopedToTenant(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		nil,
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, []byte("test-ban-reference-secret"), testLogger())
+
+	clientA := createTestClient(t, r, "blacklist-a")
+	clientB := createTestClient(t, r, "blacklist-b")
+	systemAdminKeyA := rotateSystemAdminKey(t, r, clientA.ID)
+	systemAdminKeyB := rotateSystemAdminKey(t, r, clientB.ID)
+
+	passwordResetRequest := func(apiKey string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"email": "nobody-" + testutil.UniqueSuffix(t) + "@example.com"})
+		req := httptest.NewRequest(http.MethodPost, "/auth/password-reset/request", bytes.NewReader(body))
+		req.Header.Set("X-API-Key", apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// password-reset/request allows 5/hour before the rate limiter starts
+	// denying (429); the blacklist bans after 3 denials within its own
+	// window, so the 8th call (5 allowed + 3 denied) is the one that
+	// actually crosses the threshold and creates the ban — it still comes
+	// back 429 itself (RateLimiter already decided that response before
+	// Blacklist.RecordViolation runs), so a 9th call is what proves the ban
+	// took effect, from the same (default httptest) RemoteAddr, owned by
+	// clientA.
+	for i := 0; i < 8; i++ {
+		passwordResetRequest(clientA.APIKey)
+	}
+	if code := passwordResetRequest(clientA.APIKey).Code; code != http.StatusForbidden {
+		t.Fatalf("9th password-reset/request call: status = %d, want %d (banned)", code, http.StatusForbidden)
+	}
+
+	// The system-admin calls below come from a different address than the
+	// one that got banned above — in reality this is the panel/backend
+	// calling from its own network, not the abusive client itself; using
+	// the same (default httptest) RemoteAddr here would make these calls
+	// get rejected by Blacklist.Middleware's own global IP gate before
+	// ever reaching the route, which isn't what this test is about.
+	const adminCallerAddr = "198.51.100.200:1"
+	listBans := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/system-admin/blacklist", nil)
+		req.RemoteAddr = adminCallerAddr
+		if key != "" {
+			req.Header.Set("X-System-Admin-Token", key)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+	deleteBan := func(ip, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodDelete, "/system-admin/blacklist/"+ip, nil)
+		req.RemoteAddr = adminCallerAddr
+		req.Header.Set("X-System-Admin-Token", key)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// clientB sees no bans of its own — clientA's ban is invisible to it.
+	bRec := listBans(systemAdminKeyB)
+	if bRec.Code != http.StatusOK {
+		t.Fatalf("GET blacklist (tenant B): status = %d, body = %s", bRec.Code, bRec.Body.String())
+	}
+	var bListing struct {
+		Bans []map[string]any `json:"bans"`
+	}
+	if err := json.Unmarshal(bRec.Body.Bytes(), &bListing); err != nil {
+		t.Fatalf("decoding blacklist response (tenant B): %v", err)
+	}
+	if len(bListing.Bans) != 0 {
+		t.Fatalf("tenant B's blacklist listing = %+v, want empty (the ban belongs to tenant A)", bListing.Bans)
+	}
+
+	// clientA sees exactly its own ban, with a reference (a secret is
+	// configured on this router).
+	aRec := listBans(systemAdminKeyA)
+	if aRec.Code != http.StatusOK {
+		t.Fatalf("GET blacklist (tenant A): status = %d, body = %s", aRec.Code, aRec.Body.String())
+	}
+	var aListing struct {
+		Bans []map[string]any `json:"bans"`
+	}
+	if err := json.Unmarshal(aRec.Body.Bytes(), &aListing); err != nil {
+		t.Fatalf("decoding blacklist response (tenant A): %v", err)
+	}
+	if len(aListing.Bans) != 1 {
+		t.Fatalf("tenant A's blacklist listing = %+v, want exactly one ban", aListing.Bans)
+	}
+	ban := aListing.Bans[0]
+	ip, _ := ban["ip"].(string)
+	if ip == "" {
+		t.Fatalf("ban missing ip: %+v", ban)
+	}
+	if ref, _ := ban["reference"].(string); ref == "" {
+		t.Fatalf("ban missing reference despite a secret being configured: %+v", ban)
+	}
+
+	// Invalid IP in the path -> 400, before any ownership check.
+	if rec := deleteBan("not-an-ip", systemAdminKeyA); rec.Code != http.StatusBadRequest {
+		t.Fatalf("DELETE blacklist with invalid ip: status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	// clientB can't lift clientA's ban.
+	if rec := deleteBan(ip, systemAdminKeyB); rec.Code != http.StatusNotFound {
+		t.Fatalf("DELETE blacklist (tenant B, tenant A's ban): status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+
+	// clientA can lift its own ban, and subsequent requests work again.
+	if rec := deleteBan(ip, systemAdminKeyA); rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE blacklist (tenant A, own ban): status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if code := passwordResetRequest(clientA.APIKey).Code; code == http.StatusForbidden {
+		t.Fatal("still banned after lifting the ban")
 	}
 }
 

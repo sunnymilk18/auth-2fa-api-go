@@ -43,7 +43,11 @@ import (
 // ClientIPFromXFF middleware isn't registered at all in that case, so
 // middleware.ClientIP falls back to the real RemoteAddr for every request,
 // same as if this parameter didn't exist.
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, logger *slog.Logger) http.Handler {
+// banReferenceSecret derives the short "reference" code /system-admin/
+// blacklist shows for a ban instead of the raw IP — see middleware.
+// Blacklist.Reference's doc comment. nil/empty disables it (omitted from
+// responses, not a startup failure).
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -92,8 +96,10 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		3, 24*time.Hour,
 		[]time.Duration{24 * time.Hour, 72 * time.Hour, 7 * 24 * time.Hour},
 		30*24*time.Hour,
+		banReferenceSecret,
 	)
 	r.Use(blacklist.Middleware)
+	blHandlers := &blacklistHandlers{bl: blacklist, logger: logger}
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health
@@ -337,6 +343,8 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 			r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
 			r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
+			r.Get("/{id}/lockouts", adminUserHandlers.GetLockouts)
+			r.Post("/{id}/clear-lockouts", adminUserHandlers.ClearLockouts)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a
@@ -381,6 +389,18 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
 		r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
 		r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
+		r.Get("/{id}/lockouts", adminUserHandlers.GetLockouts)
+		r.Post("/{id}/clear-lockouts", adminUserHandlers.ClearLockouts)
+	})
+
+	// A tenant's own view of its banned IPs — see blacklistHandlers' doc
+	// comment and middleware.Blacklist.ListOwned/UnbanOwned for why this is
+	// scoped by ownership rather than mirroring /admin/blacklist (the
+	// operator's own unscoped override) directly.
+	r.Route("/system-admin/blacklist", func(r chi.Router) {
+		r.Use(middleware.RequireSystemAdminToken(apiClients))
+		r.Get("/", blHandlers.List)
+		r.Delete("/{ip}", blHandlers.Unban)
 	})
 
 	r.Group(func(r chi.Router) {

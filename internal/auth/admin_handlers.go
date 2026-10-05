@@ -97,6 +97,69 @@ func (h *AdminHandlers) SetLoginPinRequired(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type lockoutStatusResponse struct {
+	Locked            bool  `json:"locked"`
+	RetryAfterSeconds int64 `json:"retry_after_seconds"`
+}
+
+type lockoutsResponse struct {
+	Login lockoutStatusResponse `json:"login"`
+	Pin   lockoutStatusResponse `json:"pin"`
+}
+
+// GetLockouts reports whether the account's login throttle and/or PIN
+// lockout are currently active — see Service.AdminGetLockouts' doc comment.
+func (h *AdminHandlers) GetLockouts(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	login, pin, err := h.svc.AdminGetLockouts(r.Context(), apiClientID, id)
+	if err != nil {
+		writeAdminUserActionError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, lockoutsResponse{
+		Login: lockoutStatusResponse{Locked: login.Locked, RetryAfterSeconds: int64(login.RetryAfter.Seconds())},
+		Pin:   lockoutStatusResponse{Locked: pin.Locked, RetryAfterSeconds: int64(pin.RetryAfter.Seconds())},
+	})
+}
+
+type clearLockoutsRequest struct {
+	Which string `json:"which"`
+}
+
+// ClearLockouts resets the account's login and/or PIN failed-attempt
+// counters — see Service.AdminClearLockouts' doc comment for exactly what
+// this does and doesn't touch.
+func (h *AdminHandlers) ClearLockouts(w http.ResponseWriter, r *http.Request) {
+	apiClientID, _ := APIClientIDFromContext(r.Context())
+	id := chi.URLParam(r, "id")
+
+	var req clearLockoutsRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	var clearLogin, clearPin bool
+	switch req.Which {
+	case "login":
+		clearLogin = true
+	case "pin":
+		clearPin = true
+	case "all":
+		clearLogin, clearPin = true, true
+	default:
+		writeError(w, http.StatusBadRequest, `which debe ser "login", "pin" o "all"`)
+		return
+	}
+
+	if err := h.svc.AdminClearLockouts(r.Context(), apiClientID, id, clearLogin, clearPin); err != nil {
+		writeAdminUserActionError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ResetPin clears the account's PIN and revokes its trusted devices and
 // sessions — see Service.AdminResetPin's doc comment.
 func (h *AdminHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {

@@ -379,6 +379,26 @@ func (s *Service) HasPin(ctx context.Context, userID string) (bool, error) {
 	return pinHash != "", nil
 }
 
+// PinLockout reports whether userID's PIN is currently locked, and for how
+// much longer — exposed via GET /system-admin/users/{id}/lockouts.
+func (s *Service) PinLockout(ctx context.Context, userID string) (locked bool, retryAfter time.Duration, err error) {
+	_, _, lockedUntil, err := s.repo.PinState(ctx, userID)
+	if err != nil {
+		return false, 0, err
+	}
+	if lockedUntil == nil || !lockedUntil.After(time.Now()) {
+		return false, 0, nil
+	}
+	return true, time.Until(*lockedUntil), nil
+}
+
+// ClearPinLockout resets userID's PIN failed-attempt counter and lifts any
+// active lock, without touching the PIN itself — see Repository.
+// ClearPinLockout's doc comment for how this differs from ClearPin/ResetPin.
+func (s *Service) ClearPinLockout(ctx context.Context, userID string) error {
+	return s.repo.ClearPinLockout(ctx, userID)
+}
+
 // VerifyPin checks pin against userID's account PIN, applying the shared
 // failed-attempt lockout: maxFailedTries consecutive wrong guesses lock the
 // PIN for pinLockDuration. While locked, every verification (even a correct

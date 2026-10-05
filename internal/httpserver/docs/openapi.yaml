@@ -1557,6 +1557,170 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /system-admin/users/{id}/lockouts:
+    get:
+      tags: [system-admin]
+      summary: Estado de los bloqueos por intentos fallidos de una cuenta
+      description: >
+        Los dos contadores independientes de intentos fallidos que
+        /auth/login y el paso de PIN del login ya aplican por su cuenta:
+        el throttle de login (por cuenta, además del límite por IP) y el
+        bloqueo del PIN de cuenta. Solo lectura — ver POST clear-lockouts
+        para limpiarlos.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Estado actual de ambos bloqueos
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LockoutsResponse"
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/users/{id}/clear-lockouts:
+    post:
+      tags: [system-admin]
+      summary: Limpia uno o ambos contadores de intentos fallidos de una cuenta
+      description: >
+        Pone en cero el contador elegido. No revoca sesiones, no borra el
+        PIN ni toca dispositivos de confianza — eso es lo que hacen
+        revoke-sessions/reset-pin por separado.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClearLockoutsRequest"
+      responses:
+        "204":
+          description: Contador(es) en cero
+        "400":
+          description: which no es "login", "pin" ni "all"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            El id no existe, o pertenece a otro sistema (misma respuesta
+            en ambos casos, a propósito)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/blacklist:
+    get:
+      tags: [system-admin]
+      summary: Lista los baneos por IP vigentes de tu propio sistema
+      description: >
+        Cada baneo tiene un único sistema dueño: el que hizo la petición
+        que cruzó el umbral y lo creó (ver POST /system-admin/users para
+        el resto de las acciones scoped — mismo criterio de aislamiento
+        en toda esta familia de rutas). Baneos de otros sistemas, o
+        creados antes de que esta función existiera (sin dueño
+        registrado), nunca aparecen acá — solo el operador puede verlos y
+        levantarlos, con X-Admin-Token vía /admin/blacklist. Hasta 200
+        resultados, sin paginación por ahora.
+      security:
+        - systemAdminTokenAuth: []
+      responses:
+        "200":
+          description: Baneos vigentes que tu sistema generó
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlacklistListResponse"
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /system-admin/blacklist/{ip}:
+    delete:
+      tags: [system-admin]
+      summary: Levanta un baneo por IP de tu propio sistema
+      description: >
+        Solo si tu sistema es el dueño del baneo — ver GET
+        /system-admin/blacklist. Limpia también sus strikes y nivel de
+        escalada, igual que la ruta del operador.
+      security:
+        - systemAdminTokenAuth: []
+      parameters:
+        - name: ip
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UnbanRequest"
+      responses:
+        "204":
+          description: Baneo levantado
+        "400":
+          description: La IP no tiene un formato válido
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: X-System-Admin-Token faltante, inválido o revocado
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: >
+            La IP no está baneada, el baneo es de otro sistema, o es
+            anterior a esta función (sin dueño registrado) — misma
+            respuesta en los tres casos, a propósito
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1979,6 +2143,71 @@ components:
       properties:
         required:
           type: boolean
+
+    LockoutStatus:
+      type: object
+      properties:
+        locked:
+          type: boolean
+        retry_after_seconds:
+          type: integer
+          format: int64
+
+    LockoutsResponse:
+      type: object
+      properties:
+        login:
+          $ref: "#/components/schemas/LockoutStatus"
+        pin:
+          $ref: "#/components/schemas/LockoutStatus"
+
+    ClearLockoutsRequest:
+      type: object
+      required: [which]
+      properties:
+        which:
+          type: string
+          enum: [login, pin, all]
+
+    BlacklistEntry:
+      type: object
+      properties:
+        ip:
+          type: string
+        reference:
+          type: string
+          description: >
+            Código corto derivado de la IP (HMAC) — solo presente si el
+            servidor tiene BAN_REFERENCE_SECRET configurado.
+        banned_at:
+          type: integer
+          format: int64
+          description: Unix timestamp de cuándo se creó el baneo.
+        banned_until:
+          type: integer
+          format: int64
+          description: Unix timestamp de cuándo vence.
+        level:
+          type: integer
+          description: Nivel de escalada (1, 2 o 3+) al momento del baneo.
+        strikes:
+          type: integer
+          description: Cuántas infracciones lo dispararon.
+
+    BlacklistListResponse:
+      type: object
+      properties:
+        bans:
+          type: array
+          items:
+            $ref: "#/components/schemas/BlacklistEntry"
+
+    UnbanRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          description: Opcional — queda registrado en los logs.
 
     RegisterDeviceResponse:
       type: object

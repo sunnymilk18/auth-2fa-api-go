@@ -85,6 +85,7 @@ Cada una de estas, sin configurar, deja las rutas que habilita sin existir (404)
 - **`PUSH_LOGIN_TTL`** / **`PUSH_MAX_REQUESTS`** / **`PUSH_REQUEST_WINDOW`**: ventana de espera y límite de solicitudes push por cuenta (defaults `60s`, `5` cada `15m`).
 - **`OTEL_EXPORTER_OTLP_ENDPOINT`**: exporta métricas/logs a un collector de OpenTelemetry — ver [`DEPLOY.md`](DEPLOY.md).
 - **`TRUSTED_PROXY_CIDRS`**: redes autorizadas a indicar la IP real del cliente vía `X-Forwarded-For` (CIDR, separadas por coma) — necesario cuando un backend propio hace de intermediario entre los usuarios reales y esta API. Tiene que incluir **todas** las redes de proxies propios que están delante de la API (cada salto, no solo el primero) — si falta alguno, ese tramo se trata como no confiable y la IP real se pierde ahí. La IP del header solo se usa cuando la conexión TCP misma viene de una de estas redes; los headers de cualquier otro origen se ignoran siempre, sin importar qué digan. Sin configurar, el header nunca se consulta — se usa la IP de la conexión tal cual, igual que si esta variable no existiera.
+- **`BAN_REFERENCE_SECRET`**: habilita el campo `reference` en `GET /system-admin/blacklist` (ver [`DEPLOY.md`](DEPLOY.md)) — un código corto derivado de la IP baneada (HMAC), para que un panel pueda mostrárselo a la persona sin exponer su IP real. Sin configurar, el campo simplemente no aparece — no es un requisito para que el resto de la API funcione.
 
 ## Base de datos
 

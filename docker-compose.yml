@@ -134,6 +134,11 @@ services:
       # never consulted.
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-}
 
+      # Optional — derives the short "reference" code GET /system-admin/
+      # blacklist shows instead of the real banned IP. See .env.example.
+      # Left unset, the field is simply omitted.
+      BAN_REFERENCE_SECRET: ${BAN_REFERENCE_SECRET:-}
+
       LOGIN_MAX_FAILED_ATTEMPTS: "10"
       LOGIN_LOCKOUT_WINDOW: 15m
 

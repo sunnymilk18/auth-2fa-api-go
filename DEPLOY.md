@@ -62,6 +62,8 @@ curl -X DELETE https://tu-api/admin/blacklist/203.0.113.7 -H "X-Admin-Token: $AD
 
 Una IP que dispara cualquiera de los rate limits de la API 3 veces separadas en 24h queda baneada del todo (no solo throttleada) — 24h la primera vez, 72h la segunda, 7 días de ahí en más. El nivel de escalada se olvida solo tras 30 días sin nuevas infracciones, para no castigar para siempre una IP compartida (biblioteca pública, wifi comunitario) mucho después de que el que abusó ya se fue.
 
+Mientras dura el baneo, cualquier petición de esa IP recibe `403` con JSON — `{"error":"...", "code":"ip_banned", "retry_after_seconds":N, "reference":"..."}` (`reference` solo si hay `BAN_REFERENCE_SECRET` configurado) — y el header `Retry-After`. Un sistema consumidor puede ver y levantar sus propios baneos sin necesitar el `X-Admin-Token` del operador — ver "Baneos automáticos por IP" en [Administración por sistema](#administración-por-sistema-credencial-scoped) más abajo.
+
 `POST /admin/users/{id}/ban` desactiva una cuenta puntual, revoca todos sus refresh tokens y dispositivos de confianza, y marca sus access tokens ya emitidos como inválidos desde ese instante (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut.
 
 ## Administración por sistema (credencial scoped)
@@ -90,6 +92,40 @@ curl -X POST https://tu-api/system-admin/users/<id>/change-email    -H "X-System
 ```
 
 Si `<id>` pertenece a otro sistema, la respuesta es `404` (no `403`) — indistinguible de un id que directamente no existe.
+
+### Bloqueos por intentos fallidos (login y PIN)
+
+Cada cuenta tiene dos contadores independientes de intentos fallidos — el de `/auth/login` (`LoginAttemptLimiter`) y el del PIN de cuenta (ver "PIN de cuenta" en el README) — que se bloquean temporalmente tras varios fallos seguidos. Para verlos y, si hace falta, limpiarlos sin esperar a que expiren solos:
+
+```bash
+# Estado actual de ambos bloqueos.
+curl https://tu-api/system-admin/users/<id>/lockouts -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+# -> {"login":{"locked":false,"retry_after_seconds":0},"pin":{"locked":true,"retry_after_seconds":612}}
+
+# Limpiar uno de los dos, o ambos.
+curl -X POST https://tu-api/system-admin/users/<id>/clear-lockouts -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY" \
+  -d '{"which":"pin"}'   # "login" | "pin" | "all"
+```
+
+`clear-lockouts` solo pone el contador en cero — **no** revoca sesiones, no borra el PIN ni toca dispositivos de confianza (eso es lo que hacen `revoke-sessions`/`reset-pin` más arriba, por separado). Mismo criterio de aislamiento por tenant que el resto de `/system-admin/users/*`.
+
+### Baneos automáticos por IP
+
+La lista negra automática por IP (ver "Lista negra automática por IP" en `DEPLOY.md` más abajo) es, por diseño, global — una IP baneada queda bloqueada para cualquier sistema, no solo el que la disparó. Pero **cada baneo tiene un único sistema dueño**: el que hizo la petición que terminó de cruzar el umbral y creó ese baneo en particular. `/system-admin/blacklist` solo muestra y permite levantar los baneos de los que tu sistema es dueño — nunca los de otro, y nunca los creados antes de que esto existiera (esos solo los levanta el operador, con `X-Admin-Token`, vía `/admin/blacklist`).
+
+```bash
+# Baneos vigentes que tu sistema generó (hasta 200, sin paginación por ahora).
+curl https://tu-api/system-admin/blacklist -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY"
+# -> {"bans":[{"ip":"203.0.113.7","reference":"a1b2c3d4","banned_at":1234,"banned_until":5678,"level":1,"strikes":3}]}
+
+# Levantarlo antes de tiempo (motivo opcional, queda en los logs).
+curl -X DELETE https://tu-api/system-admin/blacklist/203.0.113.7 -H "X-System-Admin-Token: $SYSTEM_ADMIN_KEY" \
+  -d '{"reason":"confirmado con la persona, era un error de tipeo en la contraseña"}'
+```
+
+`reference` solo aparece si configuraste `BAN_REFERENCE_SECRET` (ver variables opcionales en el README) — un código corto y estable derivado de la IP, pensado para que tu panel se lo muestre a la persona bloqueada sin revelarle su propia IP. Una IP que pertenece a `TRUSTED_PROXY_CIDRS` (tu propio proxy/backend) nunca puede terminar baneada — esa es la salvaguarda que evita que un bug tuyo (por ejemplo, una llamada que olvidó mandar `X-Forwarded-For`) tire abajo toda tu integración de un saque.
+
+Si `<ip>` no tiene un formato válido, `400`. Si no está baneada, pertenece a otro sistema, o es un baneo anterior a esta función (sin dueño registrado), `404` — mismo criterio que el resto de `/system-admin/*`, nunca `403`.
 
 La misma credencial también sirve para listar las cuentas del tenant — la única ruta de este grupo sin `{id}`:
 

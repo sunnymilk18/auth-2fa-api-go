@@ -150,7 +150,7 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, logger)
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

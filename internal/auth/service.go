@@ -637,6 +637,59 @@ func (s *Service) AdminSetLoginPinRequired(ctx context.Context, apiClientID, use
 	return nil
 }
 
+// LockoutStatus is one of the two entries AdminGetLockouts returns.
+type LockoutStatus struct {
+	Locked     bool
+	RetryAfter time.Duration
+}
+
+// AdminGetLockouts reports whether userID currently has a login throttle
+// and/or a PIN lockout active — see LoginAttemptLimiter.IsLocked and
+// user.Service.PinLockout, the same two mechanisms /auth/login and the PIN
+// step already enforce on their own. Read-only: never clears anything
+// itself (see AdminClearLockouts for that).
+func (s *Service) AdminGetLockouts(ctx context.Context, apiClientID, userID string) (login, pin LockoutStatus, err error) {
+	if _, err := s.checkUserScope(ctx, apiClientID, userID); err != nil {
+		return LockoutStatus{}, LockoutStatus{}, err
+	}
+
+	loginLocked, loginRetry, err := s.loginAttempts.IsLocked(ctx, apiClientID, userID)
+	if err != nil {
+		return LockoutStatus{}, LockoutStatus{}, err
+	}
+	pinLocked, pinRetry, err := s.users.PinLockout(ctx, userID)
+	if err != nil {
+		return LockoutStatus{}, LockoutStatus{}, err
+	}
+	return LockoutStatus{Locked: loginLocked, RetryAfter: loginRetry}, LockoutStatus{Locked: pinLocked, RetryAfter: pinRetry}, nil
+}
+
+// AdminClearLockouts resets userID's login throttle and/or PIN lockout
+// counter (which per which asks for), scoped to apiClientID like every
+// other Admin*/checkUserScope method. Deliberately narrow: never revokes
+// sessions, never touches the PIN itself or any trusted device — those are
+// AdminRevokeAllSessions/AdminResetPin's job, not this one's. which must be
+// "login", "pin" or "all"; any other value is a caller bug (validated by
+// the handler, not here).
+func (s *Service) AdminClearLockouts(ctx context.Context, apiClientID, userID string, clearLogin, clearPin bool) error {
+	u, err := s.checkUserScope(ctx, apiClientID, userID)
+	if err != nil {
+		return err
+	}
+	if clearLogin {
+		if err := s.loginAttempts.Reset(ctx, apiClientID, userID); err != nil {
+			return err
+		}
+	}
+	if clearPin {
+		if err := s.users.ClearPinLockout(ctx, userID); err != nil {
+			return err
+		}
+	}
+	s.logger.Info("account lockouts cleared", "user_id", userID, "api_client_id", u.APIClientID, "login", clearLogin, "pin", clearPin)
+	return nil
+}
+
 // Refresh validates a refresh token and issues a new access token, rotating
 // the refresh token (old one revoked, new one issued) to limit replay risk.
 // The validate-and-revoke step is one atomic operation (see
