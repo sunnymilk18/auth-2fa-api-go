@@ -362,6 +362,21 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				}
 				w.WriteHeader(http.StatusNoContent)
 			})
+
+			// Exempts an IP from ever being struck/banned — operator-only,
+			// deliberately not exposed under /system-admin/*: the exemption
+			// is global (protects the IP against every system's strikes,
+			// not just whoever added it — see blacklistHandlers.
+			// AddAllowlist's doc comment), so letting any one tenant's own
+			// credential grant it would let that tenant weaken protection
+			// for every other tenant on the platform, not just itself —
+			// unlike every other /system-admin/* action, which can only
+			// ever affect its own tenant's own data.
+			r.Route("/allowlist", func(r chi.Router) {
+				r.Get("/", blHandlers.ListAllowlist)
+				r.Post("/", blHandlers.AddAllowlist)
+				r.Delete("/{ip}", blHandlers.RemoveAllowlist)
+			})
 		})
 	}
 

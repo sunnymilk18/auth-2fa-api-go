@@ -1127,6 +1127,77 @@ func TestSystemAdminBlacklist_ScopedToTenant(t *testing.T) {
 	}
 }
 
+// TestAdminBlacklistAllowlist_OperatorOnly covers /admin/blacklist/allowlist:
+// deliberately NOT exposed under /system-admin/* — the exemption it grants
+// is global (protects an IP against every system's strikes, not just
+// whoever added it), so letting any one tenant's own credential control it
+// would let that tenant weaken protection for every other tenant on the
+// platform. Only the operator's own X-Admin-Token can manage it.
+func TestAdminBlacklistAllowlist_OperatorOnly(t *testing.T) {
+	r := newTestRouterWithAdmin(t, testAdminToken)
+	const testIP = "203.0.113.90"
+
+	addToAllowlist := func(ip, token string) *httptest.ResponseRecorder {
+		return adminRequest(r, http.MethodPost, "/admin/blacklist/allowlist", token, map[string]string{"ip": ip})
+	}
+	listAllowlist := func(token string) *httptest.ResponseRecorder {
+		return adminRequest(r, http.MethodGet, "/admin/blacklist/allowlist", token, nil)
+	}
+	removeFromAllowlist := func(ip, token string) *httptest.ResponseRecorder {
+		return adminRequest(r, http.MethodDelete, "/admin/blacklist/allowlist/"+ip, token, nil)
+	}
+
+	// Wrong/missing X-Admin-Token -> 401, same as every other /admin/* route.
+	if rec := addToAllowlist(testIP, "wrong-token"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("add with wrong token: status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	// Not reachable via /system-admin/* at all, even with a real, validly
+	// provisioned scoped key — this exemption deliberately isn't something
+	// any single tenant's own credential can grant.
+	clientA := createTestClient(t, r, "allowlist-not-tenant")
+	systemAdminKeyA := rotateSystemAdminKey(t, r, clientA.ID)
+	if rec := systemAdminRequest(r, http.MethodGet, "/system-admin/blacklist/allowlist", systemAdminKeyA); rec.Code == http.StatusOK {
+		t.Fatalf("GET /system-admin/blacklist/allowlist with a valid scoped key: status = %d, want anything but 200 (route must not exist there)", rec.Code)
+	}
+
+	// Invalid IP -> 400.
+	if rec := addToAllowlist("not-an-ip", testAdminToken); rec.Code != http.StatusBadRequest {
+		t.Fatalf("add invalid ip: status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+
+	if rec := addToAllowlist(testIP, testAdminToken); rec.Code != http.StatusNoContent {
+		t.Fatalf("add to allowlist: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	listRec := listAllowlist(testAdminToken)
+	var body struct {
+		IPs []string `json:"ips"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding allowlist: %v", err)
+	}
+	if len(body.IPs) != 1 || body.IPs[0] != testIP {
+		t.Fatalf("allowlist = %v, want [%s]", body.IPs, testIP)
+	}
+
+	if rec := removeFromAllowlist(testIP, testAdminToken); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	listRec = listAllowlist(testAdminToken)
+	if err := json.Unmarshal(listRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding allowlist after removal: %v", err)
+	}
+	if len(body.IPs) != 0 {
+		t.Fatalf("allowlist after removal = %v, want empty", body.IPs)
+	}
+
+	// Removing an IP that was never added -> 404.
+	if rec := removeFromAllowlist("198.51.100.1", testAdminToken); rec.Code != http.StatusNotFound {
+		t.Fatalf("remove unknown ip: status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
 // The operator's unscoped /admin/users/{id}/reset-pin must also exist and
 // work — same handler as /system-admin/users/{id}/reset-pin above, just
 // reached through the operator's own X-Admin-Token instead.

@@ -383,6 +383,121 @@ func TestBlacklist_OwnerlessBan_InvisibleToSystemAdmins(t *testing.T) {
 	}
 }
 
+// AllowlistAdd exempts an IP from future strikes/bans, and also lifts
+// whatever ban it's currently serving right away — allowlisting an IP
+// precisely because it's wrongly blocked shouldn't leave it blocked until
+// a separate Unban call.
+func TestBlacklist_AllowlistAdd_ExemptsFromStrikesAndLiftsExistingBan(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ctx := t.Context()
+
+	if err := bl.RecordViolation(ctx, "192.0.2.50", "tenant-a"); err != nil {
+		t.Fatalf("RecordViolation: %v", err)
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "192.0.2.50"); !banned {
+		t.Fatal("expected banned before allowlisting")
+	}
+
+	if err := bl.AllowlistAdd(ctx, "tenant-a", "192.0.2.50"); err != nil {
+		t.Fatalf("AllowlistAdd: %v", err)
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "192.0.2.50"); banned {
+		t.Fatal("AllowlistAdd must lift any ban the IP is currently serving")
+	}
+
+	// Further violations never strike or ban it again.
+	for i := 0; i < 5; i++ {
+		if err := bl.RecordViolation(ctx, "192.0.2.50", "tenant-a"); err != nil {
+			t.Fatalf("RecordViolation #%d after allowlisting: %v", i, err)
+		}
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "192.0.2.50"); banned {
+		t.Fatal("allowlisted IP got banned despite the exemption")
+	}
+}
+
+// The exemption is global once added — it protects the IP against every
+// system's strikes, not only the one that added it. Same "one IP, one
+// shared state" reality as a ban itself.
+func TestBlacklist_AllowlistAdd_IsGlobalAcrossTenants(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ctx := t.Context()
+
+	if err := bl.AllowlistAdd(ctx, "tenant-a", "192.0.2.60"); err != nil {
+		t.Fatalf("AllowlistAdd: %v", err)
+	}
+
+	// tenant-b's own strikes against this IP are exempted too.
+	if err := bl.RecordViolation(ctx, "192.0.2.60", "tenant-b"); err != nil {
+		t.Fatalf("RecordViolation (tenant-b): %v", err)
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "192.0.2.60"); banned {
+		t.Fatal("allowlisting by tenant-a should also protect the IP against tenant-b's strikes")
+	}
+}
+
+// AllowlistRemove/AllowlistList only ever affect/see entries the calling
+// system itself added — same isolation rule as bans.
+func TestBlacklist_AllowlistRemoveAndList_ScopedToOwner(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ctx := t.Context()
+
+	if err := bl.AllowlistAdd(ctx, "tenant-a", "192.0.2.70"); err != nil {
+		t.Fatalf("AllowlistAdd: %v", err)
+	}
+
+	listA, err := bl.AllowlistList(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("AllowlistList(tenant-a): %v", err)
+	}
+	if len(listA) != 1 || listA[0] != "192.0.2.70" {
+		t.Fatalf("AllowlistList(tenant-a) = %v, want exactly [192.0.2.70]", listA)
+	}
+
+	listB, err := bl.AllowlistList(ctx, "tenant-b")
+	if err != nil {
+		t.Fatalf("AllowlistList(tenant-b): %v", err)
+	}
+	if len(listB) != 0 {
+		t.Fatalf("AllowlistList(tenant-b) = %v, want empty", listB)
+	}
+
+	// tenant-b can't remove tenant-a's entry.
+	found, err := bl.AllowlistRemove(ctx, "tenant-b", "192.0.2.70")
+	if err != nil {
+		t.Fatalf("AllowlistRemove(tenant-b): %v", err)
+	}
+	if found {
+		t.Fatal("tenant-b must not be able to remove tenant-a's allowlist entry")
+	}
+	// The exemption therefore still holds.
+	if err := bl.RecordViolation(ctx, "192.0.2.70", "tenant-a"); err != nil {
+		t.Fatalf("RecordViolation: %v", err)
+	}
+	if banned, _, _ := bl.IsBanned(ctx, "192.0.2.70"); banned {
+		t.Fatal("entry should still be allowlisted after tenant-b's failed removal")
+	}
+
+	// tenant-a can remove its own entry.
+	found, err = bl.AllowlistRemove(ctx, "tenant-a", "192.0.2.70")
+	if err != nil {
+		t.Fatalf("AllowlistRemove(tenant-a): %v", err)
+	}
+	if !found {
+		t.Fatal("tenant-a should be able to remove its own allowlist entry")
+	}
+	listA, err = bl.AllowlistList(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("AllowlistList(tenant-a) after removal: %v", err)
+	}
+	if len(listA) != 0 {
+		t.Fatalf("AllowlistList(tenant-a) after removal = %v, want empty", listA)
+	}
+}
+
 // RateLimiter denials must feed Blacklist's strike counter when attached —
 // this is the integration point router.go relies on.
 func TestRateLimiter_DenialFeedsAttachedBlacklist(t *testing.T) {

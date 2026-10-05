@@ -64,6 +64,25 @@ Una IP que dispara cualquiera de los rate limits de la API 3 veces separadas en 
 
 Mientras dura el baneo, cualquier petición de esa IP recibe `403` con JSON — `{"error":"...", "code":"ip_banned", "retry_after_seconds":N, "reference":"..."}` (`reference` solo si hay `BAN_REFERENCE_SECRET` configurado) — y el header `Retry-After`. Un sistema consumidor puede ver y levantar sus propios baneos sin necesitar el `X-Admin-Token` del operador — ver "Baneos automáticos por IP" en [Administración por sistema](#administración-por-sistema-credencial-scoped) más abajo.
 
+### Lista blanca de IPs (nunca banear)
+
+Para una IP que sabes que es tráfico legítimo pero compartido (una oficina detrás de un mismo NAT, por ejemplo), donde un pico normal de logins podría cruzar el límite por error, sin que nadie esté atacando nada. **Deliberadamente solo del operador** (`X-Admin-Token`), no expuesta a `/system-admin/*`: la exención que otorga es global — protege la IP de los límites de *todos* los sistemas, no solo del que la pida — así que dejar que cualquier sistema la controle le daría la capacidad de debilitar la protección de otros, a diferencia de todo lo demás que puede hacer con su propio `X-System-Admin-Token` (que solo afecta sus propios datos).
+
+```bash
+# Nunca banear esta IP — y si ya estaba baneada, la desbanea de inmediato.
+curl -X POST https://tu-api/admin/blacklist/allowlist -H "X-Admin-Token: $ADMIN_API_TOKEN" \
+  -H "Content-Type: application/json" -d '{"ip":"203.0.113.50"}'
+
+# Ver las IPs en la lista.
+curl https://tu-api/admin/blacklist/allowlist -H "X-Admin-Token: $ADMIN_API_TOKEN"
+# -> {"ips":["203.0.113.50"]}
+
+# Sacarla de la lista (vuelve a poder banearse normalmente).
+curl -X DELETE https://tu-api/admin/blacklist/allowlist/203.0.113.50 -H "X-Admin-Token: $ADMIN_API_TOKEN"
+```
+
+Si `<ip>` no tiene un formato válido, `400`. Si no estaba en la lista, `404`.
+
 `POST /admin/users/{id}/ban` desactiva una cuenta puntual, revoca todos sus refresh tokens y dispositivos de confianza, y marca sus access tokens ya emitidos como inválidos desde ese instante (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut.
 
 ## Administración por sistema (credencial scoped)
@@ -126,6 +145,8 @@ curl -X DELETE https://tu-api/system-admin/blacklist/203.0.113.7 -H "X-System-Ad
 `reference` solo aparece si configuraste `BAN_REFERENCE_SECRET` (ver variables opcionales en el README) — un código corto y estable derivado de la IP, pensado para que tu panel se lo muestre a la persona bloqueada sin revelarle su propia IP. Una IP que pertenece a `TRUSTED_PROXY_CIDRS` (tu propio proxy/backend) nunca puede terminar baneada — esa es la salvaguarda que evita que un bug tuyo (por ejemplo, una llamada que olvidó mandar `X-Forwarded-For`) tire abajo toda tu integración de un saque.
 
 Si `<ip>` no tiene un formato válido, `400`. Si no está baneada, pertenece a otro sistema, o es un baneo anterior a esta función (sin dueño registrado), `404` — mismo criterio que el resto de `/system-admin/*`, nunca `403`.
+
+Para una IP que nunca debería banearse (una oficina propia detrás de un mismo NAT, por ejemplo, donde un pico normal de logins podría cruzar el límite sin que nadie esté atacando nada) existe una lista blanca — pero es **solo del operador**, no de cada sistema: ver "Lista blanca de IPs (nunca banear)" más arriba. La razón: la exención que otorga es global (protege la IP de los límites de *todos* los sistemas, no solo del que la agregó), así que dejar que cualquier `X-System-Admin-Token` la controle le daría a un sistema la capacidad de debilitar la protección de otros — a diferencia de todo lo demás en `/system-admin/*`, que solo puede afectar sus propios datos.
 
 La misma credencial también sirve para listar las cuentas del tenant — la única ruta de este grupo sin `{id}`:
 

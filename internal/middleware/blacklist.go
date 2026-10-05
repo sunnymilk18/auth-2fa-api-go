@@ -77,6 +77,86 @@ func (bl *Blacklist) detailsKey(ip string) string { return "blacklist:details:" 
 // whole keyspace: a single ZRANGEBYSCORE against one key.
 func (bl *Blacklist) ownedKey(apiClientID string) string { return "blacklist:owned:" + apiClientID }
 
+// allowlistOwnerKey's value is the api_client_id that added ip to the
+// allowlist (persistent, no TTL — allowlisting isn't time-boxed the way a
+// ban is). Existence alone is what RecordViolation checks; the value is
+// only read for ownership (AllowlistRemove) and listing.
+func (bl *Blacklist) allowlistOwnerKey(ip string) string { return "blacklist:allowlist:owner:" + ip }
+
+// allowlistMembersKey mirrors ownedKey's role for bans: a per-tenant set
+// of every IP it has allowlisted, so AllowlistList doesn't need SCAN.
+func (bl *Blacklist) allowlistMembersKey(apiClientID string) string {
+	return "blacklist:allowlist:members:" + apiClientID
+}
+
+// IsAllowlisted reports whether ip is exempt from strikes/bans — see
+// RecordViolation and AllowlistAdd's doc comments for what that means and
+// why the exemption is global (not scoped to whichever system added it).
+func (bl *Blacklist) IsAllowlisted(ctx context.Context, ip string) (bool, error) {
+	n, err := bl.rdb.Exists(ctx, bl.allowlistOwnerKey(ip)).Result()
+	if err != nil {
+		return false, fmt.Errorf("checking blacklist allowlist: %w", err)
+	}
+	return n > 0, nil
+}
+
+// AllowlistAdd exempts ip from ever being struck or banned (see
+// RecordViolation) — for an address a system knows is its own legitimate
+// traffic that just happens to be shared (a NATed office network, for
+// instance), so a burst of real logins shouldn't be able to ban everyone
+// behind it. The exemption is global once added: it protects ip against
+// every system's strikes, not only apiClientID's own — the same "one IP,
+// one shared state" reality that makes a ban affect every system too (see
+// RecordViolation's doc comment on ownership, and README.md/DEPLOY.md).
+// Also lifts any ban ip is currently serving and clears its strike/level
+// history, same as Unban — the point of allowlisting an IP is that it
+// should never be blocked, so leaving an existing block in place would
+// defeat the purpose of the call that was just made to prevent exactly
+// that.
+func (bl *Blacklist) AllowlistAdd(ctx context.Context, apiClientID, ip string) error {
+	if err := bl.rdb.Set(ctx, bl.allowlistOwnerKey(ip), apiClientID, 0).Err(); err != nil {
+		return fmt.Errorf("adding to blacklist allowlist: %w", err)
+	}
+	if err := bl.rdb.SAdd(ctx, bl.allowlistMembersKey(apiClientID), ip).Err(); err != nil {
+		return fmt.Errorf("indexing blacklist allowlist entry: %w", err)
+	}
+	return bl.Unban(ctx, ip)
+}
+
+// AllowlistRemove takes ip off the allowlist, but only if apiClientID is
+// the one that added it — same ownership rule as UnbanOwned. found is
+// false (no error) when ip isn't allowlisted at all, or belongs to a
+// different system.
+func (bl *Blacklist) AllowlistRemove(ctx context.Context, apiClientID, ip string) (found bool, err error) {
+	owner, err := bl.rdb.Get(ctx, bl.allowlistOwnerKey(ip)).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("reading blacklist allowlist owner: %w", err)
+	}
+	if owner != apiClientID {
+		return false, nil
+	}
+	if err := bl.rdb.Del(ctx, bl.allowlistOwnerKey(ip)).Err(); err != nil {
+		return false, fmt.Errorf("removing blacklist allowlist entry: %w", err)
+	}
+	if err := bl.rdb.SRem(ctx, bl.allowlistMembersKey(apiClientID), ip).Err(); err != nil {
+		return false, fmt.Errorf("removing blacklist allowlist index: %w", err)
+	}
+	return true, nil
+}
+
+// AllowlistList returns every IP apiClientID has allowlisted, in no
+// particular order.
+func (bl *Blacklist) AllowlistList(ctx context.Context, apiClientID string) ([]string, error) {
+	ips, err := bl.rdb.SMembers(ctx, bl.allowlistMembersKey(apiClientID)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("listing blacklist allowlist: %w", err)
+	}
+	return ips, nil
+}
+
 // Reference derives a short, stable, non-reversible code from ip — safe for
 // a consuming system's panel to show a blocked person (support ticket,
 // error message) without exposing their real IP address. Deterministic
@@ -145,6 +225,13 @@ func (bl *Blacklist) IsBanned(ctx context.Context, ip string) (banned bool, retr
 // DEPLOY.md.
 func (bl *Blacklist) RecordViolation(ctx context.Context, ip, ownerAPIClientID string) error {
 	if isTrustedProxyAddr(ip) {
+		return nil
+	}
+	allowlisted, err := bl.IsAllowlisted(ctx, ip)
+	if err != nil {
+		return err
+	}
+	if allowlisted {
 		return nil
 	}
 
@@ -279,10 +366,13 @@ func parseUnixField(v string) time.Time {
 // rule every other /system-admin/* route already follows.
 func (bl *Blacklist) UnbanOwned(ctx context.Context, apiClientID, ip string) (found bool, err error) {
 	owner, err := bl.rdb.HGet(ctx, bl.detailsKey(ip), "owner").Result()
-	if err != nil && err != redis.Nil {
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
 		return false, fmt.Errorf("reading blacklist ban owner: %w", err)
 	}
-	if owner == "" || owner != apiClientID {
+	if owner != apiClientID {
 		return false, nil
 	}
 	if err := bl.Unban(ctx, ip); err != nil {

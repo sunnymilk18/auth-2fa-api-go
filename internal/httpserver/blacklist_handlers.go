@@ -116,3 +116,87 @@ func (h *blacklistHandlers) Unban(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("ip ban lifted", "api_client_id", apiClientID, "ip", ip, "reason", req.Reason)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// allowlistOwner is the value ListAllowlist/AddAllowlist/RemoveAllowlist
+// pass as the "owner" to middleware.Blacklist's allowlist methods. Always
+// "" (the operator) — these three handlers only ever sit behind
+// /admin/blacklist/allowlist (middleware.RequireAdminToken), deliberately
+// never under /system-admin/* — see router.go's own comment on why: the
+// exemption an allowlist entry grants is global (protects an IP against
+// every system's strikes, not just whoever added it), so letting any one
+// tenant's own X-System-Admin-Token control it would let that tenant
+// weaken protection for every other tenant on the platform, unlike every
+// other /system-admin/* action (which can only ever affect its own
+// tenant's own data). middleware.Blacklist's allowlist methods still take
+// an explicit owner parameter — shared code with the tenant-scoped ban
+// methods above — so this is a literal "", not read from request context,
+// since RequireAdminToken never sets a tenant there to begin with.
+const allowlistOwner = ""
+
+type listAllowlistResponse struct {
+	IPs []string `json:"ips"`
+}
+
+// ListAllowlist returns every IP the operator has allowlisted — see
+// allowlistOwner's doc comment and middleware.Blacklist.AllowlistList's.
+func (h *blacklistHandlers) ListAllowlist(w http.ResponseWriter, r *http.Request) {
+	ips, err := h.bl.AllowlistList(r.Context(), allowlistOwner)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo listar la lista blanca")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(listAllowlistResponse{IPs: ips})
+}
+
+type addAllowlistRequest struct {
+	IP string `json:"ip"`
+}
+
+// AddAllowlist exempts an IP from ever being struck or banned — see
+// allowlistOwner's doc comment and middleware.Blacklist.AllowlistAdd's for
+// what that means (global once added) and why it also lifts any ban that
+// IP is currently serving.
+func (h *blacklistHandlers) AddAllowlist(w http.ResponseWriter, r *http.Request) {
+	var req addAllowlistRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if net.ParseIP(req.IP) == nil {
+		writeJSONError(w, http.StatusBadRequest, "la IP no tiene un formato válido")
+		return
+	}
+
+	if err := h.bl.AllowlistAdd(r.Context(), allowlistOwner, req.IP); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo agregar a la lista blanca")
+		return
+	}
+
+	h.logger.Info("ip added to blacklist allowlist", "ip", req.IP)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// RemoveAllowlist takes an IP off the allowlist — see allowlistOwner's doc
+// comment and middleware.Blacklist.AllowlistRemove's.
+func (h *blacklistHandlers) RemoveAllowlist(w http.ResponseWriter, r *http.Request) {
+	ip := chi.URLParam(r, "ip")
+
+	if net.ParseIP(ip) == nil {
+		writeJSONError(w, http.StatusBadRequest, "la IP no tiene un formato válido")
+		return
+	}
+
+	found, err := h.bl.AllowlistRemove(r.Context(), allowlistOwner, ip)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo quitar de la lista blanca")
+		return
+	}
+	if !found {
+		writeJSONError(w, http.StatusNotFound, "esa IP no está en la lista blanca")
+		return
+	}
+
+	h.logger.Info("ip removed from blacklist allowlist", "ip", ip)
+	w.WriteHeader(http.StatusNoContent)
+}
