@@ -45,10 +45,14 @@ func newTestService(t *testing.T) (*adminauth.Service, *pgxpool.Pool) {
 // collide with a leftover row from a previous run) and cleans it up
 // afterward; admin_sessions rows cascade-delete with it.
 func createTestAccount(t *testing.T, svc *adminauth.Service, pool *pgxpool.Pool, password string) (*adminauth.AdminAccount, string) {
+	return createTestAccountWithRole(t, svc, pool, password, adminauth.RoleSuperAdmin)
+}
+
+func createTestAccountWithRole(t *testing.T, svc *adminauth.Service, pool *pgxpool.Pool, password string, role adminauth.Role) (*adminauth.AdminAccount, string) {
 	t.Helper()
 	email := "admin-" + testutil.UniqueSuffix(t) + "@example.com"
 
-	account, otpauthURL, err := svc.CreateAccount(t.Context(), email, password)
+	account, otpauthURL, err := svc.CreateAccount(t.Context(), email, password, role)
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
@@ -114,15 +118,18 @@ func TestService_Login_Success_IssuesValidatableSession(t *testing.T) {
 		t.Fatalf("Login returned token=%q expiresAt=%v, want a non-empty future-expiring session", token, expiresAt)
 	}
 
-	email, ok, err := svc.ValidateSession(ctx, token)
+	email, role, ok, err := svc.ValidateSession(ctx, token)
 	if err != nil {
 		t.Fatalf("ValidateSession: %v", err)
 	}
 	if !ok || email != account.Email {
 		t.Fatalf("ValidateSession(valid token) = (%q, %v), want (%q, true)", email, ok, account.Email)
 	}
+	if role != string(adminauth.RoleSuperAdmin) {
+		t.Fatalf("ValidateSession role = %q, want %q", role, adminauth.RoleSuperAdmin)
+	}
 
-	if _, ok, err := svc.ValidateSession(ctx, "not-a-real-token"); err != nil || ok {
+	if _, _, ok, err := svc.ValidateSession(ctx, "not-a-real-token"); err != nil || ok {
 		t.Fatalf("ValidateSession(garbage token) = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
 }
@@ -160,7 +167,7 @@ func TestService_RevokeAccount_InvalidatesExistingSessionImmediately(t *testing.
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	if _, ok, _ := svc.ValidateSession(ctx, token); !ok {
+	if _, _, ok, _ := svc.ValidateSession(ctx, token); !ok {
 		t.Fatal("expected session to be valid right after login")
 	}
 
@@ -170,7 +177,7 @@ func TestService_RevokeAccount_InvalidatesExistingSessionImmediately(t *testing.
 		t.Fatalf("RevokeAccount: %v", err)
 	}
 
-	if _, ok, err := svc.ValidateSession(ctx, token); err != nil || ok {
+	if _, _, ok, err := svc.ValidateSession(ctx, token); err != nil || ok {
 		t.Fatalf("ValidateSession after RevokeAccount = (ok=%v, err=%v), want (false, nil)", ok, err)
 	}
 	// A revoked account can't log in again either, even with the right
@@ -197,17 +204,32 @@ func TestService_RevokeAccount_CannotRevokeSelf(t *testing.T) {
 	}
 }
 
-// The only currently-active admin account can never be revoked, by
+// The only currently-active superadmin account can never be revoked, by
 // anyone (including the X-Admin-Token/script path, actorEmail "") — doing
-// so would leave the panel with no admin able to log in at all.
-func TestService_RevokeAccount_CannotRevokeLastActiveAdmin(t *testing.T) {
+// so would leave no one able to manage admin accounts at all.
+func TestService_RevokeAccount_CannotRevokeLastActiveSuperAdmin(t *testing.T) {
 	svc, pool := newTestService(t)
 	ctx := t.Context()
 
 	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
 
-	if err := svc.RevokeAccount(ctx, "", account.ID); !errors.Is(err, adminauth.ErrLastAdminAccount) {
-		t.Fatalf("RevokeAccount(last admin): err = %v, want ErrLastAdminAccount", err)
+	if err := svc.RevokeAccount(ctx, "", account.ID); !errors.Is(err, adminauth.ErrLastSuperAdminAccount) {
+		t.Fatalf("RevokeAccount(last superadmin): err = %v, want ErrLastSuperAdminAccount", err)
+	}
+}
+
+// Revoking the last active *regular* admin, by contrast, is fine as long
+// as a superadmin remains — only the superadmin tier is protected from
+// hitting zero.
+func TestService_RevokeAccount_CanRevokeLastRegularAdminIfSuperAdminRemains(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	createTestAccount(t, svc, pool, "correct-horse-battery") // a superadmin
+	regularAdmin, _ := createTestAccountWithRole(t, svc, pool, "correct-horse-battery", adminauth.RoleAdmin)
+
+	if err := svc.RevokeAccount(ctx, "", regularAdmin.ID); err != nil {
+		t.Fatalf("RevokeAccount(last regular admin, superadmin remains): %v", err)
 	}
 }
 
@@ -216,8 +238,16 @@ func TestService_CreateAccount_DuplicateEmail(t *testing.T) {
 	ctx := t.Context()
 
 	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
-	if _, _, err := svc.CreateAccount(ctx, account.Email, "another-password"); !errors.Is(err, adminauth.ErrDuplicateEmail) {
+	if _, _, err := svc.CreateAccount(ctx, account.Email, "another-password", adminauth.RoleSuperAdmin); !errors.Is(err, adminauth.ErrDuplicateEmail) {
 		t.Fatalf("CreateAccount duplicate: err = %v, want ErrDuplicateEmail", err)
+	}
+}
+
+func TestService_CreateAccount_InvalidRole(t *testing.T) {
+	svc, _ := newTestService(t)
+
+	if _, _, err := svc.CreateAccount(t.Context(), "role-"+testutil.UniqueSuffix(t)+"@example.com", "correct-horse-battery", adminauth.Role("owner")); !errors.Is(err, adminauth.ErrInvalidRole) {
+		t.Fatalf("CreateAccount with invalid role: err = %v, want ErrInvalidRole", err)
 	}
 }
 
@@ -243,10 +273,10 @@ func TestService_Logout_RevokesOnlyThatSession(t *testing.T) {
 		t.Fatalf("Logout: %v", err)
 	}
 
-	if _, ok, _ := svc.ValidateSession(ctx, tokenA); ok {
+	if _, _, ok, _ := svc.ValidateSession(ctx, tokenA); ok {
 		t.Fatal("session A should be invalid after its own Logout")
 	}
-	if _, ok, err := svc.ValidateSession(ctx, tokenB); err != nil || !ok {
+	if _, _, ok, err := svc.ValidateSession(ctx, tokenB); err != nil || !ok {
 		t.Fatalf("session B should still be valid, got ok=%v err=%v", ok, err)
 	}
 }
@@ -261,7 +291,7 @@ func TestService_Login_IsCaseInsensitiveOnEmail(t *testing.T) {
 	ctx := t.Context()
 
 	lowerEmail := "admin-" + testutil.UniqueSuffix(t) + "@example.com"
-	account, otpauthURL, err := svc.CreateAccount(ctx, strings.ToUpper(lowerEmail), "correct-horse-battery")
+	account, otpauthURL, err := svc.CreateAccount(ctx, strings.ToUpper(lowerEmail), "correct-horse-battery", adminauth.RoleSuperAdmin)
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
@@ -275,7 +305,7 @@ func TestService_Login_IsCaseInsensitiveOnEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login with a differently-cased email: %v", err)
 	}
-	if _, ok, err := svc.ValidateSession(ctx, token); err != nil || !ok {
+	if _, _, ok, err := svc.ValidateSession(ctx, token); err != nil || !ok {
 		t.Fatalf("ValidateSession after case-insensitive login = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
 }

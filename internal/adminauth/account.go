@@ -21,7 +21,30 @@ import (
 var (
 	ErrNotFound       = errors.New("admin account not found")
 	ErrDuplicateEmail = errors.New("an admin account with this email already exists")
+	ErrInvalidRole    = errors.New("role must be \"admin\" or \"superadmin\"")
 )
+
+// Role is an admin account's permission tier — see migration
+// 0016_admin_account_role.sql's doc comment and router.go's
+// RequireSuperAdmin wiring for exactly which routes each tier can reach.
+// RoleSuperAdmin can do everything; RoleAdmin is limited to day-to-day
+// moderation (user actions, lifting an individual IP ban) and can't touch
+// other admin accounts, tenants/api_clients, or the IP allowlist — the
+// three categories that affect "who has access at all" or "which
+// systems/IPs are trusted platform-wide".
+type Role string
+
+const (
+	RoleAdmin      Role = "admin"
+	RoleSuperAdmin Role = "superadmin"
+)
+
+// Valid reports whether r is one of the two defined roles — Service.
+// CreateAccount rejects anything else rather than silently accepting a
+// typo as some unintended third tier.
+func (r Role) Valid() bool {
+	return r == RoleAdmin || r == RoleSuperAdmin
+}
 
 // AdminAccount is one operator-level administrator — cross-tenant, distinct
 // from the tenant-scoped user.User.
@@ -30,6 +53,7 @@ type AdminAccount struct {
 	Email         string
 	PasswordHash  string
 	TOTPSecretEnc string
+	Role          Role
 	Active        bool
 	CreatedAt     time.Time
 }
@@ -43,11 +67,11 @@ func NewAccountRepository(pool *pgxpool.Pool) *AccountRepository {
 	return &AccountRepository{pool: pool}
 }
 
-const selectAccountColumns = "id, email, password_hash, totp_secret_enc, active, created_at"
+const selectAccountColumns = "id, email, password_hash, totp_secret_enc, role, active, created_at"
 
 func scanAccount(row pgx.Row) (*AdminAccount, error) {
 	a := &AdminAccount{}
-	err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.TOTPSecretEnc, &a.Active, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.TOTPSecretEnc, &a.Role, &a.Active, &a.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -59,14 +83,16 @@ func scanAccount(row pgx.Row) (*AdminAccount, error) {
 
 // Create provisions a new admin account. email is case-sensitively unique
 // at the DB level; callers normalize beforehand the same way user.Service
-// does for end users.
-func (r *AccountRepository) Create(ctx context.Context, email, passwordHash, totpSecretEnc string) (*AdminAccount, error) {
+// does for end users. role must already be validated (Role.Valid) —
+// Service.CreateAccount is the only real caller and does that before
+// reaching here.
+func (r *AccountRepository) Create(ctx context.Context, email, passwordHash, totpSecretEnc string, role Role) (*AdminAccount, error) {
 	const q = `
-		INSERT INTO admin_accounts (email, password_hash, totp_secret_enc)
-		VALUES ($1, $2, $3)
+		INSERT INTO admin_accounts (email, password_hash, totp_secret_enc, role)
+		VALUES ($1, $2, $3, $4)
 		RETURNING ` + selectAccountColumns
 
-	a, err := scanAccount(r.pool.QueryRow(ctx, q, email, passwordHash, totpSecretEnc))
+	a, err := scanAccount(r.pool.QueryRow(ctx, q, email, passwordHash, totpSecretEnc, role))
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -140,14 +166,16 @@ func (r *AccountRepository) SetActive(ctx context.Context, id string, active boo
 	return nil
 }
 
-// CountActive counts currently-active admin accounts — Service.
-// RevokeAccount checks this before deactivating one, to keep at least one
-// admin always able to log in.
-func (r *AccountRepository) CountActive(ctx context.Context) (int64, error) {
-	const q = `SELECT count(*) FROM admin_accounts WHERE active = TRUE`
+// CountActiveByRole counts currently-active admin accounts of one role —
+// Service.RevokeAccount uses this with RoleSuperAdmin to keep at least one
+// superadmin always able to log in and manage other accounts; a regular
+// admin being the "last" one of its tier isn't a problem the same way,
+// since any remaining superadmin already has full access regardless.
+func (r *AccountRepository) CountActiveByRole(ctx context.Context, role Role) (int64, error) {
+	const q = `SELECT count(*) FROM admin_accounts WHERE active = TRUE AND role = $1`
 	var n int64
-	if err := r.pool.QueryRow(ctx, q).Scan(&n); err != nil {
-		return 0, fmt.Errorf("counting active admin accounts: %w", err)
+	if err := r.pool.QueryRow(ctx, q, role).Scan(&n); err != nil {
+		return 0, fmt.Errorf("counting active admin accounts by role: %w", err)
 	}
 	return n, nil
 }

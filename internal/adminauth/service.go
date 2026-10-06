@@ -34,12 +34,15 @@ var ErrSessionInvalid = errors.New("admin session invalid or expired")
 // got it wrong.
 var ErrCannotRevokeSelf = errors.New("an admin cannot revoke their own account")
 
-// ErrLastAdminAccount means the target of RevokeAccount is the only
-// currently-active admin account — revoking it would leave the panel with
-// no admin able to log in at all, and no path back in except the CLI (see
+// ErrLastSuperAdminAccount means the target of RevokeAccount is the only
+// currently-active superadmin account — revoking it would leave no one
+// able to manage other admin accounts (create, revoke) or reach any other
+// superadmin-only route, and no path back in except the CLI (see
 // cmd/createadmin), so it's refused rather than allowed and discovered
-// too late.
-var ErrLastAdminAccount = errors.New("cannot revoke the only active admin account")
+// too late. Revoking the last active *regular* admin, by contrast, is
+// fine as long as at least one superadmin remains — that superadmin
+// already has full access regardless.
+var ErrLastSuperAdminAccount = errors.New("cannot revoke the only active superadmin account")
 
 // loginLimiterNamespace is the apiClientID auth.LoginAttemptLimiter keys
 // failures under for admin logins — a fixed, non-UUID string so it can
@@ -81,7 +84,10 @@ func NewService(accounts *AccountRepository, sessions *SessionRepository, totp *
 // step the way end users have. otpauthURL is what the panel renders as a
 // QR code; both it and the raw secret are only ever available here, once —
 // same one-time-visibility rule as an API key (see apiclient.Service.Create).
-func (s *Service) CreateAccount(ctx context.Context, email, password string) (account *AdminAccount, otpauthURL string, err error) {
+func (s *Service) CreateAccount(ctx context.Context, email, password string, role Role) (account *AdminAccount, otpauthURL string, err error) {
+	if !role.Valid() {
+		return nil, "", ErrInvalidRole
+	}
 	email = user.NormalizeEmail(email)
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -98,7 +104,7 @@ func (s *Service) CreateAccount(ctx context.Context, email, password string) (ac
 		return nil, "", fmt.Errorf("encrypting admin totp secret: %w", err)
 	}
 
-	account, err = s.accounts.Create(ctx, email, string(passwordHash), secretEnc)
+	account, err = s.accounts.Create(ctx, email, string(passwordHash), secretEnc, role)
 	if err != nil {
 		return nil, "", err
 	}
@@ -161,31 +167,36 @@ func (s *Service) Login(ctx context.Context, email, password, totpCode string) (
 	return token, expiresAt, nil
 }
 
-// ValidateSession resolves a session cookie's raw token to the email of
-// the admin it belongs to — this exact signature is what satisfies
-// middleware.AdminSessionValidator, checked on every panel request. Also
-// rejects a token belonging to an account that was revoked after the
+// ValidateSession resolves a session cookie's raw token to the email and
+// role of the admin it belongs to. role is returned as a plain string
+// (not the Role type the rest of this package uses internally) because
+// this exact signature is what satisfies middleware.AdminSessionValidator
+// — see that interface's own doc comment for why middleware deliberately
+// doesn't import this package's types. middleware.RequireSuperAdmin
+// compares it against middleware.AdminRoleSuperAdmin, which must stay
+// equal to string(RoleSuperAdmin) — see that constant's doc comment.
+// Also rejects a token belonging to an account that was revoked after the
 // session was issued, not just one the session row itself already marks
 // revoked/expired.
-func (s *Service) ValidateSession(ctx context.Context, token string) (email string, ok bool, err error) {
+func (s *Service) ValidateSession(ctx context.Context, token string) (email string, role string, ok bool, err error) {
 	accountID, found, err := s.sessions.FindValidAccountID(ctx, token)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	if !found {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	account, err := s.accounts.FindByID(ctx, accountID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return "", false, nil
+			return "", "", false, nil
 		}
-		return "", false, err
+		return "", "", false, err
 	}
 	if !account.Active {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	return account.Email, true, nil
+	return account.Email, string(account.Role), true, nil
 }
 
 // Logout revokes a single session (the one the cookie being cleared
@@ -209,11 +220,13 @@ func (s *Service) ListAccounts(ctx context.Context) ([]*AdminAccount, error) {
 // Two guardrails on top of that, both checked before anything is written:
 // actorEmail (the caller's own email, resolved from their session — pass
 // "" for the X-Admin-Token/script path, which has no "self" to protect)
-// can never match id's account (ErrCannotRevokeSelf), and id can never be
-// the last currently-active admin account (ErrLastAdminAccount) — without
-// these, a mistake here could strand the panel with literally no account
-// able to log in, recoverable only via cmd/createadmin against the
-// database directly.
+// can never match id's account (ErrCannotRevokeSelf), and if id is a
+// currently-active superadmin, it can never be the last one
+// (ErrLastSuperAdminAccount — see that error's own doc comment for why a
+// regular admin being the "last" one isn't the same kind of problem).
+// Without these, a mistake here could strand the panel with no way to
+// manage admin accounts at all, recoverable only via cmd/createadmin
+// against the database directly.
 func (s *Service) RevokeAccount(ctx context.Context, actorEmail, id string) error {
 	account, err := s.accounts.FindByID(ctx, id)
 	if err != nil {
@@ -222,13 +235,13 @@ func (s *Service) RevokeAccount(ctx context.Context, actorEmail, id string) erro
 	if actorEmail != "" && account.Email == user.NormalizeEmail(actorEmail) {
 		return ErrCannotRevokeSelf
 	}
-	if account.Active {
-		activeCount, err := s.accounts.CountActive(ctx)
+	if account.Active && account.Role == RoleSuperAdmin {
+		activeSuperAdmins, err := s.accounts.CountActiveByRole(ctx, RoleSuperAdmin)
 		if err != nil {
 			return err
 		}
-		if activeCount <= 1 {
-			return ErrLastAdminAccount
+		if activeSuperAdmins <= 1 {
+			return ErrLastSuperAdminAccount
 		}
 	}
 

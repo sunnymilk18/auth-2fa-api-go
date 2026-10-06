@@ -123,6 +123,7 @@ func (h *adminAuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 type adminAccountResponse struct {
 	ID        string `json:"id"`
 	Email     string `json:"email"`
+	Role      string `json:"role"`
 	Active    bool   `json:"active"`
 	CreatedAt int64  `json:"created_at"`
 }
@@ -146,6 +147,7 @@ func (h *adminAuthHandlers) ListAccounts(w http.ResponseWriter, r *http.Request)
 		out = append(out, adminAccountResponse{
 			ID:        a.ID,
 			Email:     a.Email,
+			Role:      string(a.Role),
 			Active:    a.Active,
 			CreatedAt: a.CreatedAt.Unix(),
 		})
@@ -157,22 +159,27 @@ func (h *adminAuthHandlers) ListAccounts(w http.ResponseWriter, r *http.Request)
 type createAdminAccountRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Role     string `json:"role"`
 }
 
 type createAdminAccountResponse struct {
 	ID         string `json:"id"`
 	Email      string `json:"email"`
+	Role       string `json:"role"`
 	OTPAuthURL string `json:"otpauth_url"`
 }
 
 // CreateAccount provisions a new admin account — callable only by an
-// already-authenticated admin (same as every other /admin/accounts route),
-// so this is how a second, third, etc. admin gets onboarded once the first
-// one exists (that first one still has to come from cmd/createadmin — see
-// its own doc comment for why). otpauth_url is shown exactly once, same
-// one-time-visibility rule as an API key: the panel renders it as a QR
-// code for the new admin to scan immediately, and it's never retrievable
-// again afterward.
+// already-authenticated superadmin (see router.go's RequireSuperAdmin
+// wiring on this route), so this is how a second, third, etc. admin gets
+// onboarded once the first one exists (that first one still has to come
+// from cmd/createadmin — see its own doc comment for why). role must be
+// exactly "admin" or "superadmin" — no default, picking the wrong one
+// silently would be a real privilege mistake, not a cosmetic one (see
+// migration 0016_admin_account_role.sql's doc comment). otpauth_url is
+// shown exactly once, same one-time-visibility rule as an API key: the
+// panel renders it as a QR code for the new admin to scan immediately,
+// and it's never retrievable again afterward.
 func (h *adminAuthHandlers) CreateAccount(w http.ResponseWriter, r *http.Request) {
 	var req createAdminAccountRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -184,23 +191,27 @@ func (h *adminAuthHandlers) CreateAccount(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	account, otpauthURL, err := h.svc.CreateAccount(r.Context(), req.Email, req.Password)
+	account, otpauthURL, err := h.svc.CreateAccount(r.Context(), req.Email, req.Password, adminauth.Role(req.Role))
 	if err != nil {
-		if errors.Is(err, adminauth.ErrDuplicateEmail) {
+		switch {
+		case errors.Is(err, adminauth.ErrDuplicateEmail):
 			writeJSONError(w, http.StatusConflict, "ya existe un administrador con ese email")
-			return
+		case errors.Is(err, adminauth.ErrInvalidRole):
+			writeJSONError(w, http.StatusBadRequest, `el rol debe ser "admin" o "superadmin"`)
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "no se pudo crear el administrador")
 		}
-		writeJSONError(w, http.StatusInternalServerError, "no se pudo crear el administrador")
 		return
 	}
 
 	actor, _ := auth.AdminActorFromContext(r.Context())
-	h.logger.Info("admin account created", "actor", actor, "new_admin_email", req.Email)
+	h.logger.Info("admin account created", "actor", actor, "new_admin_email", req.Email, "role", req.Role)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(createAdminAccountResponse{
 		ID:         account.ID,
 		Email:      account.Email,
+		Role:       string(account.Role),
 		OTPAuthURL: otpauthURL,
 	})
 }
@@ -227,8 +238,8 @@ func (h *adminAuthHandlers) RevokeAccount(w http.ResponseWriter, r *http.Request
 			writeJSONError(w, http.StatusNotFound, "administrador no encontrado")
 		case errors.Is(err, adminauth.ErrCannotRevokeSelf):
 			writeJSONError(w, http.StatusConflict, "no puedes revocar tu propia cuenta")
-		case errors.Is(err, adminauth.ErrLastAdminAccount):
-			writeJSONError(w, http.StatusConflict, "no puedes revocar al único administrador activo")
+		case errors.Is(err, adminauth.ErrLastSuperAdminAccount):
+			writeJSONError(w, http.StatusConflict, "no puedes revocar al único superadministrador activo")
 		default:
 			writeJSONError(w, http.StatusInternalServerError, "no se pudo revocar el administrador")
 		}

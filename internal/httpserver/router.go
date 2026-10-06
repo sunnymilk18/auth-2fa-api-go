@@ -381,7 +381,11 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 
 		adminHandlers := apiclient.NewHandlers(apiClients)
 		adminRouter.Route("/clients", func(r chi.Router) {
-			r.Use(adminAccess)
+			// Superadmin-only — provisioning/deactivating/rotating a
+			// tenant's credentials is infrastructure-level: it decides
+			// which systems can talk to this API at all, not a day-to-day
+			// moderation action. See adminauth.Role's doc comment.
+			r.Use(adminAccess, middleware.RequireSuperAdmin)
 
 			r.Post("/", adminHandlers.Create)
 			r.Get("/", adminHandlers.List)
@@ -447,6 +451,10 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// unlike every other /system-admin/* action, which can only
 			// ever affect its own tenant's own data.
 			r.Route("/allowlist", func(r chi.Router) {
+				// Superadmin-only — see this route's own comment above:
+				// the exemption it grants is global, platform-wide, not
+				// scoped to one tenant's own data the way an unban is.
+				r.Use(middleware.RequireSuperAdmin)
 				r.Get("/", blHandlers.ListAllowlist)
 				r.Post("/", blHandlers.AddAllowlist)
 				r.Delete("/{ip}", blHandlers.RemoveAllowlist)
@@ -475,7 +483,12 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			adminRouter.Post("/auth/logout", adminAuth.Logout)
 
 			adminRouter.Route("/accounts", func(r chi.Router) {
-				r.Use(adminAccess)
+				// Superadmin-only — managing who has operator access at
+				// all is the most fundamental privilege in the system; a
+				// regular admin must not be able to grant themselves (or
+				// anyone else) more power. See adminauth.Role's doc
+				// comment.
+				r.Use(adminAccess, middleware.RequireSuperAdmin)
 				r.Get("/", adminAuth.ListAccounts)
 				r.Post("/", adminAuth.CreateAccount)
 				r.Post("/{id}/revoke", adminAuth.RevokeAccount)

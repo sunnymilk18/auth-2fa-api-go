@@ -12,6 +12,7 @@ const (
 	ctxEmailKey       contextKey = "email"
 	ctxAPIClientIDKey contextKey = "apiClientID"
 	ctxAdminActorKey  contextKey = "adminActor"
+	ctxAdminRoleKey   contextKey = "adminRole"
 )
 
 // ContextWithUser attaches an authenticated user's id/email to ctx.
@@ -53,5 +54,20 @@ func ContextWithAdminActor(ctx context.Context, actor string) context.Context {
 
 func AdminActorFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(ctxAdminActorKey).(string)
+	return v, ok
+}
+
+// ContextWithAdminRole attaches the acting admin's permission tier
+// ("admin" or "superadmin", or middleware.AdminRoleSuperAdmin for the
+// shared X-Admin-Token/script path, which always has full access) — set
+// by middleware.RequireAdminAccess, checked by middleware.RequireSuperAdmin
+// for routes limited to the higher tier. See adminauth.Role's doc comment
+// for what each tier can and can't do.
+func ContextWithAdminRole(ctx context.Context, role string) context.Context {
+	return context.WithValue(ctx, ctxAdminRoleKey, role)
+}
+
+func AdminRoleFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(ctxAdminRoleKey).(string)
 	return v, ok
 }

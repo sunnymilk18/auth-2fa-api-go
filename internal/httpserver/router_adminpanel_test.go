@@ -124,7 +124,7 @@ func TestAdminPanel_LoginSetsCookie_AndAccountsRouteRequiresPanelHeader(t *testi
 	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
 
 	email := "panel-admin-" + testutil.UniqueSuffix(t) + "@example.com"
-	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery")
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleSuperAdmin)
 	if err != nil {
 		t.Fatalf("CreateAccount: %v", err)
 	}
@@ -198,5 +198,74 @@ func TestAdminPanel_LoginSetsCookie_AndAccountsRouteRequiresPanelHeader(t *testi
 	}
 	if !found {
 		t.Fatalf("ListAccounts did not include the created account %s: %+v", account.ID, listResp.Accounts)
+	}
+}
+
+// loginAsAdmin logs in via the real HTTP endpoint and returns the
+// resulting session cookie — shared by tests that need a cookie for a
+// specific role rather than asserting on the login response itself.
+func loginAsAdmin(t *testing.T, r http.Handler, email, password, totpSecret string) *http.Cookie {
+	t.Helper()
+
+	code, err := totp.GenerateCode(totpSecret, time.Now())
+	if err != nil {
+		t.Fatalf("generating totp code: %v", err)
+	}
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password, "totp_code": code})
+	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "admin_session" {
+			return c
+		}
+	}
+	t.Fatal("login response did not set an admin_session cookie")
+	return nil
+}
+
+func adminPanelRequest(r http.Handler, method, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.AddCookie(cookie)
+	req.Header.Set("X-Admin-Panel", "1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	return rec
+}
+
+// A regular ("admin") role can use the day-to-day moderation routes but
+// gets 403 on every superadmin-only one — see adminauth.Role's doc
+// comment for the full split.
+func TestAdminPanel_RegularAdminCannotReachSuperAdminRoutes(t *testing.T) {
+	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
+
+	email := "regular-admin-" + testutil.UniqueSuffix(t) + "@example.com"
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, account.ID)
+	})
+	key, err := otp.NewKeyFromURL(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+
+	cookie := loginAsAdmin(t, r, email, "correct-horse-battery", key.Secret())
+
+	for _, path := range []string{"/admin/accounts", "/admin/clients", "/admin/blacklist/allowlist"} {
+		if rec := adminPanelRequest(r, http.MethodGet, path, cookie); rec.Code != http.StatusForbidden {
+			t.Fatalf("GET %s as regular admin: status = %d, want 403", path, rec.Code)
+		}
+	}
+
+	// But the day-to-day moderation routes stay reachable.
+	if rec := adminPanelRequest(r, http.MethodGet, "/admin/users", cookie); rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/users as regular admin: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }

@@ -36,13 +36,23 @@ const AdminPanelHeader = "X-Admin-Panel"
 // admin).
 const AdminActorToken = "token"
 
+// AdminRoleSuperAdmin is the role string RequireSuperAdmin checks for —
+// must stay equal to string(adminauth.RoleSuperAdmin), since middleware
+// deliberately doesn't import the adminauth package (see
+// AdminSessionValidator's doc comment) and so can't reference that
+// constant directly. Also what RequireAdminAccess assigns the
+// X-Admin-Token/script path: that shared credential already has
+// unrestricted access to everything, same as a superadmin.
+const AdminRoleSuperAdmin = "superadmin"
+
 // AdminSessionValidator is the one method RequireAdminAccess needs from
 // adminauth.Service — a narrow interface here (rather than importing that
 // whole package into middleware) keeps this package's existing dependency
 // shape: it already depends on auth and apiclient, never on a sibling
-// feature package.
+// feature package. role is a plain string for the same reason — see
+// adminauth.Service.ValidateSession's own doc comment.
 type AdminSessionValidator interface {
-	ValidateSession(ctx context.Context, token string) (email string, ok bool, err error)
+	ValidateSession(ctx context.Context, token string) (email string, role string, ok bool, err error)
 }
 
 // RequireAdminAccess gates /admin/* behind either credential: the shared
@@ -54,19 +64,26 @@ type AdminSessionValidator interface {
 // succeeded ("token", or the admin's own email) so handlers can log who
 // actually performed a destructive action — see that function's doc
 // comment for why that distinction matters now that /admin/* isn't only
-// reachable with one shared secret.
+// reachable with one shared secret. auth.ContextWithAdminRole records the
+// permission tier ("admin"/"superadmin", or AdminRoleSuperAdmin for the
+// token path) that RequireSuperAdmin checks for routes limited to
+// superadmins — see adminauth.Role's doc comment for what each tier means.
 func RequireAdminAccess(token string, sessions AdminSessionValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if got := r.Header.Get("X-Admin-Token"); got != "" && token != "" &&
 				subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
-				next.ServeHTTP(w, r.WithContext(auth.ContextWithAdminActor(r.Context(), AdminActorToken)))
+				ctx := auth.ContextWithAdminActor(r.Context(), AdminActorToken)
+				ctx = auth.ContextWithAdminRole(ctx, AdminRoleSuperAdmin)
+				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
 			if cookie, err := r.Cookie(AdminSessionCookieName); sessions != nil && err == nil && cookie.Value != "" && r.Header.Get(AdminPanelHeader) != "" {
-				if email, ok, err := sessions.ValidateSession(r.Context(), cookie.Value); err == nil && ok {
-					next.ServeHTTP(w, r.WithContext(auth.ContextWithAdminActor(r.Context(), email)))
+				if email, role, ok, err := sessions.ValidateSession(r.Context(), cookie.Value); err == nil && ok {
+					ctx := auth.ContextWithAdminActor(r.Context(), email)
+					ctx = auth.ContextWithAdminRole(ctx, role)
+					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
 			}
@@ -74,4 +91,21 @@ func RequireAdminAccess(token string, sessions AdminSessionValidator) func(http.
 			http.Error(w, `{"error":"token de administrador inválido o faltante"}`, http.StatusUnauthorized)
 		})
 	}
+}
+
+// RequireSuperAdmin chains after RequireAdminAccess to further restrict a
+// route to the superadmin tier — see adminauth.Role's doc comment for
+// which routes that applies to (admin-account management,
+// tenant/api_client management, and the IP allowlist: the three
+// categories that affect "who has access at all" or "which systems/IPs
+// are trusted platform-wide"). Always passes for the X-Admin-Token/script
+// path, which RequireAdminAccess already marks AdminRoleSuperAdmin.
+func RequireSuperAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if role, ok := auth.AdminRoleFromContext(r.Context()); ok && role == AdminRoleSuperAdmin {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, `{"error":"esta acción requiere permisos de superadministrador"}`, http.StatusForbidden)
+	})
 }
