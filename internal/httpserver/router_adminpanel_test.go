@@ -269,3 +269,41 @@ func TestAdminPanel_RegularAdminCannotReachSuperAdminRoutes(t *testing.T) {
 		t.Fatalf("GET /admin/users as regular admin: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
+
+// GET /admin/auth/me is what the panel calls on load to restore "who am I,
+// what role" — reachable by any valid session (not superadmin-only), and
+// reports the actual role so the UI can hide superadmin-only controls for
+// a regular admin.
+func TestAdminPanel_Me_ReportsActorAndRole(t *testing.T) {
+	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
+
+	email := "me-admin-" + testutil.UniqueSuffix(t) + "@example.com"
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, account.ID)
+	})
+	key, err := otp.NewKeyFromURL(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+
+	cookie := loginAsAdmin(t, r, email, "correct-horse-battery", key.Secret())
+
+	rec := adminPanelRequest(r, http.MethodGet, "/admin/auth/me", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/auth/me: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Actor string `json:"actor"`
+		Role  string `json:"role"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding /admin/auth/me response: %v", err)
+	}
+	if resp.Actor != email || resp.Role != string(adminauth.RoleAdmin) {
+		t.Fatalf("GET /admin/auth/me = %+v, want actor=%q role=%q", resp, email, adminauth.RoleAdmin)
+	}
+}

@@ -120,6 +120,29 @@ func (h *adminAuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type meResponse struct {
+	Actor string `json:"actor"`
+	Role  string `json:"role"`
+}
+
+// Me reports who the caller is currently authenticated as (actor — the
+// admin's own email, or middleware.AdminActorToken for the shared
+// X-Admin-Token/script path — and role) without performing any action.
+// Sits behind the same middleware.RequireAdminAccess as every other
+// /admin/* route, not RequireSuperAdmin — any valid session can ask who
+// it is. This is what the panel calls on load/refresh to restore "am I
+// logged in, and with which role" without the browser ever exposing the
+// session cookie's value to JavaScript (it's httpOnly), and what it uses
+// to decide which superadmin-only controls to show or hide in the UI —
+// the backend still enforces the real boundary on every actual request
+// regardless of what the UI shows.
+func (h *adminAuthHandlers) Me(w http.ResponseWriter, r *http.Request) {
+	actor, _ := auth.AdminActorFromContext(r.Context())
+	role, _ := auth.AdminRoleFromContext(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(meResponse{Actor: actor, Role: role})
+}
+
 type adminAccountResponse struct {
 	ID        string `json:"id"`
 	Email     string `json:"email"`

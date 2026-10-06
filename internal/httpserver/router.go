@@ -481,6 +481,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 
 			adminRouter.Post("/auth/login", adminAuth.Login)
 			adminRouter.Post("/auth/logout", adminAuth.Logout)
+			adminRouter.With(adminAccess).Get("/auth/me", adminAuth.Me)
 
 			adminRouter.Route("/accounts", func(r chi.Router) {
 				// Superadmin-only — managing who has operator access at
