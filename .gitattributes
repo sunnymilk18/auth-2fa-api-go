@@ -1,0 +1,8 @@
+# Normalize line endings to LF in the repo regardless of each
+# contributor's local core.autocrlf setting — avoids every Go/text file
+# showing as "modified" on Windows just from CRLF/LF mismatch, with no
+# actual content change.
+* text=auto eol=lf
+
+# Binary-ish or intentionally-CRLF files, if any ever show up, go here as
+# exceptions — none currently.
