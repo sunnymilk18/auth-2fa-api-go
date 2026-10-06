@@ -251,6 +251,58 @@ func (s *Service) RevokeAccount(ctx context.Context, actorEmail, id string) erro
 	return s.sessions.RevokeAllForAccount(ctx, id)
 }
 
+// ReactivateAccount re-provisions a revoked account with a brand-new
+// password and TOTP secret, then reactivates it — it deliberately does
+// NOT bring back the account's previous credentials. If those credentials
+// leaked and that's *why* the account got revoked, reactivating it with
+// the same password/secret would hand access right back to whoever has
+// them; a fresh secret means the new admin has to re-enroll their
+// authenticator app, same as when the account was first created.
+//
+// Refuses with ErrAccountAlreadyActive, touching nothing, when id isn't
+// currently revoked — this endpoint's only meaning is "bring a revoked
+// account back with new credentials", not a side door to reset an active
+// admin's password.
+func (s *Service) ReactivateAccount(ctx context.Context, id, password string) (account *AdminAccount, otpauthURL string, err error) {
+	account, err = s.accounts.FindByID(ctx, id)
+	if err != nil {
+		return nil, "", err
+	}
+	if account.Active {
+		return nil, "", ErrAccountAlreadyActive
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, "", fmt.Errorf("hashing admin password: %w", err)
+	}
+
+	secret, url, err := s.totp.GenerateSecret(account.Email)
+	if err != nil {
+		return nil, "", fmt.Errorf("generating admin totp secret: %w", err)
+	}
+	secretEnc, err := s.totp.Encrypt(secret)
+	if err != nil {
+		return nil, "", fmt.Errorf("encrypting admin totp secret: %w", err)
+	}
+
+	if err := s.accounts.Reprovision(ctx, id, string(passwordHash), secretEnc); err != nil {
+		return nil, "", err
+	}
+	// Belt and suspenders — RevokeAccount already closed every session
+	// this account held, but a reactivation is exactly the moment a stray
+	// one shouldn't be allowed to slip through unnoticed.
+	if err := s.sessions.RevokeAllForAccount(ctx, id); err != nil {
+		return nil, "", err
+	}
+	// A stale lockout from before the account was revoked must not block
+	// its first login under the new credentials.
+	_ = s.loginLimiter.Reset(ctx, loginLimiterNamespace, account.Email)
+
+	account.Active = true
+	return account, url, nil
+}
+
 func generateSessionToken() (string, error) {
 	b := make([]byte, adminSessionTokenBytes)
 	if _, err := rand.Read(b); err != nil {

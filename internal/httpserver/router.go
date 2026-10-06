@@ -499,6 +499,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				r.Get("/", adminAuth.ListAccounts)
 				r.Post("/", adminAuth.CreateAccount)
 				r.Post("/{id}/revoke", adminAuth.RevokeAccount)
+				r.Post("/{id}/reactivate", adminAuth.Reactivate)
 			})
 		}
 	}

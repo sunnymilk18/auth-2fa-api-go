@@ -22,6 +22,11 @@ var (
 	ErrNotFound       = errors.New("admin account not found")
 	ErrDuplicateEmail = errors.New("an admin account with this email already exists")
 	ErrInvalidRole    = errors.New("role must be \"admin\" or \"superadmin\"")
+	// ErrAccountAlreadyActive means Service.ReactivateAccount was called on
+	// an account that was never revoked — see that method's own doc
+	// comment for why it refuses outright rather than treating the call as
+	// "just set a new password".
+	ErrAccountAlreadyActive = errors.New("admin account is already active")
 )
 
 // Role is an admin account's permission tier — see migration
@@ -150,15 +155,40 @@ func (r *AccountRepository) List(ctx context.Context) ([]*AdminAccount, error) {
 	return out, rows.Err()
 }
 
-// SetActive flips an account's active flag — false (the only thing
-// Service.RevokeAccount calls this with) makes Login reject it immediately
-// and revokes every session it currently holds, same shape as
-// apiclient.Repository.SetActive.
+// SetActive flips an account's active flag — false (the only thing it's
+// ever called with: Service.RevokeAccount) makes Login reject it
+// immediately and revokes every session it currently holds, same shape as
+// apiclient.Repository.SetActive. Reactivating a revoked account never
+// goes through this — see Reprovision, which sets active = TRUE together
+// with fresh credentials in one statement, since a password/TOTP reset is
+// the whole point of reactivating, not an optional extra step.
 func (r *AccountRepository) SetActive(ctx context.Context, id string, active bool) error {
 	const q = `UPDATE admin_accounts SET active = $2, updated_at = now() WHERE id = $1`
 	tag, err := r.pool.Exec(ctx, q, id, active)
 	if err != nil {
 		return fmt.Errorf("updating admin account active state: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// Reprovision replaces a revoked account's credentials and reactivates it
+// in one statement — password, TOTP secret, and active all change
+// together, so there's no window where the row is active with stale
+// credentials or reactivated-but-still-locked-out. Used only by
+// Service.ReactivateAccount; a still-active account is never passed here
+// (that method checks Active first and refuses with ErrAccountAlreadyActive
+// before reaching this).
+func (r *AccountRepository) Reprovision(ctx context.Context, id, passwordHash, totpSecretEnc string) error {
+	const q = `
+		UPDATE admin_accounts
+		SET password_hash = $2, totp_secret_enc = $3, active = TRUE, updated_at = now()
+		WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, passwordHash, totpSecretEnc)
+	if err != nil {
+		return fmt.Errorf("reprovisioning admin account: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

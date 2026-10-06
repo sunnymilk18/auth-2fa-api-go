@@ -309,3 +309,79 @@ func TestService_Login_IsCaseInsensitiveOnEmail(t *testing.T) {
 		t.Fatalf("ValidateSession after case-insensitive login = (ok=%v, err=%v), want (true, nil)", ok, err)
 	}
 }
+
+// A revoked account, reactivated with a new password, can log in with it
+// using a code from its brand-new TOTP secret — and its old password and
+// old secret are both dead, exactly the point of not bringing back the
+// credentials it had before (see ReactivateAccount's own doc comment for
+// why: if they leaked, that could be *why* it got revoked in the first
+// place).
+func TestService_ReactivateAccount_IssuesFreshCredentials(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, oldSecret := createTestAccount(t, svc, pool, "old-password-1")
+	// A second active superadmin so revoking the first doesn't trip the
+	// separate "can't revoke the last superadmin" guardrail.
+	createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	if err := svc.RevokeAccount(ctx, "", account.ID); err != nil {
+		t.Fatalf("RevokeAccount: %v", err)
+	}
+
+	reactivated, otpauthURL, err := svc.ReactivateAccount(ctx, account.ID, "new-password-1")
+	if err != nil {
+		t.Fatalf("ReactivateAccount: %v", err)
+	}
+	if reactivated.ID != account.ID || !reactivated.Active {
+		t.Fatalf("ReactivateAccount returned %+v, want id=%q active=true", reactivated, account.ID)
+	}
+	newSecret := otpauthSecret(t, otpauthURL)
+	if newSecret == oldSecret {
+		t.Fatal("ReactivateAccount returned the same TOTP secret the account had before — want a freshly generated one")
+	}
+
+	// The new credentials work.
+	token, _, err := svc.Login(ctx, account.Email, "new-password-1", currentCode(t, newSecret))
+	if err != nil {
+		t.Fatalf("Login with new credentials after reactivation: %v", err)
+	}
+	if _, _, ok, err := svc.ValidateSession(ctx, token); err != nil || !ok {
+		t.Fatalf("ValidateSession after reactivation login = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+
+	// Neither the old password nor the old TOTP secret works anymore.
+	if _, _, err := svc.Login(ctx, account.Email, "old-password-1", currentCode(t, oldSecret)); !errors.Is(err, adminauth.ErrInvalidCredentials) {
+		t.Fatalf("Login with old password+secret after reactivation: err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, _, err := svc.Login(ctx, account.Email, "new-password-1", currentCode(t, oldSecret)); !errors.Is(err, adminauth.ErrInvalidCredentials) {
+		t.Fatalf("Login with new password but old TOTP secret after reactivation: err = %v, want ErrInvalidCredentials", err)
+	}
+}
+
+// Reactivating an account that was never revoked (or already reactivated)
+// is refused outright — this endpoint's only meaning is "bring a revoked
+// account back", not a side door to reset an active admin's password.
+func TestService_ReactivateAccount_AlreadyActive(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, secret := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	if _, _, err := svc.ReactivateAccount(ctx, account.ID, "another-password"); !errors.Is(err, adminauth.ErrAccountAlreadyActive) {
+		t.Fatalf("ReactivateAccount(already active): err = %v, want ErrAccountAlreadyActive", err)
+	}
+
+	// Nothing changed — the original password and secret still work.
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, secret)); err != nil {
+		t.Fatalf("Login with original credentials after a refused reactivation: %v", err)
+	}
+}
+
+func TestService_ReactivateAccount_UnknownAccount(t *testing.T) {
+	svc, _ := newTestService(t)
+
+	if _, _, err := svc.ReactivateAccount(t.Context(), "00000000-0000-0000-0000-000000000000", "whatever-password"); !errors.Is(err, adminauth.ErrNotFound) {
+		t.Fatalf("ReactivateAccount(unknown id): err = %v, want ErrNotFound", err)
+	}
+}

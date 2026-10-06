@@ -272,3 +272,51 @@ func (h *adminAuthHandlers) RevokeAccount(w http.ResponseWriter, r *http.Request
 	h.logger.Info("admin account revoked", "actor", actor, "revoked_admin_id", id)
 	w.WriteHeader(http.StatusNoContent)
 }
+
+type reactivateAccountRequest struct {
+	Password string `json:"password"`
+}
+
+// Reactivate brings a revoked admin account back with a brand-new
+// password and TOTP secret — never the ones it had before, see
+// adminauth.Service.ReactivateAccount's doc comment for why. Only
+// meaningful on a currently-revoked account (409 otherwise); the response
+// shape and one-time-visibility rule for otpauth_url are identical to
+// CreateAccount's, since reactivating is effectively re-provisioning from
+// scratch.
+func (h *adminAuthHandlers) Reactivate(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req reactivateAccountRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if len(req.Password) < 8 {
+		writeJSONError(w, http.StatusBadRequest, "contraseña de al menos 8 caracteres")
+		return
+	}
+
+	account, otpauthURL, err := h.svc.ReactivateAccount(r.Context(), id, req.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, adminauth.ErrNotFound):
+			writeJSONError(w, http.StatusNotFound, "administrador no encontrado")
+		case errors.Is(err, adminauth.ErrAccountAlreadyActive):
+			writeJSONError(w, http.StatusConflict, "la cuenta ya está activa")
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "no se pudo reactivar el administrador")
+		}
+		return
+	}
+
+	actor, _ := auth.AdminActorFromContext(r.Context())
+	h.logger.Info("admin account reactivated", "actor", actor, "reactivated_admin_id", id)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(createAdminAccountResponse{
+		ID:         account.ID,
+		Email:      account.Email,
+		Role:       string(account.Role),
+		OTPAuthURL: otpauthURL,
+	})
+}

@@ -231,8 +231,22 @@ func loginAsAdmin(t *testing.T, r http.Handler, email, password, totpSecret stri
 }
 
 func adminPanelRequest(r http.Handler, method, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(method, path, nil)
-	req.AddCookie(cookie)
+	return adminPanelRequestWithBody(r, method, path, cookie, nil)
+}
+
+func adminPanelRequestWithBody(r http.Handler, method, path string, cookie *http.Cookie, body any) *httptest.ResponseRecorder {
+	var reader *bytes.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		reader = bytes.NewReader(b)
+	} else {
+		reader = bytes.NewReader(nil)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
 	req.Header.Set("X-Admin-Panel", "1")
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
@@ -375,5 +389,102 @@ func TestAdminPanel_Blacklist_ListsAcrossTenants(t *testing.T) {
 	r.ServeHTTP(recNoAuth, req)
 	if recNoAuth.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /admin/blacklist with no session: status = %d, want 401", recNoAuth.Code)
+	}
+}
+
+// POST /admin/accounts/{id}/reactivate brings a revoked account back with
+// a fresh password (and, server-side, a fresh TOTP secret the response's
+// otpauth_url carries) — superadmin-only, same tier as CreateAccount and
+// RevokeAccount. The credential-level guarantees (new creds work, old
+// ones don't) are covered by TestService_ReactivateAccount_* in
+// adminauth's own test file; this one is about the HTTP wiring: who can
+// call it and what each failure mode returns.
+func TestAdminPanel_Reactivate(t *testing.T) {
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
+	cleanupAccount := func(id string) {
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, id)
+		})
+	}
+
+	superEmail := "reactivate-super-" + testutil.UniqueSuffix(t) + "@example.com"
+	superAccount, superURL, err := adminAccounts.CreateAccount(t.Context(), superEmail, "correct-horse-battery", adminauth.RoleSuperAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount(superadmin): %v", err)
+	}
+	cleanupAccount(superAccount.ID)
+	superKey, err := otp.NewKeyFromURL(superURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+	superCookie := loginAsAdmin(t, r, superEmail, "correct-horse-battery", superKey.Secret())
+
+	regularEmail := "reactivate-regular-" + testutil.UniqueSuffix(t) + "@example.com"
+	regularAccount, regularURL, err := adminAccounts.CreateAccount(t.Context(), regularEmail, "correct-horse-battery", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount(regular): %v", err)
+	}
+	cleanupAccount(regularAccount.ID)
+	regularKey, err := otp.NewKeyFromURL(regularURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+	regularCookie := loginAsAdmin(t, r, regularEmail, "correct-horse-battery", regularKey.Secret())
+
+	targetEmail := "reactivate-target-" + testutil.UniqueSuffix(t) + "@example.com"
+	target, _, err := adminAccounts.CreateAccount(t.Context(), targetEmail, "old-password-1", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount(target): %v", err)
+	}
+	cleanupAccount(target.ID)
+	if err := adminAccounts.RevokeAccount(t.Context(), "", target.ID); err != nil {
+		t.Fatalf("RevokeAccount(target): %v", err)
+	}
+
+	path := "/admin/accounts/" + target.ID + "/reactivate"
+
+	// A regular admin (not superadmin) is forbidden — doesn't touch the
+	// account.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, regularCookie, map[string]string{"password": "new-password-1"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("reactivate as regular admin: status = %d, want 403", rec.Code)
+	}
+
+	// No session at all.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, nil, map[string]string{"password": "new-password-1"}); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("reactivate with no session: status = %d, want 401", rec.Code)
+	}
+
+	// Too-short password.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "short"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("reactivate with short password: status = %d, want 400", rec.Code)
+	}
+
+	// Unknown account id.
+	unknownPath := "/admin/accounts/00000000-0000-0000-0000-000000000000/reactivate"
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, unknownPath, superCookie, map[string]string{"password": "new-password-1"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("reactivate unknown account: status = %d, want 404", rec.Code)
+	}
+
+	// The real reactivation, as superadmin.
+	rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "new-password-1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reactivate as superadmin: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		ID         string `json:"id"`
+		Email      string `json:"email"`
+		Role       string `json:"role"`
+		OTPAuthURL string `json:"otpauth_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding reactivate response: %v", err)
+	}
+	if resp.ID != target.ID || resp.Email != targetEmail || resp.Role != string(adminauth.RoleAdmin) || resp.OTPAuthURL == "" {
+		t.Fatalf("reactivate response = %+v, want id=%q email=%q role=%q with a non-empty otpauth_url", resp, target.ID, targetEmail, adminauth.RoleAdmin)
+	}
+
+	// Reactivating an already-active account is refused.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "another-password-1"}); rec.Code != http.StatusConflict {
+		t.Fatalf("reactivate already-active account: status = %d, want 409", rec.Code)
 	}
 }
