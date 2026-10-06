@@ -195,6 +195,42 @@ type Config struct {
 	// a stolen password spamming approval prompts hoping for a blind tap.
 	PushMaxRequests   int
 	PushRequestWindow time.Duration
+
+	// AdminPanelOrigin enables the operator panel's own login
+	// (/admin/auth/*, /admin/accounts/*) and the credentialed CORS carve-out
+	// those routes need — the exact origin (scheme + host, e.g.
+	// "https://panel.example.com", no trailing slash) the panel is served
+	// from. Browsers reject a credentialed (cookie-carrying) CORS response
+	// against "*", so this can't reuse the wildcard the rest of the API's
+	// CORS already allows — see httpserver.NewRouter's own doc comment on
+	// the two separate CORS configs this produces.
+	//
+	// Empty (the default) disables /admin/auth/* and /admin/accounts/*
+	// entirely, same opt-in-or-404 reasoning as AdminAPIToken/
+	// TOTPEncryptionKeyBase64 — a login surface with no configured origin
+	// to accept cookies from would be useless and shouldn't exist.
+	AdminPanelOrigin string
+
+	// AdminSessionCrossSite controls the panel's session cookie's SameSite
+	// attribute: true means SameSite=None (the panel and the API are on
+	// different registrable domains — true today, with both on separate
+	// sslip.io addresses, since sslip.io is itself on the Public Suffix
+	// List and so counts as a different "site" per subdomain), false means
+	// SameSite=Strict (once both move under one real domain the operator
+	// controls, e.g. panel.example.com + api.example.com). See
+	// middleware.RequireAdminAccess's adminPanelHeader doc comment for the
+	// CSRF mitigation that stays in effect regardless of this setting (and
+	// is the actual reason SameSite=None is safe to use here, not just a
+	// looser default). Defaults to true (None) — the safer assumption when
+	// unset, since a same-domain deployment can always opt into Strict
+	// explicitly once it's actually true.
+	AdminSessionCrossSite bool
+
+	// AdminSessionTTL bounds how long a panel login stays valid before
+	// requiring a fresh one — independent of the end-user AccessTokenTTL,
+	// since this is the highest-privilege session in the system and a
+	// shorter lifetime is worth the extra logins.
+	AdminSessionTTL time.Duration
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -234,6 +270,8 @@ func Load() (*Config, error) {
 
 		FirebaseCredentialsPath:       getEnv("FIREBASE_CREDENTIALS_PATH", ""),
 		FirebaseCredentialsJSONBase64: getEnv("FIREBASE_CREDENTIALS_JSON_BASE64", ""),
+
+		AdminPanelOrigin: getEnv("ADMIN_PANEL_ORIGIN", ""),
 	}
 
 	var err error
@@ -307,6 +345,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.AdminSessionCrossSite, err = getEnvBool("ADMIN_SESSION_CROSS_SITE", true); err != nil {
+		return nil, err
+	}
+	if cfg.AdminSessionTTL, err = getEnvDuration("ADMIN_SESSION_TTL", 12*time.Hour); err != nil {
+		return nil, err
+	}
+
 	if cfg.JWTRefreshSecret == "" {
 		return nil, fmt.Errorf("JWT_REFRESH_SECRET must be set")
 	}
@@ -331,6 +376,18 @@ func getEnvInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("invalid int for %s: %w", key, err)
 	}
 	return n, nil
+}
+
+func getEnvBool(key string, fallback bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("invalid bool for %s: %w", key, err)
+	}
+	return b, nil
 }
 
 func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {

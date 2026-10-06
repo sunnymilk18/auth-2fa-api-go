@@ -11,6 +11,7 @@ const (
 	ctxUserIDKey      contextKey = "userID"
 	ctxEmailKey       contextKey = "email"
 	ctxAPIClientIDKey contextKey = "apiClientID"
+	ctxAdminActorKey  contextKey = "adminActor"
 )
 
 // ContextWithUser attaches an authenticated user's id/email to ctx.
@@ -38,5 +39,19 @@ func ContextWithAPIClient(ctx context.Context, apiClientID string) context.Conte
 
 func APIClientIDFromContext(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(ctxAPIClientIDKey).(string)
+	return v, ok
+}
+
+// ContextWithAdminActor attaches who is acting on an /admin/* request —
+// set by middleware.RequireAdminAccess, read by handlers that want to log
+// which specific admin (or "token", for the shared X-Admin-Token/script
+// path) performed a destructive action. See that middleware's doc comment
+// for why this exists alongside the plain X-Admin-Token check.
+func ContextWithAdminActor(ctx context.Context, actor string) context.Context {
+	return context.WithValue(ctx, ctxAdminActorKey, actor)
+}
+
+func AdminActorFromContext(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(ctxAdminActorKey).(string)
 	return v, ok
 }

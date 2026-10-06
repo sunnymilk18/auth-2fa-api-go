@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/config"
@@ -150,7 +151,27 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), logger)
+	// nil when TOTP isn't configured server-wide (TOTPEncryptionKeyBase64
+	// unset) — an admin account's TOTP secret can't be encrypted at rest
+	// without it, and TOTP is mandatory for every admin account (see
+	// adminauth's own doc comments), so the operator panel's login simply
+	// doesn't exist in that case, same as /auth/totp/* itself. Reuses
+	// loginAttempts (the same limiter end-user login already uses) under
+	// its own fixed namespace — see adminauth.loginLimiterNamespace.
+	var adminAccounts *adminauth.Service
+	var adminSessions *adminauth.SessionRepository
+	if totpManager != nil {
+		adminSessions = adminauth.NewSessionRepository(pgPool)
+		adminAccounts = adminauth.NewService(
+			adminauth.NewAccountRepository(pgPool),
+			adminSessions,
+			totpManager,
+			loginAttempts,
+			cfg.AdminSessionTTL,
+		)
+	}
+
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), adminAccounts, cfg.AdminPanelOrigin, cfg.AdminSessionCrossSite, cfg.AdminSessionTTL, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -169,6 +190,9 @@ func run(logger *slog.Logger) error {
 	}()
 
 	go cleanupExpiredRefreshTokens(ctx, refreshRepo, logger)
+	if adminSessions != nil {
+		go cleanupExpiredAdminSessions(ctx, adminSessions, logger)
+	}
 
 	<-ctx.Done()
 	logger.Info("shutting down...")
@@ -195,6 +219,38 @@ func cleanupExpiredRefreshTokens(ctx context.Context, refreshRepo *auth.RefreshR
 		}
 		if n > 0 {
 			logger.Info("refresh token cleanup", "deleted", n)
+		}
+	}
+
+	sweep()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
+// cleanupExpiredAdminSessions is cleanupExpiredRefreshTokens' exact
+// counterpart for admin_sessions — same reasoning (SessionRepository.
+// FindValidAccountID rejects an expired/revoked row but never removes it)
+// and same once-at-startup-then-every-24h cadence. Only started when the
+// operator panel's login is actually configured (adminSessions != nil —
+// see this file's own wiring of adminauth.Service).
+func cleanupExpiredAdminSessions(ctx context.Context, sessions *adminauth.SessionRepository, logger *slog.Logger) {
+	sweep := func() {
+		n, err := sessions.DeleteExpired(ctx)
+		if err != nil {
+			logger.Error("admin session cleanup failed", "error", err)
+			return
+		}
+		if n > 0 {
+			logger.Info("admin session cleanup", "deleted", n)
 		}
 	}
 

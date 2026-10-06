@@ -14,6 +14,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric"
 
+	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
@@ -47,7 +48,15 @@ import (
 // blacklist shows for a ban instead of the raw IP — see middleware.
 // Blacklist.Reference's doc comment. nil/empty disables it (omitted from
 // responses, not a startup failure).
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, logger *slog.Logger) http.Handler {
+// adminAccounts backs the operator panel's own individual login — see
+// adminauth.Service's doc comment. adminPanelOrigin == "" leaves
+// /admin/auth/* and /admin/accounts/* unregistered (same opt-in-or-404
+// pattern as adminToken == "" for /admin/* as a whole), and makes
+// /admin/clients, /admin/users and /admin/blacklist fall back to the same
+// wildcard, no-credentials CORS they always had — see config.Config.
+// AdminPanelOrigin's doc comment. adminSessionCrossSite/adminSessionTTL
+// configure the panel session cookie — see config.Config's own fields.
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, adminAccounts *adminauth.Service, adminPanelOrigin string, adminSessionCrossSite bool, adminSessionTTL time.Duration, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -305,10 +314,74 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// for why banning is never triggered automatically.
 	adminUserHandlers := auth.NewAdminHandlers(authSvc)
 
-	if adminToken != "" {
+	// /admin/* lives on its own *chi.Mux (adminRouter, mounted below),
+	// never inside r — a browser-based panel login needs a cookie-carrying
+	// (credentialed) CORS response scoped to the panel's own exact origin,
+	// which is fundamentally incompatible with the wildcard,
+	// no-credentials CORS the rest of this API deliberately uses (see r's
+	// own cors.Handler above): go-chi/cors answers a preflight OPTIONS
+	// request and stops the middleware chain right there, so if both CORS
+	// configs sat on the same router, whichever one is outermost would
+	// always win for every path, including the other one's routes. Two
+	// separate muxes, mounted together at the very end of this function,
+	// is what actually keeps them from colliding.
+	adminRouter := chi.NewRouter()
+	if adminToken != "" || adminPanelOrigin != "" {
+		adminRouter.Use(chimw.RequestID)
+		if len(trustedProxyCIDRs) > 0 {
+			adminRouter.Use(chimw.ClientIPFromXFF(trustedProxyCIDRs...))
+		}
+		adminRouter.Use(middleware.RequestLogger(logger))
+		adminRouter.Use(chimw.Recoverer)
+		adminRouter.Use(chimw.Timeout(15 * time.Second))
+		adminRouter.Use(middleware.Metrics(meter))
+		adminRouter.Use(blacklist.Middleware)
+
+		if adminPanelOrigin != "" {
+			// Credentialed: the panel's own session cookie rides on these
+			// requests, so the origin must be exact (browsers refuse "*"
+			// together with credentials) — see config.Config.
+			// AdminPanelOrigin's doc comment.
+			adminRouter.Use(cors.Handler(cors.Options{
+				AllowedOrigins:   []string{adminPanelOrigin},
+				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token", middleware.AdminPanelHeader},
+				AllowCredentials: true,
+				MaxAge:           300,
+			}))
+		} else {
+			// No panel configured — same wildcard, no-credentials CORS
+			// /admin/* always had before this feature existed, for the
+			// X-Admin-Token/script-only case (curl doesn't need CORS
+			// headers at all, but a hypothetical browser-based fetch using
+			// just the token header still worked under the old single
+			// global CORS config, so this preserves that).
+			adminRouter.Use(cors.Handler(cors.Options{
+				AllowedOrigins:   []string{"*"},
+				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token"},
+				AllowCredentials: false,
+				MaxAge:           300,
+			}))
+		}
+
+		// adminAccounts can be a nil *adminauth.Service (TOTP not configured
+		// server-wide at all — see cmd/api/main.go's wiring) — passed
+		// through this explicit nil check rather than straight into
+		// RequireAdminAccess, since a nil *adminauth.Service boxed directly
+		// into the AdminSessionValidator interface would NOT compare equal
+		// to a nil interface there (classic Go typed-nil gotcha), and
+		// RequireAdminAccess's own nil check for "no session feature
+		// configured" relies on getting a true nil interface.
+		var sessionValidator middleware.AdminSessionValidator
+		if adminAccounts != nil {
+			sessionValidator = adminAccounts
+		}
+		adminAccess := middleware.RequireAdminAccess(adminToken, sessionValidator)
+
 		adminHandlers := apiclient.NewHandlers(apiClients)
-		r.Route("/admin/clients", func(r chi.Router) {
-			r.Use(middleware.RequireAdminToken(adminToken))
+		adminRouter.Route("/clients", func(r chi.Router) {
+			r.Use(adminAccess)
 
 			r.Post("/", adminHandlers.Create)
 			r.Get("/", adminHandlers.List)
@@ -324,16 +397,17 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Delete("/{id}/system-admin-key", adminHandlers.RevokeSystemAdminKey)
 		})
 
-		r.Route("/admin/users", func(r chi.Router) {
-			r.Use(middleware.RequireAdminToken(adminToken))
+		adminRouter.Route("/users", func(r chi.Router) {
+			r.Use(adminAccess)
 
-			// No {id} — X-Admin-Token sets no tenant in context (unlike
-			// X-System-Admin-Token), so this spans every tenant. See
-			// AdminHandlers.ListUsers' doc comment. Deliberately not in
-			// openapi.yaml/docs: those are served unauthenticated at
+			// No {id} — unlike X-System-Admin-Token, neither credential
+			// here sets a tenant in context, so this spans every tenant.
+			// See AdminHandlers.ListUsers' doc comment. Deliberately not
+			// in openapi.yaml/docs: those are served unauthenticated at
 			// /docs, and this route's existence shouldn't be discoverable
-			// by anyone without the operator's own token — see README's
-			// /admin/users section for where this is documented instead.
+			// by anyone without the operator's own credential — see
+			// README's /admin/users section for where this is documented
+			// instead.
 			r.Get("/", adminUserHandlers.ListUsers)
 
 			r.Post("/{id}/ban", adminUserHandlers.Ban)
@@ -351,8 +425,8 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		// ban early (most commonly: a shared IP where the actual offender
 		// is long gone, but everyone else behind it is still paying for
 		// it) and clears its strike/level history.
-		r.Route("/admin/blacklist", func(r chi.Router) {
-			r.Use(middleware.RequireAdminToken(adminToken))
+		adminRouter.Route("/blacklist", func(r chi.Router) {
+			r.Use(adminAccess)
 
 			r.Delete("/{ip}", func(w http.ResponseWriter, r *http.Request) {
 				ip := chi.URLParam(r, "ip")
@@ -378,6 +452,35 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				r.Delete("/{ip}", blHandlers.RemoveAllowlist)
 			})
 		})
+
+		// The panel's own login — see adminauth.Service and config.Config.
+		// AdminPanelOrigin's doc comments for why this is opt-in
+		// separately from adminToken: a login surface with no configured
+		// origin to accept cookies from would be useless and shouldn't
+		// exist (same "opt-in or 404" pattern as TOTP/push above), even
+		// when adminToken is set for script-only use. Also requires
+		// adminAccounts != nil — cmd/api/main.go only constructs one when
+		// TOTP is configured server-wide (TOTPEncryptionKeyBase64), since
+		// an admin account's TOTP secret can't be encrypted at rest
+		// without it and TOTP is mandatory for every admin account, not
+		// opt-in the way it is for end users.
+		if adminPanelOrigin != "" && adminAccounts != nil {
+			sameSite := http.SameSiteNoneMode
+			if !adminSessionCrossSite {
+				sameSite = http.SameSiteStrictMode
+			}
+			adminAuth := newAdminAuthHandlers(adminAccounts, adminSessionTTL, sameSite, logger)
+
+			adminRouter.Post("/auth/login", adminAuth.Login)
+			adminRouter.Post("/auth/logout", adminAuth.Logout)
+
+			adminRouter.Route("/accounts", func(r chi.Router) {
+				r.Use(adminAccess)
+				r.Get("/", adminAuth.ListAccounts)
+				r.Post("/", adminAuth.CreateAccount)
+				r.Post("/{id}/revoke", adminAuth.RevokeAccount)
+			})
+		}
 	}
 
 	// A tenant's own scoped moderation, gated by its own X-System-Admin-Token
@@ -447,7 +550,15 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		})
 	})
 
-	return r
+	// top has no middleware of its own — it only dispatches by prefix, so
+	// r's wildcard CORS and adminRouter's credentialed/panel-specific CORS
+	// each only ever see the requests meant for them (see adminRouter's
+	// own doc comment above for why that separation has to happen at this
+	// level, not as nested middleware on one shared router).
+	top := chi.NewRouter()
+	top.Mount("/admin", adminRouter)
+	top.Mount("/", r)
+	return top
 }
 
 // loginTokenQueryKey reads login_token from the query string — the key

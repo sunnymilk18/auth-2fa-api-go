@@ -14,13 +14,21 @@ COPY . .
 
 # CGO_ENABLED=0: static binary, no libc dependency — lets the runtime stage
 # be a minimal image (no glibc/musl toolchain needed at run time).
-# Building all three cmd/ binaries into the same image keeps one Dockerfile
-# for the API, the one-shot migration runner, and the tenant-management CLI
-# — docker-compose picks which one to run per service via `command:`.
+# Building all four cmd/ binaries into the same image keeps one Dockerfile
+# for the API, the one-shot migration runner, the tenant-management CLI,
+# and the admin-panel bootstrap CLI — docker-compose picks which one to run
+# per service via `command:`; createadmin specifically has no HTTP route
+# that can provision the very first admin account (the panel itself
+# requires one to already exist to create another — see its own doc
+# comment), so it has to be reachable the same way createclient already is
+# to the operator: run from inside the deployed container (e.g. Dokploy's
+# "Open Terminal"), since Postgres isn't reachable directly from outside
+# that network either.
 ENV CGO_ENABLED=0 GOOS=linux
 RUN go build -ldflags="-s -w" -o /out/api ./cmd/api && \
     go build -ldflags="-s -w" -o /out/migrate ./cmd/migrate && \
-    go build -ldflags="-s -w" -o /out/createclient ./cmd/createclient
+    go build -ldflags="-s -w" -o /out/createclient ./cmd/createclient && \
+    go build -ldflags="-s -w" -o /out/createadmin ./cmd/createadmin
 
 # ---- runtime stage ------------------------------------------------------
 FROM alpine:3.20
@@ -33,7 +41,7 @@ RUN apk add --no-cache ca-certificates && \
     adduser -D -u 10001 appuser
 
 WORKDIR /app
-COPY --from=builder /out/api /out/migrate /out/createclient ./
+COPY --from=builder /out/api /out/migrate /out/createclient /out/createadmin ./
 # The migrate binary reads *.sql relative to its working directory.
 COPY migrations ./migrations
 
