@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
+	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/otel/metric/noop"
 
 	"auth-2fa-api/internal/adminauth"
@@ -25,6 +26,7 @@ import (
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
+	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/testutil"
 	"auth-2fa-api/internal/user"
 )
@@ -33,7 +35,7 @@ const testAdminPanelOrigin = "https://panel.example.com"
 
 var testAdminTOTPKey = []byte("0123456789abcdef0123456789abcdef")
 
-func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service, *pgxpool.Pool) {
+func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service, *pgxpool.Pool, *redis.Client) {
 	t.Helper()
 
 	pool := testutil.PostgresPool(t)
@@ -69,11 +71,11 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 		noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil,
 		adminAccounts, testAdminPanelOrigin, true, time.Hour, testLogger())
 
-	return r, adminAccounts, pool
+	return r, adminAccounts, pool, rdb
 }
 
 func TestAdminPanel_CORS_OnlyAllowsConfiguredOrigin(t *testing.T) {
-	r, _, _ := newTestRouterWithAdminPanel(t)
+	r, _, _, _ := newTestRouterWithAdminPanel(t)
 
 	// Preflight from the configured panel origin: allowed, credentialed.
 	req := httptest.NewRequest(http.MethodOptions, "/admin/auth/login", nil)
@@ -102,7 +104,7 @@ func TestAdminPanel_CORS_OnlyAllowsConfiguredOrigin(t *testing.T) {
 }
 
 func TestAdminPanel_CORS_RestOfAPIStaysWildcardNoCredentials(t *testing.T) {
-	r, _, _ := newTestRouterWithAdminPanel(t)
+	r, _, _, _ := newTestRouterWithAdminPanel(t)
 
 	// /health (outside /admin) must keep the original wildcard,
 	// non-credentialed CORS regardless of the panel's own carve-out.
@@ -121,7 +123,7 @@ func TestAdminPanel_CORS_RestOfAPIStaysWildcardNoCredentials(t *testing.T) {
 }
 
 func TestAdminPanel_LoginSetsCookie_AndAccountsRouteRequiresPanelHeader(t *testing.T) {
-	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
 
 	email := "panel-admin-" + testutil.UniqueSuffix(t) + "@example.com"
 	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleSuperAdmin)
@@ -241,7 +243,7 @@ func adminPanelRequest(r http.Handler, method, path string, cookie *http.Cookie)
 // gets 403 on every superadmin-only one — see adminauth.Role's doc
 // comment for the full split.
 func TestAdminPanel_RegularAdminCannotReachSuperAdminRoutes(t *testing.T) {
-	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
 
 	email := "regular-admin-" + testutil.UniqueSuffix(t) + "@example.com"
 	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
@@ -275,7 +277,7 @@ func TestAdminPanel_RegularAdminCannotReachSuperAdminRoutes(t *testing.T) {
 // reports the actual role so the UI can hide superadmin-only controls for
 // a regular admin.
 func TestAdminPanel_Me_ReportsActorAndRole(t *testing.T) {
-	r, adminAccounts, pool := newTestRouterWithAdminPanel(t)
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
 
 	email := "me-admin-" + testutil.UniqueSuffix(t) + "@example.com"
 	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
@@ -305,5 +307,73 @@ func TestAdminPanel_Me_ReportsActorAndRole(t *testing.T) {
 	}
 	if resp.Actor != email || resp.Role != string(adminauth.RoleAdmin) {
 		t.Fatalf("GET /admin/auth/me = %+v, want actor=%q role=%q", resp, email, adminauth.RoleAdmin)
+	}
+}
+
+// GET /admin/blacklist is the operator's unscoped view across every
+// tenant — unlike /admin/blacklist/allowlist, reachable by a regular
+// admin too, not just superadmin (see adminauth.Role's doc comment on
+// which actions are superadmin-only).
+func TestAdminPanel_Blacklist_ListsAcrossTenants(t *testing.T) {
+	r, adminAccounts, pool, rdb := newTestRouterWithAdminPanel(t)
+
+	// A single strike is enough to ban, so each RecordViolation call below
+	// produces one ban directly — no need to drive it through the rate
+	// limiter.
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	ipA, ipB := "203.0.113.10", "203.0.113.20"
+	if err := bl.RecordViolation(t.Context(), ipA, "tenant-a"); err != nil {
+		t.Fatalf("RecordViolation(tenant-a): %v", err)
+	}
+	if err := bl.RecordViolation(t.Context(), ipB, "tenant-b"); err != nil {
+		t.Fatalf("RecordViolation(tenant-b): %v", err)
+	}
+
+	email := "blacklist-admin-" + testutil.UniqueSuffix(t) + "@example.com"
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, account.ID)
+	})
+	key, err := otp.NewKeyFromURL(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+	cookie := loginAsAdmin(t, r, email, "correct-horse-battery", key.Secret())
+
+	// A regular admin can see it — this isn't superadmin-only.
+	rec := adminPanelRequest(r, http.MethodGet, "/admin/blacklist", cookie)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/blacklist as regular admin: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Bans []struct {
+			IP          string `json:"ip"`
+			APIClientID string `json:"api_client_id"`
+		} `json:"bans"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding /admin/blacklist response: %v", err)
+	}
+	owners := map[string]string{}
+	for _, b := range resp.Bans {
+		owners[b.IP] = b.APIClientID
+	}
+	if owners[ipA] != "tenant-a" {
+		t.Fatalf("ban for %s = owner %q, want %q (full list: %+v)", ipA, owners[ipA], "tenant-a", resp.Bans)
+	}
+	if owners[ipB] != "tenant-b" {
+		t.Fatalf("ban for %s = owner %q, want %q (full list: %+v)", ipB, owners[ipB], "tenant-b", resp.Bans)
+	}
+
+	// No session at all: rejected.
+	req := httptest.NewRequest(http.MethodGet, "/admin/blacklist", nil)
+	req.Header.Set("X-Admin-Panel", "1")
+	recNoAuth := httptest.NewRecorder()
+	r.ServeHTTP(recNoAuth, req)
+	if recNoAuth.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /admin/blacklist with no session: status = %d, want 401", recNoAuth.Code)
 	}
 }

@@ -432,6 +432,12 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		adminRouter.Route("/blacklist", func(r chi.Router) {
 			r.Use(adminAccess)
 
+			// Unscoped across every tenant — admin and superadmin alike,
+			// same tier as the unban below; only the allowlist (global
+			// exemption, not just a view) is superadmin-only. See
+			// blacklistHandlers.ListAll's doc comment.
+			r.Get("/", blHandlers.ListAll)
+
 			r.Delete("/{ip}", func(w http.ResponseWriter, r *http.Request) {
 				ip := chi.URLParam(r, "ip")
 				if err := blacklist.Unban(r.Context(), ip); err != nil {

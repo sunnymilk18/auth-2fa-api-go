@@ -82,6 +82,56 @@ func (h *blacklistHandlers) List(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(listBlacklistResponse{Bans: out})
 }
 
+type adminBanInfoResponse struct {
+	IP          string  `json:"ip"`
+	Reference   *string `json:"reference,omitempty"`
+	BannedAt    int64   `json:"banned_at"`
+	BannedUntil int64   `json:"banned_until"`
+	Level       int64   `json:"level"`
+	Strikes     int64   `json:"strikes"`
+	// APIClientID is "" when the ban has no resolvable owner (see
+	// middleware.Blacklist.ListAll's doc comment) — always present,
+	// never omitted, so the panel can tell "no owner" apart from a
+	// field it forgot to render.
+	APIClientID string `json:"api_client_id"`
+}
+
+type listAllBlacklistResponse struct {
+	Bans []adminBanInfoResponse `json:"bans"`
+}
+
+// ListAll returns every currently-banned IP across every tenant — the
+// operator's unscoped counterpart to List (the tenant-scoped
+// /system-admin/blacklist above). See middleware.Blacklist.ListAll's doc
+// comment for what "every" does and doesn't cover.
+func (h *blacklistHandlers) ListAll(w http.ResponseWriter, r *http.Request) {
+	bans, err := h.bl.ListAll(r.Context(), maxBlacklistListing)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudieron listar los baneos")
+		return
+	}
+
+	out := make([]adminBanInfoResponse, 0, len(bans))
+	for _, b := range bans {
+		item := adminBanInfoResponse{
+			IP:          b.IP,
+			BannedAt:    b.BannedAt.Unix(),
+			BannedUntil: b.BannedUntil.Unix(),
+			Level:       b.Level,
+			Strikes:     b.Strikes,
+			APIClientID: b.OwnerAPIClientID,
+		}
+		if b.HasRef {
+			ref := b.Reference
+			item.Reference = &ref
+		}
+		out = append(out, item)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(listAllBlacklistResponse{Bans: out})
+}
+
 type unbanRequest struct {
 	Reason string `json:"reason"`
 }

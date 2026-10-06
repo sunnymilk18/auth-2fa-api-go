@@ -77,6 +77,12 @@ func (bl *Blacklist) detailsKey(ip string) string { return "blacklist:details:" 
 // whole keyspace: a single ZRANGEBYSCORE against one key.
 func (bl *Blacklist) ownedKey(apiClientID string) string { return "blacklist:owned:" + apiClientID }
 
+// allKey is a sorted set of every IP currently banned platform-wide,
+// regardless of owner — score is the ban's Unix expiry, member is the IP.
+// Backs ListAll (the operator's unscoped /admin/blacklist view); ListOwned
+// stays scoped to ownedKey for the per-tenant /system-admin/blacklist view.
+func (bl *Blacklist) allKey() string { return "blacklist:all" }
+
 // allowlistOwnerKey's value is the api_client_id that added ip to the
 // allowlist (persistent, no TTL — allowlisting isn't time-boxed the way a
 // ban is). Existence alone is what RecordViolation checks; the value is
@@ -183,6 +189,10 @@ type BanInfo struct {
 	BannedUntil time.Time
 	Level       int64
 	Strikes     int64
+	// OwnerAPIClientID is "" for a ban with no resolvable owner — only
+	// ever populated by ListAll; ListOwned never returns such a ban at
+	// all (see its own doc comment).
+	OwnerAPIClientID string
 }
 
 // IsBanned reports whether ip is currently serving a ban, plus how much
@@ -272,22 +282,32 @@ func (bl *Blacklist) RecordViolation(ctx context.Context, ip, ownerAPIClientID s
 		return fmt.Errorf("resetting blacklist strikes after ban: %w", err)
 	}
 
+	// Details/global index are recorded for every ban, owned or not — see
+	// ListAll's doc comment for why this one (unlike ownedKey below) isn't
+	// conditional on ownerAPIClientID: the operator's unscoped view needs
+	// to see every ban, including ones with no resolvable owner.
+	now := time.Now()
+	bannedUntil := now.Add(duration)
+	if err := bl.rdb.HSet(ctx, bl.detailsKey(ip), map[string]any{
+		"ip":           ip,
+		"owner":        ownerAPIClientID,
+		"banned_at":    now.Unix(),
+		"banned_until": bannedUntil.Unix(),
+		"level":        level,
+		"strikes":      strikes,
+	}).Err(); err != nil {
+		return fmt.Errorf("recording blacklist ban details: %w", err)
+	}
+	if err := bl.rdb.Expire(ctx, bl.detailsKey(ip), duration).Err(); err != nil {
+		return fmt.Errorf("setting blacklist details ttl: %w", err)
+	}
+	if err := bl.rdb.ZAdd(ctx, bl.allKey(), redis.Z{
+		Score:  float64(bannedUntil.Unix()),
+		Member: ip,
+	}).Err(); err != nil {
+		return fmt.Errorf("indexing blacklist ban globally: %w", err)
+	}
 	if ownerAPIClientID != "" {
-		now := time.Now()
-		bannedUntil := now.Add(duration)
-		if err := bl.rdb.HSet(ctx, bl.detailsKey(ip), map[string]any{
-			"ip":           ip,
-			"owner":        ownerAPIClientID,
-			"banned_at":    now.Unix(),
-			"banned_until": bannedUntil.Unix(),
-			"level":        level,
-			"strikes":      strikes,
-		}).Err(); err != nil {
-			return fmt.Errorf("recording blacklist ban details: %w", err)
-		}
-		if err := bl.rdb.Expire(ctx, bl.detailsKey(ip), duration).Err(); err != nil {
-			return fmt.Errorf("setting blacklist details ttl: %w", err)
-		}
 		if err := bl.rdb.ZAdd(ctx, bl.ownedKey(ownerAPIClientID), redis.Z{
 			Score:  float64(bannedUntil.Unix()),
 			Member: ip,
@@ -350,6 +370,55 @@ func (bl *Blacklist) ListOwned(ctx context.Context, apiClientID string, limit in
 	return out, nil
 }
 
+// ListAll returns every currently-banned IP platform-wide, soonest-to-
+// expire first, up to limit — the operator's unscoped /admin/blacklist
+// view across every tenant at once (ListOwned is the per-tenant
+// equivalent). Unlike ListOwned, a ban with no resolvable owner DOES
+// appear here, with OwnerAPIClientID == "".
+//
+// A ban recorded before this global index existed never appears here
+// either, same limitation ListOwned already had for ownedKey — it still
+// enforces its deny (bannedKey has its own TTL, untouched by this), it
+// just won't show up in this listing until it naturally expires.
+func (bl *Blacklist) ListAll(ctx context.Context, limit int64) ([]BanInfo, error) {
+	key := bl.allKey()
+	now := time.Now().Unix()
+
+	if err := bl.rdb.ZRemRangeByScore(ctx, key, "-inf", strconv.FormatInt(now-1, 10)).Err(); err != nil {
+		return nil, fmt.Errorf("pruning expired blacklist entries: %w", err)
+	}
+
+	ips, err := bl.rdb.ZRangeByScore(ctx, key, &redis.ZRangeBy{
+		Min:   strconv.FormatInt(now, 10),
+		Max:   "+inf",
+		Count: limit,
+	}).Result()
+	if err != nil {
+		return nil, fmt.Errorf("listing blacklist entries: %w", err)
+	}
+
+	out := make([]BanInfo, 0, len(ips))
+	for _, ip := range ips {
+		fields, err := bl.rdb.HGetAll(ctx, bl.detailsKey(ip)).Result()
+		if err != nil {
+			return nil, fmt.Errorf("reading blacklist ban details for %s: %w", ip, err)
+		}
+		if len(fields) == 0 {
+			continue
+		}
+		info := BanInfo{IP: ip, OwnerAPIClientID: fields["owner"]}
+		info.BannedAt = parseUnixField(fields["banned_at"])
+		info.BannedUntil = parseUnixField(fields["banned_until"])
+		info.Level, _ = strconv.ParseInt(fields["level"], 10, 64)
+		info.Strikes, _ = strconv.ParseInt(fields["strikes"], 10, 64)
+		if ref, ok := bl.Reference(ip); ok {
+			info.Reference, info.HasRef = ref, true
+		}
+		out = append(out, info)
+	}
+	return out, nil
+}
+
 func parseUnixField(v string) time.Time {
 	n, err := strconv.ParseInt(v, 10, 64)
 	if err != nil {
@@ -398,6 +467,10 @@ func (bl *Blacklist) Unban(ctx context.Context, ip string) error {
 
 	if err := bl.rdb.Del(ctx, bl.bannedKey(ip), bl.strikesKey(ip), bl.levelKey(ip), bl.detailsKey(ip)).Err(); err != nil {
 		return fmt.Errorf("unbanning ip: %w", err)
+	}
+
+	if err := bl.rdb.ZRem(ctx, bl.allKey(), ip).Err(); err != nil {
+		return fmt.Errorf("removing blacklist ban from global index: %w", err)
 	}
 
 	if owner != "" {
