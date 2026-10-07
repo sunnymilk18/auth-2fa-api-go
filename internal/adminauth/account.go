@@ -178,20 +178,32 @@ func (r *AccountRepository) SetActive(ctx context.Context, id string, active boo
 // in one statement — password, TOTP secret, and active all change
 // together, so there's no window where the row is active with stale
 // credentials or reactivated-but-still-locked-out. Used only by
-// Service.ReactivateAccount; a still-active account is never passed here
-// (that method checks Active first and refuses with ErrAccountAlreadyActive
-// before reaching this).
+// Service.ReactivateAccount, which checks Active itself first and refuses
+// early with ErrAccountAlreadyActive before ever reaching here — but that
+// check and this UPDATE aren't atomic with each other, so the WHERE clause
+// below also requires active = FALSE: without it, two concurrent
+// reactivations of the same account would both pass the early check and
+// then both write here, the second silently overwriting the first's
+// brand-new password/TOTP secret with its own — exactly the kind of
+// "whoever wrote last wins, unnoticed" bug ReactivateAccount's whole
+// contract (fresh, exclusive credentials) depends on not happening.
 func (r *AccountRepository) Reprovision(ctx context.Context, id, passwordHash, totpSecretEnc string) error {
 	const q = `
 		UPDATE admin_accounts
 		SET password_hash = $2, totp_secret_enc = $3, active = TRUE, updated_at = now()
-		WHERE id = $1`
+		WHERE id = $1 AND active = FALSE`
 	tag, err := r.pool.Exec(ctx, q, id, passwordHash, totpSecretEnc)
 	if err != nil {
 		return fmt.Errorf("reprovisioning admin account: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		// Ambiguous on its own (id doesn't exist, or exists but is already
+		// active) — but Service.ReactivateAccount always calls FindByID
+		// right before this, so by the time execution reaches here the
+		// account is known to exist; 0 rows affected can only mean someone
+		// else reactivated it in the window between that check and this
+		// statement. ErrAccountAlreadyActive, not ErrNotFound.
+		return ErrAccountAlreadyActive
 	}
 	return nil
 }

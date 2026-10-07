@@ -385,3 +385,44 @@ func TestService_ReactivateAccount_UnknownAccount(t *testing.T) {
 		t.Fatalf("ReactivateAccount(unknown id): err = %v, want ErrNotFound", err)
 	}
 }
+
+// Two superadmins reactivating the same revoked account at nearly the same
+// moment both pass Service.ReactivateAccount's own "is it active" check
+// (neither has written yet), so the real guard against one silently
+// overwriting the other's brand-new credentials has to live in the UPDATE
+// itself (AccountRepository.Reprovision's "AND active = FALSE") — this
+// exercises that directly, since reproducing the race through two actual
+// goroutines racing Service.ReactivateAccount would be non-deterministic.
+func TestAccountRepository_Reprovision_RejectsSecondConcurrentCall(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
+	if err := svc.RevokeAccount(ctx, "", account.ID); err != nil {
+		t.Fatalf("RevokeAccount: %v", err)
+	}
+
+	repo := adminauth.NewAccountRepository(pool)
+
+	// First caller's write — as if it read the account as revoked and is
+	// now reprovisioning it.
+	if err := repo.Reprovision(ctx, account.ID, "hash-from-first-caller", "secret-from-first-caller"); err != nil {
+		t.Fatalf("first Reprovision: %v", err)
+	}
+
+	// Second caller, which also read the account as revoked before the
+	// first caller's write landed — must be refused, not allowed to
+	// overwrite the first caller's credentials.
+	if err := repo.Reprovision(ctx, account.ID, "hash-from-second-caller", "secret-from-second-caller"); !errors.Is(err, adminauth.ErrAccountAlreadyActive) {
+		t.Fatalf("second concurrent Reprovision: err = %v, want ErrAccountAlreadyActive", err)
+	}
+
+	reloaded, err := repo.FindByID(ctx, account.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if reloaded.PasswordHash != "hash-from-first-caller" || reloaded.TOTPSecretEnc != "secret-from-first-caller" {
+		t.Fatalf("account credentials after the race = (%q, %q), want the first caller's values — the second call overwrote them",
+			reloaded.PasswordHash, reloaded.TOTPSecretEnc)
+	}
+}
