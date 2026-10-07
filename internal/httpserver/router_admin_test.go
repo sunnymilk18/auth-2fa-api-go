@@ -7,6 +7,7 @@ package httpserver_test
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -825,6 +826,65 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 	}
 	if !updated.EmailVerified {
 		t.Fatal("email_verified after confirm = false, want true")
+	}
+}
+
+// TestSystemAdminChangeEmail_MailerFailure_Returns502 covers the HTTP side
+// of auth.ErrEmailSendFailed — when the mail provider itself fails, the
+// panel must see a clear 502 with a Spanish message it can show as-is, not
+// a generic 500 that reads the same as every other internal error.
+func TestSystemAdminChangeEmail_MailerFailure_Returns502(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	rdb := testutil.RedisClient(t)
+
+	users := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+	tokens := auth.NewTokenManager(testutil.RSAKey(t), "test-key-1", "test-refresh-secret", 15*time.Minute, 7*24*time.Hour)
+	apiClients := apiclient.NewService(apiclient.NewRepository(pool))
+	accessRevocation := auth.NewAccessRevocationStore(rdb, 15*time.Minute)
+	mailer := testutil.NewFakeMailer()
+	svc := auth.NewService(
+		users, auth.NewOTPStore(rdb, 5*time.Minute, 3, 6), tokens, auth.NewRefreshRepository(pool),
+		device.NewService(device.NewRepository(pool), 30*24*time.Hour), auth.NewPasswordResetStore(rdb, time.Hour, 3, 6),
+		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
+		auth.NewChangeEmailStore(rdb, time.Hour, 3, 6),
+		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
+		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
+	)
+	handlers := auth.NewHandlers(svc)
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+
+	client, _, err := apiClients.Create(t.Context(), "change-email-fail-"+testutil.UniqueSuffix(t))
+	if err != nil {
+		t.Fatalf("creating client: %v", err)
+	}
+	systemAdminKey, err := apiClients.RotateSystemAdminKey(t.Context(), client.ID)
+	if err != nil {
+		t.Fatalf("rotating system admin key: %v", err)
+	}
+	u, err := svc.Register(t.Context(), client.ID, "typo-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("seeding test user: %v", err)
+	}
+
+	mailer.FailNextSends(errors.New("resend error (500): internal server error"))
+
+	req := httptest.NewRequest(http.MethodPost, "/system-admin/users/"+u.ID+"/change-email", bytes.NewBufferString(`{"new_email":"fixed-`+testutil.UniqueSuffix(t)+`@example.com"}`))
+	req.Header.Set("X-System-Admin-Token", systemAdminKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("change-email with a failing mailer: status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusBadGateway)
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding error body: %v", err)
+	}
+	if body.Error == "" {
+		t.Fatal("error body has no \"error\" field")
 	}
 }
 

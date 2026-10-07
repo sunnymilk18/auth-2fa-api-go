@@ -186,6 +186,15 @@ var ErrEmailAlreadyVerified = errors.New("email already verified")
 // doc comment for why this blocks login entirely rather than just warning.
 var ErrEmailNotVerified = errors.New("email not verified")
 
+// ErrEmailSendFailed means s.mailer.Send itself failed (the mail provider
+// was unreachable, rejected the request, etc.) — returned by
+// AdminChangeEmail instead of a bare wrapped error so the HTTP handler can
+// tell "the provider failed" apart from every other failure mode and
+// answer 502 instead of a generic 500. The provider's own error detail
+// (which can include things like request ids or internal endpoints) is
+// logged, never put in this error's own message or the HTTP response body.
+var ErrEmailSendFailed = errors.New("sending email failed")
+
 // Register creates a new user account, scoped to the calling api client,
 // and emails a verification code. The account exists in the database right
 // away, but LoginStep1 refuses to log it in until that code is confirmed
@@ -1102,7 +1111,8 @@ func (s *Service) AdminChangeEmail(ctx context.Context, apiClientID, userID, new
 		code, how, humanDuration(s.changeEmailTTL),
 	)
 	if err := s.mailer.Send(ctx, newEmail, "Confirma tu nuevo correo", body); err != nil {
-		return fmt.Errorf("sending change-email code: %w", err)
+		s.logger.Error("sending admin-initiated change-email code failed", "user_id", u.ID, "api_client_id", u.APIClientID, "error", err)
+		return ErrEmailSendFailed
 	}
 	return nil
 }

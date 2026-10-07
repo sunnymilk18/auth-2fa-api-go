@@ -1,6 +1,7 @@
 package auth_test
 
 import (
+	"errors"
 	"testing"
 
 	"auth-2fa-api/internal/auth"
@@ -53,6 +54,25 @@ func TestChangeEmail_FullFlow(t *testing.T) {
 	}
 	if !noticeSent {
 		t.Fatalf("old address %q was never notified of the change; sent = %+v", oldEmail, allSent)
+	}
+}
+
+// When the mail provider itself fails (Resend unreachable, rejected the
+// request, ...), AdminChangeEmail must surface that as ErrEmailSendFailed
+// specifically — not a bare wrapped error — so the HTTP handler can answer
+// 502 instead of a generic 500. See httpserver's own
+// TestAdminChangeEmail_MailerFailure_Returns502 for the HTTP-level check.
+func TestChangeEmail_MailerFailure(t *testing.T) {
+	svc, tokens, mailer, apiClientID := newTestService(t)
+	oldEmail := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
+	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, oldEmail, "correcthorsebattery")
+
+	mailer.FailNextSends(errors.New("resend error (500): internal server error"))
+	t.Cleanup(func() { mailer.FailNextSends(nil) })
+
+	newEmail := "fixed-" + testutil.UniqueSuffix(t) + "@example.com"
+	if err := svc.AdminChangeEmail(t.Context(), apiClientID, userID, newEmail); !errors.Is(err, auth.ErrEmailSendFailed) {
+		t.Fatalf("AdminChangeEmail with a failing mailer: err = %v, want auth.ErrEmailSendFailed", err)
 	}
 }
 

@@ -19,15 +19,31 @@ type SentEmail struct {
 type FakeMailer struct {
 	mu   sync.Mutex
 	sent []SentEmail
+	// failWith, when non-nil, makes Send return it instead of recording the
+	// message — simulates the mail provider itself failing (Resend
+	// unreachable, rejected the request, etc.), e.g. for asserting a
+	// caller maps that into the right HTTP status instead of a generic one.
+	failWith error
 }
 
 func NewFakeMailer() *FakeMailer {
 	return &FakeMailer{}
 }
 
+// FailNextSends makes every subsequent Send call return err instead of
+// recording the message, until cleared with FailNextSends(nil).
+func (m *FakeMailer) FailNextSends(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.failWith = err
+}
+
 func (m *FakeMailer) Send(_ context.Context, to, subject, body string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.failWith != nil {
+		return m.failWith
+	}
 	m.sent = append(m.sent, SentEmail{To: to, Subject: subject, Body: body})
 	return nil
 }

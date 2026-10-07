@@ -199,6 +199,8 @@ func (h *AdminHandlers) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "el correo no tiene un formato válido")
 		case errors.Is(err, user.ErrEmailTaken):
 			writeError(w, http.StatusConflict, "ese correo ya está en uso en este sistema")
+		case errors.Is(err, ErrEmailSendFailed):
+			writeError(w, http.StatusBadGateway, "no se pudo enviar el correo, intenta de nuevo más tarde")
 		default:
 			writeAdminUserActionError(w, err)
 		}
