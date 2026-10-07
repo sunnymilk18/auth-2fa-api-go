@@ -213,10 +213,15 @@ func (h *AdminHandlers) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 // already follows for sensitive fields. APIClientID is included because
 // ListUsers is the one Admin* route that can return results spanning
 // multiple tenants (see ListUsers' doc comment) — without it, a result
-// from /admin/users wouldn't say which tenant it belongs to.
+// from /admin/users wouldn't say which tenant it belongs to. APIClientName
+// rides alongside it (see user.ListedUser) so the panel doesn't have to
+// separately fetch the full client list — which only a superadmin can do
+// — just to show which tenant each row belongs to; always present, never
+// omitted, "" when the tenant can't be resolved.
 type userListItem struct {
 	ID                    string    `json:"id"`
 	APIClientID           string    `json:"api_client_id"`
+	APIClientName         string    `json:"api_client_name"`
 	Email                 string    `json:"email"`
 	Username              string    `json:"username"`
 	RUT                   string    `json:"rut"`
@@ -264,6 +269,7 @@ func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 		out = append(out, userListItem{
 			ID:                    u.ID,
 			APIClientID:           u.APIClientID,
+			APIClientName:         u.APIClientName,
 			Email:                 u.Email,
 			Username:              u.Username,
 			RUT:                   u.RUT,

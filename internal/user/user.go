@@ -45,3 +45,16 @@ type User struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
+
+// ListedUser is one row of Repository.ListByAPIClient — a User plus its
+// tenant's name, resolved in the same query via a LEFT JOIN rather than a
+// separate lookup per row. Deliberately not folded into User itself: every
+// other place a User is read (FindByEmail, FindByID, ...) has no reason to
+// carry this, and User is already used well beyond the admin listing this
+// exists for. APIClientName is "" when the tenant can't be resolved (a
+// dangling api_client_id, or none at all) — see ListByAPIClient's own doc
+// comment for why that can't happen in practice but is handled anyway.
+type ListedUser struct {
+	User
+	APIClientName string
+}

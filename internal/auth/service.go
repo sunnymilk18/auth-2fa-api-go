@@ -952,7 +952,7 @@ func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userI
 // narrows this to accounts whose email, username or rut contains it. See
 // user.Service.ListByAPIClient for the page/pageSize clamping rules and
 // q's matching semantics.
-func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*user.User, total, effectivePage, effectivePageSize int, err error) {
+func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*user.ListedUser, total, effectivePage, effectivePageSize int, err error) {
 	return s.users.ListByAPIClient(ctx, apiClientID, page, pageSize, q)
 }
 

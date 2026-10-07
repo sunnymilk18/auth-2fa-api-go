@@ -272,6 +272,9 @@ func TestSystemAdminListUsers_ScopedToTenantAndOmitsSensitiveFields(t *testing.T
 	if resp.Users[0]["id"] != userA.id {
 		t.Fatalf("returned user id = %v, want clientA's user %s", resp.Users[0]["id"], userA.id)
 	}
+	if resp.Users[0]["api_client_name"] != clientA.Name {
+		t.Fatalf("api_client_name = %v, want own tenant's name %q", resp.Users[0]["api_client_name"], clientA.Name)
+	}
 	for _, sensitive := range []string{"password_hash", "PasswordHash", "totp_secret", "totp_secret_enc"} {
 		if _, present := resp.Users[0][sensitive]; present {
 			t.Fatalf("list response leaked sensitive field %q", sensitive)
@@ -395,12 +398,21 @@ func TestAdminListUsers_UnscopedSpansEveryTenant(t *testing.T) {
 	if err := json.Unmarshal(listRec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding list response: %v", err)
 	}
-	found := map[string]bool{}
+	names := map[string]string{}
 	for _, u := range resp.Users {
-		found[u["id"].(string)] = true
+		names[u["id"].(string)] = u["api_client_name"].(string)
 	}
-	if !found[userA.id] || !found[userB.id] {
+	if _, ok := names[userA.id]; !ok {
 		t.Fatalf("unscoped /admin/users listing missing users from one or both tenants: got %d users, want to find %s and %s among them", len(resp.Users), userA.id, userB.id)
+	}
+	if _, ok := names[userB.id]; !ok {
+		t.Fatalf("unscoped /admin/users listing missing users from one or both tenants: got %d users, want to find %s and %s among them", len(resp.Users), userA.id, userB.id)
+	}
+	if names[userA.id] != clientA.Name {
+		t.Fatalf("api_client_name for userA = %q, want %q", names[userA.id], clientA.Name)
+	}
+	if names[userB.id] != clientB.Name {
+		t.Fatalf("api_client_name for userB = %q, want %q", names[userB.id], clientB.Name)
 	}
 }
 
@@ -416,12 +428,14 @@ func systemAdminRequest(r http.Handler, method, path, key string) *httptest.Resp
 
 type testClient struct {
 	ID     string
+	Name   string
 	APIKey string
 }
 
 func createTestClient(t *testing.T, r http.Handler, name string) testClient {
 	t.Helper()
-	rec := adminRequest(r, http.MethodPost, "/admin/clients/", testAdminToken, map[string]string{"name": name + "-" + testutil.UniqueSuffix(t)})
+	fullName := name + "-" + testutil.UniqueSuffix(t)
+	rec := adminRequest(r, http.MethodPost, "/admin/clients/", testAdminToken, map[string]string{"name": fullName})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("creating test client %q: status = %d, body = %s", name, rec.Code, rec.Body.String())
 	}
@@ -432,7 +446,7 @@ func createTestClient(t *testing.T, r http.Handler, name string) testClient {
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decoding create client response: %v", err)
 	}
-	return testClient{ID: created.ID, APIKey: created.APIKey}
+	return testClient{ID: created.ID, Name: fullName, APIKey: created.APIKey}
 }
 
 type testUser struct {

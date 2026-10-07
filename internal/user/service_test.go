@@ -496,6 +496,40 @@ func TestListByAPIClient_EmptyAPIClientIDSpansEveryTenant(t *testing.T) {
 	}
 }
 
+// Each row carries its own tenant's name, resolved via the LEFT JOIN in
+// Repository.ListByAPIClient — not the caller's, which matters here since
+// this is the one listing that can span multiple tenants in one response.
+func TestListByAPIClient_IncludesEachUsersOwnTenantName(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	clientA, _ := testutil.NewAPIClient(t, pool)
+	clientB, _ := testutil.NewAPIClient(t, pool)
+	svc := user.NewService(user.NewRepository(pool), 5, 15*time.Minute)
+
+	userA, err := svc.Register(t.Context(), clientA.ID, "tenant-name-a-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register in tenant A: %v", err)
+	}
+	userB, err := svc.Register(t.Context(), clientB.ID, "tenant-name-b-"+testutil.UniqueSuffix(t)+"@example.com", "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	if err != nil {
+		t.Fatalf("Register in tenant B: %v", err)
+	}
+
+	results, _, _, _, err := svc.ListByAPIClient(t.Context(), "", 1, 200, "")
+	if err != nil {
+		t.Fatalf("ListByAPIClient: %v", err)
+	}
+	names := map[string]string{}
+	for _, u := range results {
+		names[u.ID] = u.APIClientName
+	}
+	if names[userA.ID] != clientA.Name {
+		t.Fatalf("api_client_name for tenant A's user = %q, want %q", names[userA.ID], clientA.Name)
+	}
+	if names[userB.ID] != clientB.Name {
+		t.Fatalf("api_client_name for tenant B's user = %q, want %q", names[userB.ID], clientB.Name)
+	}
+}
+
 // --- Account PIN ---
 
 func TestVerifyPin_LockoutAfterMaxFailedAttempts(t *testing.T) {

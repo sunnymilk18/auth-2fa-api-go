@@ -186,24 +186,42 @@ func escapeLikePattern(s string) string {
 // lists across every tenant instead (see auth.Service.AdminListUsers's
 // caller: this is only ever reached with apiClientID == "" through
 // /admin/users, gated by the operator's own unscoped X-Admin-Token, never
-// through /system-admin/users, which always has a real tenant id).
-func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string) ([]*User, int, error) {
-	query := `SELECT ` + selectUserColumns + `, COUNT(*) OVER() AS total FROM users`
+// through /system-admin/users, which always has a real tenant id). Each
+// row also carries its tenant's name (ListedUser.APIClientName), resolved
+// via a LEFT JOIN rather than a lookup per row or a second round trip —
+// LEFT, not JOIN, so a user is never dropped from the listing over a
+// tenant that can't be resolved (there's no such tenant today, but
+// nothing enforces it can never happen); APIClientName is "" in that case.
+// This is a separate, fully-qualified column list from selectUserColumns
+// (used elsewhere for single-table lookups with no join and no ambiguity)
+// rather than a change to it — both `users` and `api_clients` have `id`,
+// `created_at` and `updated_at`, so every column referenced here (SELECT,
+// WHERE, ORDER BY alike) must be qualified with `users.` or it's ambiguous
+// the moment the join is in play.
+func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string) ([]*ListedUser, int, error) {
+	query := `
+		SELECT users.id, users.api_client_id, users.email, users.username, users.rut, users.password_hash,
+			users.is_active, users.email_verified, users.totp_enabled, users.two_factor_method_chosen,
+			users.pin_required_at_login, users.created_at, users.updated_at,
+			COALESCE(api_clients.name, '') AS api_client_name,
+			COUNT(*) OVER() AS total
+		FROM users
+		LEFT JOIN api_clients ON api_clients.id = users.api_client_id`
 	var args []any
 	var conditions []string
 
 	if apiClientID != "" {
 		args = append(args, apiClientID)
-		conditions = append(conditions, fmt.Sprintf("api_client_id = $%d", len(args)))
+		conditions = append(conditions, fmt.Sprintf("users.api_client_id = $%d", len(args)))
 	}
 	if q != "" {
 		args = append(args, "%"+escapeLikePattern(q)+"%")
-		conditions = append(conditions, fmt.Sprintf("(email ILIKE $%d OR username ILIKE $%d OR rut ILIKE $%d)", len(args), len(args), len(args)))
+		conditions = append(conditions, fmt.Sprintf("(users.email ILIKE $%d OR users.username ILIKE $%d OR users.rut ILIKE $%d)", len(args), len(args), len(args)))
 	}
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
 	}
-	query += fmt.Sprintf(" ORDER BY created_at DESC OFFSET $%d LIMIT $%d", len(args)+1, len(args)+2)
+	query += fmt.Sprintf(" ORDER BY users.created_at DESC OFFSET $%d LIMIT $%d", len(args)+1, len(args)+2)
 	args = append(args, offset, limit)
 
 	rows, err := r.pool.Query(ctx, query, args...)
@@ -212,12 +230,13 @@ func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, of
 	}
 	defer rows.Close()
 
-	var users []*User
+	var users []*ListedUser
 	total := 0
 	for rows.Next() {
-		u := &User{}
+		u := &ListedUser{}
 		if err := rows.Scan(
 			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
+			&u.APIClientName,
 			&total,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scanning user row: %w", err)
