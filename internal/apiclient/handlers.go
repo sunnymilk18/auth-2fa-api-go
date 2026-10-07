@@ -7,17 +7,47 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"auth-2fa-api/internal/adminctx"
+	"auth-2fa-api/internal/audit"
 )
 
 // Handlers exposes the same operations as cmd/createclient over HTTP,
 // under /admin/clients — gated by middleware.RequireAdminToken, never by
 // RequireAPIKey (a tenant must never be able to provision other tenants).
 type Handlers struct {
-	svc *Service
+	svc   *Service
+	audit *audit.Service
 }
 
-func NewHandlers(svc *Service) *Handlers {
-	return &Handlers{svc: svc}
+func NewHandlers(svc *Service, auditSvc *audit.Service) *Handlers {
+	return &Handlers{svc: svc, audit: auditSvc}
+}
+
+// logAction writes an audit entry for a mutating /admin/clients action —
+// actor/role from adminctx (set by middleware.RequireAdminAccess on every
+// /admin/* request — this whole route tree is superadmin-only, so it's
+// always present here, unlike internal/auth's AdminHandlers which also
+// backs the unscoped-vs-token-optional /system-admin/* tree).
+func (h *Handlers) logAction(r *http.Request, action, targetID, targetLabel string) {
+	actor, _ := adminctx.Actor(r.Context())
+	role, _ := adminctx.Role(r.Context())
+	h.audit.Log(r.Context(), audit.Entry{
+		ActorEmail: actor, ActorRole: role, Action: action,
+		TargetType: audit.TargetTypeClient, TargetID: targetID, TargetLabel: targetLabel,
+		ActorIP: audit.RemoteIP(r),
+	})
+}
+
+// clientLabel is a best-effort lookup of id's name for an audit entry —
+// "" (never an error) if it can't be resolved, since a label lookup
+// failing must never block the real action it describes.
+func (h *Handlers) clientLabel(r *http.Request, id string) string {
+	c, err := h.svc.FindByID(r.Context(), id)
+	if err != nil {
+		return ""
+	}
+	return c.Name
 }
 
 type errorResponse struct {
@@ -82,6 +112,7 @@ func (h *Handlers) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.logAction(r, audit.ActionClientCreate, client.ID, client.Name)
 	writeJSON(w, http.StatusCreated, createResponse{clientResponse: toResponse(client), APIKey: plaintextKey})
 }
 
@@ -109,6 +140,7 @@ func (h *Handlers) Deactivate(w http.ResponseWriter, r *http.Request) {
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientDeactivate, id, h.clientLabel(r, id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -118,6 +150,7 @@ func (h *Handlers) Activate(w http.ResponseWriter, r *http.Request) {
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientActivate, id, h.clientLabel(r, id))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -135,6 +168,7 @@ func (h *Handlers) Rotate(w http.ResponseWriter, r *http.Request) {
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientRotateKey, id, h.clientLabel(r, id))
 	writeJSON(w, http.StatusOK, rotateResponse{APIKey: plaintextKey})
 }
 
@@ -155,6 +189,7 @@ func (h *Handlers) RotateSystemAdminKey(w http.ResponseWriter, r *http.Request) 
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientSystemAdminKeyRotate, id, h.clientLabel(r, id))
 	writeJSON(w, http.StatusOK, systemAdminKeyResponse{SystemAdminKey: plaintextKey})
 }
 
@@ -162,10 +197,12 @@ func (h *Handlers) RotateSystemAdminKey(w http.ResponseWriter, r *http.Request) 
 // entirely — its /system-admin/* access stops immediately.
 func (h *Handlers) RevokeSystemAdminKey(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	label := h.clientLabel(r, id)
 	if err := h.svc.RevokeSystemAdminKey(r.Context(), id); err != nil {
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientSystemAdminKeyRevoke, id, label)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -192,6 +229,7 @@ func (h *Handlers) SetPanelBaseURL(w http.ResponseWriter, r *http.Request) {
 		writeClientActionError(w, err)
 		return
 	}
+	h.logAction(r, audit.ActionClientSetPanelBaseURL, id, h.clientLabel(r, id))
 	w.WriteHeader(http.StatusNoContent)
 }
 

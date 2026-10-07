@@ -11,6 +11,8 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"auth-2fa-api/internal/adminauth"
+	"auth-2fa-api/internal/adminctx"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 )
@@ -23,6 +25,7 @@ import (
 // tenants/users once logged in.
 type adminAuthHandlers struct {
 	svc        *adminauth.Service
+	audit      *audit.Service
 	sessionTTL time.Duration
 	// cookieSameSite is http.SameSiteNoneMode while the panel and the API
 	// live on different registrable domains (e.g. today's sslip.io
@@ -39,8 +42,33 @@ type adminAuthHandlers struct {
 	logger         *slog.Logger
 }
 
-func newAdminAuthHandlers(svc *adminauth.Service, sessionTTL time.Duration, cookieSameSite http.SameSite, logger *slog.Logger) *adminAuthHandlers {
-	return &adminAuthHandlers{svc: svc, sessionTTL: sessionTTL, cookieSameSite: cookieSameSite, logger: logger}
+func newAdminAuthHandlers(svc *adminauth.Service, auditSvc *audit.Service, sessionTTL time.Duration, cookieSameSite http.SameSite, logger *slog.Logger) *adminAuthHandlers {
+	return &adminAuthHandlers{svc: svc, audit: auditSvc, sessionTTL: sessionTTL, cookieSameSite: cookieSameSite, logger: logger}
+}
+
+// accountLabel is a best-effort lookup of id's email for an audit entry —
+// "" (never an error) if it can't be resolved, since a label lookup
+// failing must never block the real action it describes.
+func (h *adminAuthHandlers) accountLabel(r *http.Request, id string) string {
+	a, err := h.svc.FindAccountByID(r.Context(), id)
+	if err != nil {
+		return ""
+	}
+	return a.Email
+}
+
+// logAccountAction writes an audit entry for a mutating /admin/accounts or
+// self-service action — actor/role from adminctx, same as every other
+// /admin/* handler. target is the admin account the action was about
+// (itself, for the self-service endpoints).
+func (h *adminAuthHandlers) logAccountAction(r *http.Request, action, targetID, targetEmail string) {
+	actor, _ := adminctx.Actor(r.Context())
+	role, _ := adminctx.Role(r.Context())
+	h.audit.Log(r.Context(), audit.Entry{
+		ActorEmail: actor, ActorRole: role, Action: action,
+		TargetType: audit.TargetTypeAdminAccount, TargetID: targetID, TargetLabel: targetEmail,
+		ActorIP: audit.RemoteIP(r),
+	})
 }
 
 func (h *adminAuthHandlers) setSessionCookie(w http.ResponseWriter, token string, expiresAt time.Time) {
@@ -84,15 +112,36 @@ func (h *adminAuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Logged by email, not account id — a failed attempt (wrong email,
+	// wrong password, locked out) never proves an account by that email
+	// even exists, so there's no id to log in that case; the attempted
+	// email itself is exactly what's useful for "did someone keep trying
+	// to get into this account". See audit.Entry's doc comment: never a
+	// secret, and a plaintext email here is the same thing GET /admin/users
+	// already shows for the exact same account.
+	logLoginAttempt := func(ok bool, role string) {
+		action := audit.ActionAdminLogin
+		if !ok {
+			action = audit.ActionAdminLoginFailed
+		}
+		h.audit.Log(r.Context(), audit.Entry{
+			ActorEmail: req.Email, ActorRole: role, Action: action,
+			TargetType: audit.TargetTypeAdminAccount, TargetLabel: req.Email,
+			ActorIP: audit.RemoteIP(r),
+		})
+	}
+
 	token, expiresAt, err := h.svc.Login(r.Context(), req.Email, req.Password, req.TOTPCode)
 	if err != nil {
 		var locked *auth.LockedOutError
 		if errors.As(err, &locked) {
+			logLoginAttempt(false, "")
 			w.Header().Set("Retry-After", fmt.Sprintf("%.0f", locked.RetryAfter.Seconds()))
 			writeJSONError(w, http.StatusTooManyRequests, "demasiados intentos fallidos, vuelve a intentar más tarde")
 			return
 		}
 		if errors.Is(err, adminauth.ErrInvalidCredentials) {
+			logLoginAttempt(false, "")
 			writeJSONError(w, http.StatusUnauthorized, "credenciales inválidas")
 			return
 		}
@@ -100,6 +149,9 @@ func (h *adminAuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "no se pudo iniciar sesión")
 		return
 	}
+
+	_, role, _, _ := h.svc.ValidateSession(r.Context(), token)
+	logLoginAttempt(true, role)
 
 	h.setSessionCookie(w, token, expiresAt)
 	h.logger.Info("admin logged in", "email", req.Email)
@@ -137,8 +189,8 @@ type meResponse struct {
 // the backend still enforces the real boundary on every actual request
 // regardless of what the UI shows.
 func (h *adminAuthHandlers) Me(w http.ResponseWriter, r *http.Request) {
-	actor, _ := auth.AdminActorFromContext(r.Context())
-	role, _ := auth.AdminRoleFromContext(r.Context())
+	actor, _ := adminctx.Actor(r.Context())
+	role, _ := adminctx.Role(r.Context())
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(meResponse{Actor: actor, Role: role})
 }
@@ -227,8 +279,9 @@ func (h *adminAuthHandlers) CreateAccount(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	actor, _ := auth.AdminActorFromContext(r.Context())
+	actor, _ := adminctx.Actor(r.Context())
 	h.logger.Info("admin account created", "actor", actor, "new_admin_email", req.Email, "role", req.Role)
+	h.logAccountAction(r, audit.ActionAccountCreate, account.ID, account.Email)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(createAdminAccountResponse{
@@ -248,8 +301,9 @@ func (h *adminAuthHandlers) CreateAccount(w http.ResponseWriter, r *http.Request
 // way).
 func (h *adminAuthHandlers) RevokeAccount(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	label := h.accountLabel(r, id)
 
-	actor, _ := auth.AdminActorFromContext(r.Context())
+	actor, _ := adminctx.Actor(r.Context())
 	actorEmail := actor
 	if actor == middleware.AdminActorToken {
 		actorEmail = ""
@@ -270,6 +324,7 @@ func (h *adminAuthHandlers) RevokeAccount(w http.ResponseWriter, r *http.Request
 	}
 
 	h.logger.Info("admin account revoked", "actor", actor, "revoked_admin_id", id)
+	h.logAccountAction(r, audit.ActionAccountRevoke, id, label)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -310,8 +365,9 @@ func (h *adminAuthHandlers) Reactivate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	actor, _ := auth.AdminActorFromContext(r.Context())
+	actor, _ := adminctx.Actor(r.Context())
 	h.logger.Info("admin account reactivated", "actor", actor, "reactivated_admin_id", id)
+	h.logAccountAction(r, audit.ActionAccountReactivate, account.ID, account.Email)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(createAdminAccountResponse{
 		ID:         account.ID,
@@ -331,7 +387,7 @@ func (h *adminAuthHandlers) Reactivate(w http.ResponseWriter, r *http.Request) {
 // and none of these three actions make sense for the script/automation
 // credential.
 func selfServiceActor(w http.ResponseWriter, r *http.Request) (email, sessionToken string, ok bool) {
-	actor, _ := auth.AdminActorFromContext(r.Context())
+	actor, _ := adminctx.Actor(r.Context())
 	if actor == "" || actor == middleware.AdminActorToken {
 		writeJSONError(w, http.StatusBadRequest, "esta acción requiere una sesión de administrador individual, no el token compartido")
 		return "", "", false
@@ -397,6 +453,7 @@ func (h *adminAuthHandlers) ChangePassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	h.logger.Info("admin changed own password", "actor", email)
+	h.logAccountAction(r, audit.ActionAccountPasswordChange, "", email)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -462,5 +519,6 @@ func (h *adminAuthHandlers) ConfirmRotateTOTP(w http.ResponseWriter, r *http.Req
 	}
 
 	h.logger.Info("admin confirmed totp rotation", "actor", email)
+	h.logAccountAction(r, audit.ActionAccountTOTPRotate, "", email)
 	w.WriteHeader(http.StatusNoContent)
 }

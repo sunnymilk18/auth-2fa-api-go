@@ -47,7 +47,7 @@ func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	)
 	handlers := auth.NewHandlers(svc)
 
-	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), adminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+	return httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), adminToken, false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 }
 
 func adminRequest(r http.Handler, method, path, adminToken string, body any) *httptest.ResponseRecorder {
@@ -508,7 +508,7 @@ func TestRouter_BanInstantlyRevokesAnAlreadyIssuedAccessToken(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, nil, nil, nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), "", false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	u, err := svc.Register(t.Context(), client.ID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
@@ -566,7 +566,7 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 
 	clientA, _, err := apiClients.Create(t.Context(), "reset-pin-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -660,7 +660,7 @@ func TestSystemAdminSetLoginPinRequired_ScopedToTenant(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 
 	clientA, _, err := apiClients.Create(t.Context(), "login-pin-required-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -757,7 +757,7 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 
 	clientA, apiKeyA, err := apiClients.Create(t.Context(), "change-email-a-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -851,7 +851,7 @@ func TestSystemAdminChangeEmail_MailerFailure_Returns502(t *testing.T) {
 		mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil, nil, "", false, 0, nil, testLogger())
 
 	client, _, err := apiClients.Create(t.Context(), "change-email-fail-"+testutil.UniqueSuffix(t))
 	if err != nil {
@@ -1085,7 +1085,7 @@ func TestSystemAdminBlacklist_ScopedToTenant(t *testing.T) {
 		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
 	)
 	handlers := auth.NewHandlers(svc)
-	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, []byte("test-ban-reference-secret"), nil, "", false, 0, testLogger())
+	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients, noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, []byte("test-ban-reference-secret"), nil, "", false, 0, nil, testLogger())
 
 	clientA := createTestClient(t, r, "blacklist-a")
 	clientB := createTestClient(t, r, "blacklist-b")

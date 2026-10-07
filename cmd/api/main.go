@@ -14,6 +14,7 @@ import (
 
 	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/config"
 	"auth-2fa-api/internal/db"
@@ -151,6 +152,12 @@ func run(logger *slog.Logger) error {
 	}()
 	meter := telemetry.Meter("auth-2fa-api")
 
+	// Always constructed (unlike adminAccounts below) — the audit log
+	// covers every /admin/* action, including the X-Admin-Token/script
+	// path, which exists independently of whether the panel's own login
+	// (TOTP) is configured at all.
+	auditSvc := audit.NewService(audit.NewRepository(pgPool), time.Duration(cfg.AuditRetentionDays)*24*time.Hour, meter, logger)
+
 	// nil when TOTP isn't configured server-wide (TOTPEncryptionKeyBase64
 	// unset) — an admin account's TOTP secret can't be encrypted at rest
 	// without it, and TOTP is mandatory for every admin account (see
@@ -172,7 +179,7 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), adminAccounts, cfg.AdminPanelOrigin, cfg.AdminSessionCrossSite, cfg.AdminSessionTTL, logger)
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), adminAccounts, cfg.AdminPanelOrigin, cfg.AdminSessionCrossSite, cfg.AdminSessionTTL, auditSvc, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -194,6 +201,7 @@ func run(logger *slog.Logger) error {
 	if adminSessions != nil {
 		go cleanupExpiredAdminSessions(ctx, adminSessions, logger)
 	}
+	go cleanupExpiredAuditLog(ctx, auditSvc, logger)
 
 	<-ctx.Done()
 	logger.Info("shutting down...")
@@ -220,6 +228,36 @@ func cleanupExpiredRefreshTokens(ctx context.Context, refreshRepo *auth.RefreshR
 		}
 		if n > 0 {
 			logger.Info("refresh token cleanup", "deleted", n)
+		}
+	}
+
+	sweep()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
+// cleanupExpiredAuditLog is cleanupExpiredRefreshTokens' exact counterpart
+// for admin_audit_log — same once-at-startup-then-every-24h cadence,
+// removing entries older than AUDIT_RETENTION_DAYS (see audit.Service.
+// DeleteExpired).
+func cleanupExpiredAuditLog(ctx context.Context, auditSvc *audit.Service, logger *slog.Logger) {
+	sweep := func() {
+		n, err := auditSvc.DeleteExpired(ctx)
+		if err != nil {
+			logger.Error("audit log cleanup failed", "error", err)
+			return
+		}
+		if n > 0 {
+			logger.Info("audit log cleanup", "deleted", n)
 		}
 	}
 

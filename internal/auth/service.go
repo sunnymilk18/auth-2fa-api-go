@@ -886,6 +886,20 @@ func (s *Service) checkUserScope(ctx context.Context, apiClientID, userID string
 	return u, nil
 }
 
+// UserEmail returns userID's email, scoped to apiClientID the same way
+// every Admin* action does (see checkUserScope) — used by AdminHandlers to
+// label an audit log entry with something a human recognizes, since
+// target_id alone (a UUID) isn't legible on its own. Callers treat a
+// failure here as "" rather than failing the whole request: a label
+// lookup failing must never block the real action it describes.
+func (s *Service) UserEmail(ctx context.Context, apiClientID, userID string) (string, error) {
+	u, err := s.checkUserScope(ctx, apiClientID, userID)
+	if err != nil {
+		return "", err
+	}
+	return u.Email, nil
+}
+
 // AdminBanUser deactivates userID (scoped to apiClientID — see
 // checkUserScope), revokes every refresh token and trusted device it has,
 // and marks every access token already issued as no longer trusted from

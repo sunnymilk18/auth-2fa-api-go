@@ -8,23 +8,29 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"auth-2fa-api/internal/adminctx"
 	"auth-2fa-api/internal/apiclient"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 )
 
 // blacklistHandlers exposes a tenant's own banned-IP view over HTTP — backs
-// /system-admin/blacklist. Kept separate from auth.AdminHandlers because
+// /system-admin/blacklist, plus the operator's own unscoped view/actions
+// under /admin/blacklist. Kept separate from auth.AdminHandlers because
 // middleware.Blacklist is an IP/rate-limiting concept, not an auth-domain
-// one; this just adapts it to HTTP, the same way NewRouter's own inline
-// /admin/blacklist closure already does for the operator's unscoped route
-// (see its doc comment there). apiClients is only used by ListAll, to
+// one; this just adapts it to HTTP. apiClients is only used by ListAll, to
 // attach api_client_name to each ban — every tenant-scoped handler here
 // (List, Unban, ...) already has its api_client_id from the caller's own
-// token and has no need to resolve a name for it.
+// token and has no need to resolve a name for it. audit is only written to
+// by the operator-level actions (UnbanAny, AddAllowlist, RemoveAllowlist)
+// — the tenant-scoped ones below (List, Unban) are reachable only via
+// /system-admin/*, which never carries an operator identity to attribute
+// an entry to in the first place.
 type blacklistHandlers struct {
 	bl         *middleware.Blacklist
 	apiClients *apiclient.Service
+	audit      *audit.Service
 	logger     *slog.Logger
 }
 
@@ -162,6 +168,40 @@ func (h *blacklistHandlers) ListAll(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(listAllBlacklistResponse{Bans: out})
 }
 
+// logOperatorAction writes an audit entry attributed to the caller of an
+// operator-level (/admin/*) action — actor/role come from adminctx (set
+// by middleware.RequireAdminAccess on every /admin/* request), IP from
+// the request itself. See audit.Service.Log's doc comment for why this
+// never blocks or fails the caller's own action.
+func (h *blacklistHandlers) logOperatorAction(r *http.Request, action, targetType, targetID, targetLabel string) {
+	actor, _ := adminctx.Actor(r.Context())
+	role, _ := adminctx.Role(r.Context())
+	h.audit.Log(r.Context(), audit.Entry{
+		ActorEmail: actor, ActorRole: role, Action: action,
+		TargetType: targetType, TargetID: targetID, TargetLabel: targetLabel,
+		ActorIP: audit.RemoteIP(r),
+	})
+}
+
+// UnbanAny lifts ip's ban regardless of which tenant owns it (or whether
+// it has an owner at all) — the operator's unscoped counterpart to Unban
+// above, backing DELETE /admin/blacklist/{ip}.
+func (h *blacklistHandlers) UnbanAny(w http.ResponseWriter, r *http.Request) {
+	ip := chi.URLParam(r, "ip")
+	if net.ParseIP(ip) == nil {
+		writeJSONError(w, http.StatusBadRequest, "la IP no tiene un formato válido")
+		return
+	}
+
+	if err := h.bl.Unban(r.Context(), ip); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo levantar el baneo")
+		return
+	}
+
+	h.logOperatorAction(r, audit.ActionBlacklistUnban, audit.TargetTypeBlacklistIP, ip, ip)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type unbanRequest struct {
 	Reason string `json:"reason"`
 }
@@ -263,6 +303,7 @@ func (h *blacklistHandlers) AddAllowlist(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.logger.Info("ip added to blacklist allowlist", "ip", req.IP)
+	h.logOperatorAction(r, audit.ActionAllowlistAdd, audit.TargetTypeAllowlistIP, req.IP, req.IP)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -287,5 +328,6 @@ func (h *blacklistHandlers) RemoveAllowlist(w http.ResponseWriter, r *http.Reque
 	}
 
 	h.logger.Info("ip removed from blacklist allowlist", "ip", ip)
+	h.logOperatorAction(r, audit.ActionAllowlistRemove, audit.TargetTypeAllowlistIP, ip, ip)
 	w.WriteHeader(http.StatusNoContent)
 }

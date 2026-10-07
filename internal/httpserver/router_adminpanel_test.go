@@ -24,6 +24,7 @@ import (
 
 	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
@@ -69,9 +70,15 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 		time.Hour,
 	)
 
+	// A real audit.Service, backed by the same pool — not nil — so tests
+	// that care (TestAdminAudit_*) can inspect what every action here
+	// actually wrote, by constructing their own audit.Service against this
+	// same pool and reading the same admin_audit_log table.
+	auditSvc := audit.NewService(audit.NewRepository(pool), 365*24*time.Hour, noop.NewMeterProvider().Meter("test"), testLogger())
+
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients,
 		noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil,
-		adminAccounts, testAdminPanelOrigin, true, time.Hour, testLogger())
+		adminAccounts, testAdminPanelOrigin, true, time.Hour, auditSvc, testLogger())
 
 	return r, adminAccounts, pool, rdb
 }

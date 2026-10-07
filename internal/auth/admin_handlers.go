@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"auth-2fa-api/internal/adminctx"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/user"
 )
 
@@ -20,11 +22,35 @@ import (
 // — "" (not present) means unscoped, a real id means scoped to it — so
 // there's only ever one code path per action, not two.
 type AdminHandlers struct {
-	svc *Service
+	svc   *Service
+	audit *audit.Service
 }
 
-func NewAdminHandlers(svc *Service) *AdminHandlers {
-	return &AdminHandlers{svc: svc}
+func NewAdminHandlers(svc *Service, auditSvc *audit.Service) *AdminHandlers {
+	return &AdminHandlers{svc: svc, audit: auditSvc}
+}
+
+// logUserAction writes an audit entry for a mutating action on a user
+// account — but ONLY when the request came through /admin/* (an operator
+// identity set by middleware.RequireAdminAccess in adminctx): the exact
+// same handlers also back /system-admin/* (a tenant's own scoped
+// credential, see this file's own doc comment), which never sets that
+// context value and isn't "an operator's own action" in the sense this
+// audit log is for — see the audit log's own design notes. Best-effort
+// everywhere: a failed email lookup becomes "" rather than blocking the
+// write, and audit.Service.Log itself never blocks or fails the caller.
+func (h *AdminHandlers) logUserAction(r *http.Request, apiClientID, userID, action string) {
+	actor, ok := adminctx.Actor(r.Context())
+	if !ok {
+		return
+	}
+	role, _ := adminctx.Role(r.Context())
+	email, _ := h.svc.UserEmail(r.Context(), apiClientID, userID)
+	h.audit.Log(r.Context(), audit.Entry{
+		ActorEmail: actor, ActorRole: role, Action: action,
+		TargetType: audit.TargetTypeUser, TargetID: userID, TargetLabel: email,
+		ActorIP: audit.RemoteIP(r),
+	})
 }
 
 // Ban deactivates the account and revokes all of its sessions — see
@@ -36,6 +62,7 @@ func (h *AdminHandlers) Ban(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserBan)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -47,6 +74,7 @@ func (h *AdminHandlers) Unban(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserUnban)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -59,6 +87,7 @@ func (h *AdminHandlers) DisableTOTP(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserTOTPDisable)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -71,6 +100,7 @@ func (h *AdminHandlers) RevokeSessions(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserSessionsRevoke)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -94,6 +124,7 @@ func (h *AdminHandlers) SetLoginPinRequired(w http.ResponseWriter, r *http.Reque
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserLoginPinRequiredSet)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -157,6 +188,7 @@ func (h *AdminHandlers) ClearLockouts(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserLockoutsCleared)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -169,6 +201,7 @@ func (h *AdminHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {
 		writeAdminUserActionError(w, err)
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserPINReset)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -206,6 +239,7 @@ func (h *AdminHandlers) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	h.logUserAction(r, apiClientID, id, audit.ActionUserEmailChangeRequest)
 	w.WriteHeader(http.StatusNoContent)
 }
 

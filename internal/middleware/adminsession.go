@@ -5,7 +5,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
-	"auth-2fa-api/internal/auth"
+	"auth-2fa-api/internal/adminctx"
 )
 
 // AdminSessionCookieName is the httpOnly cookie RequireAdminAccess reads
@@ -28,7 +28,7 @@ const AdminSessionCookieName = "admin_session"
 const AdminPanelHeader = "X-Admin-Panel"
 
 // AdminActorToken is the sentinel RequireAdminAccess records via
-// auth.ContextWithAdminActor for the X-Admin-Token/script path, which has
+// adminctx.WithActor for the X-Admin-Token/script path, which has
 // no individual admin email to attribute an action to — exported so a
 // handler can tell that case apart from a real admin's email (e.g.
 // httpserver.adminAuthHandlers.RevokeAccount, which only enforces its
@@ -60,11 +60,11 @@ type AdminSessionValidator interface {
 // reimplements inline rather than wrapping, since only one of the two
 // checks should ever reject the request) or a valid admin_session cookie
 // (the panel, after a human logs in via adminauth.Service.Login). Exactly
-// one needs to succeed. auth.ContextWithAdminActor records which path
+// one needs to succeed. adminctx.WithActor records which path
 // succeeded ("token", or the admin's own email) so handlers can log who
 // actually performed a destructive action — see that function's doc
 // comment for why that distinction matters now that /admin/* isn't only
-// reachable with one shared secret. auth.ContextWithAdminRole records the
+// reachable with one shared secret. adminctx.WithRole records the
 // permission tier ("admin"/"superadmin", or AdminRoleSuperAdmin for the
 // token path) that RequireSuperAdmin checks for routes limited to
 // superadmins — see adminauth.Role's doc comment for what each tier means.
@@ -73,16 +73,16 @@ func RequireAdminAccess(token string, sessions AdminSessionValidator) func(http.
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if got := r.Header.Get("X-Admin-Token"); got != "" && token != "" &&
 				subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
-				ctx := auth.ContextWithAdminActor(r.Context(), AdminActorToken)
-				ctx = auth.ContextWithAdminRole(ctx, AdminRoleSuperAdmin)
+				ctx := adminctx.WithActor(r.Context(), AdminActorToken)
+				ctx = adminctx.WithRole(ctx, AdminRoleSuperAdmin)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
 
 			if cookie, err := r.Cookie(AdminSessionCookieName); sessions != nil && err == nil && cookie.Value != "" && r.Header.Get(AdminPanelHeader) != "" {
 				if email, role, ok, err := sessions.ValidateSession(r.Context(), cookie.Value); err == nil && ok {
-					ctx := auth.ContextWithAdminActor(r.Context(), email)
-					ctx = auth.ContextWithAdminRole(ctx, role)
+					ctx := adminctx.WithActor(r.Context(), email)
+					ctx = adminctx.WithRole(ctx, role)
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return
 				}
@@ -102,7 +102,7 @@ func RequireAdminAccess(token string, sessions AdminSessionValidator) func(http.
 // path, which RequireAdminAccess already marks AdminRoleSuperAdmin.
 func RequireSuperAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if role, ok := auth.AdminRoleFromContext(r.Context()); ok && role == AdminRoleSuperAdmin {
+		if role, ok := adminctx.Role(r.Context()); ok && role == AdminRoleSuperAdmin {
 			next.ServeHTTP(w, r)
 			return
 		}

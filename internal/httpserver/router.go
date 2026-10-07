@@ -16,6 +16,7 @@ import (
 
 	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
+	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/user"
@@ -56,7 +57,7 @@ import (
 // wildcard, no-credentials CORS they always had — see config.Config.
 // AdminPanelOrigin's doc comment. adminSessionCrossSite/adminSessionTTL
 // configure the panel session cookie — see config.Config's own fields.
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, adminAccounts *adminauth.Service, adminPanelOrigin string, adminSessionCrossSite bool, adminSessionTTL time.Duration, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, adminAccounts *adminauth.Service, adminPanelOrigin string, adminSessionCrossSite bool, adminSessionTTL time.Duration, auditSvc *audit.Service, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -108,7 +109,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		banReferenceSecret,
 	)
 	r.Use(blacklist.Middleware)
-	blHandlers := &blacklistHandlers{bl: blacklist, apiClients: apiClients, logger: logger}
+	blHandlers := &blacklistHandlers{bl: blacklist, apiClients: apiClients, audit: auditSvc, logger: logger}
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health
@@ -312,7 +313,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 	// (a tenant's own scoped X-System-Admin-Token) below; see
 	// auth.AdminHandlers' doc comment. See user.Service.Ban's doc comment
 	// for why banning is never triggered automatically.
-	adminUserHandlers := auth.NewAdminHandlers(authSvc)
+	adminUserHandlers := auth.NewAdminHandlers(authSvc, auditSvc)
 
 	// /admin/* lives on its own *chi.Mux (adminRouter, mounted below),
 	// never inside r — a browser-based panel login needs a cookie-carrying
@@ -379,7 +380,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		}
 		adminAccess := middleware.RequireAdminAccess(adminToken, sessionValidator)
 
-		adminHandlers := apiclient.NewHandlers(apiClients)
+		adminHandlers := apiclient.NewHandlers(apiClients, auditSvc)
 		adminRouter.Route("/clients", func(r chi.Router) {
 			// Superadmin-only — provisioning/deactivating/rotating a
 			// tenant's credentials is infrastructure-level: it decides
@@ -438,14 +439,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// blacklistHandlers.ListAll's doc comment.
 			r.Get("/", blHandlers.ListAll)
 
-			r.Delete("/{ip}", func(w http.ResponseWriter, r *http.Request) {
-				ip := chi.URLParam(r, "ip")
-				if err := blacklist.Unban(r.Context(), ip); err != nil {
-					http.Error(w, `{"error":"no se pudo levantar el baneo"}`, http.StatusInternalServerError)
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			})
+			r.Delete("/{ip}", blHandlers.UnbanAny)
 
 			// Exempts an IP from ever being struck/banned — operator-only,
 			// deliberately not exposed under /system-admin/*: the exemption
@@ -467,6 +461,16 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			})
 		})
 
+		// Who did what, to what, from where — superadmin-only, same tier as
+		// /clients and the allowlist: this is visibility into every
+		// operator's actions platform-wide, not day-to-day moderation. See
+		// auditHandlers.List's doc comment.
+		aHandlers := &auditHandlers{svc: auditSvc}
+		adminRouter.Route("/audit", func(r chi.Router) {
+			r.Use(adminAccess, middleware.RequireSuperAdmin)
+			r.Get("/", aHandlers.List)
+		})
+
 		// The panel's own login — see adminauth.Service and config.Config.
 		// AdminPanelOrigin's doc comments for why this is opt-in
 		// separately from adminToken: a login surface with no configured
@@ -483,7 +487,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			if !adminSessionCrossSite {
 				sameSite = http.SameSiteStrictMode
 			}
-			adminAuth := newAdminAuthHandlers(adminAccounts, adminSessionTTL, sameSite, logger)
+			adminAuth := newAdminAuthHandlers(adminAccounts, auditSvc, adminSessionTTL, sameSite, logger)
 
 			adminRouter.Post("/auth/login", adminAuth.Login)
 			adminRouter.Post("/auth/logout", adminAuth.Logout)

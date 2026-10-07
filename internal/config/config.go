@@ -231,6 +231,16 @@ type Config struct {
 	// since this is the highest-privilege session in the system and a
 	// shorter lifetime is worth the extra logins.
 	AdminSessionTTL time.Duration
+
+	// AuditRetentionDays bounds how long an admin_audit_log entry survives
+	// before the periodic cleanup removes it — see internal/audit.Service.
+	// A plain int (days), not a time.Duration string, so setting it is as
+	// simple as "365" rather than needing to spell out "8760h" — retention
+	// is always thought about in days/months/years, never hours/minutes.
+	// Configurable (not a fixed constant) because different institutions
+	// can have different retention requirements, and that shouldn't need a
+	// code change to adjust.
+	AuditRetentionDays int
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -349,6 +359,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.AdminSessionTTL, err = getEnvDuration("ADMIN_SESSION_TTL", 12*time.Hour); err != nil {
+		return nil, err
+	}
+	if cfg.AuditRetentionDays, err = getEnvInt("AUDIT_RETENTION_DAYS", 365); err != nil {
 		return nil, err
 	}
 

@@ -245,6 +245,15 @@ func (s *Service) ListAccounts(ctx context.Context) ([]*AdminAccount, error) {
 	return s.accounts.List(ctx)
 }
 
+// FindAccountByID looks up a single admin account by id — mainly used by
+// httpserver's audit-log wiring to label an entry with the target
+// account's email (a UUID alone isn't legible), not a path any
+// moderation action itself needs (those already have the account loaded
+// by the time anything would want to log it).
+func (s *Service) FindAccountByID(ctx context.Context, id string) (*AdminAccount, error) {
+	return s.accounts.FindByID(ctx, id)
+}
+
 // RevokeAccount deactivates an admin account and immediately invalidates
 // every session it currently holds — unlike a regular tenant user ban
 // (which leaves existing sessions to expire naturally unless sessions are
