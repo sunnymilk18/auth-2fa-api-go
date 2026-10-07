@@ -39,6 +39,39 @@ func mustCreate(t *testing.T, svc *apiclient.Service, pool *pgxpool.Pool) (*apic
 	return client, plaintextKey
 }
 
+func TestFindByIDs_ResolvesManyInOneCall(t *testing.T) {
+	svc, pool := newTestServiceAndPool(t)
+
+	clientA, _ := mustCreate(t, svc, pool)
+	clientB, _ := mustCreate(t, svc, pool)
+
+	names, err := svc.FindByIDs(t.Context(), []string{clientA.ID, clientB.ID, "00000000-0000-0000-0000-000000000000"})
+	if err != nil {
+		t.Fatalf("FindByIDs: %v", err)
+	}
+	if names[clientA.ID] != clientA.Name {
+		t.Fatalf("names[%s] = %q, want %q", clientA.ID, names[clientA.ID], clientA.Name)
+	}
+	if names[clientB.ID] != clientB.Name {
+		t.Fatalf("names[%s] = %q, want %q", clientB.ID, names[clientB.ID], clientB.Name)
+	}
+	if _, ok := names["00000000-0000-0000-0000-000000000000"]; ok {
+		t.Fatalf("names contains an entry for an unknown id, want it simply absent")
+	}
+}
+
+func TestFindByIDs_EmptyInputReturnsEmptyMapNoQuery(t *testing.T) {
+	svc := newTestService(t)
+
+	names, err := svc.FindByIDs(t.Context(), nil)
+	if err != nil {
+		t.Fatalf("FindByIDs(nil): %v", err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("FindByIDs(nil) = %v, want empty map", names)
+	}
+}
+
 func TestCreate_GeneratesUniqueKeys(t *testing.T) {
 	svc, pool := newTestServiceAndPool(t)
 

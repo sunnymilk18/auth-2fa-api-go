@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
 )
@@ -17,10 +18,14 @@ import (
 // middleware.Blacklist is an IP/rate-limiting concept, not an auth-domain
 // one; this just adapts it to HTTP, the same way NewRouter's own inline
 // /admin/blacklist closure already does for the operator's unscoped route
-// (see its doc comment there).
+// (see its doc comment there). apiClients is only used by ListAll, to
+// attach api_client_name to each ban — every tenant-scoped handler here
+// (List, Unban, ...) already has its api_client_id from the caller's own
+// token and has no need to resolve a name for it.
 type blacklistHandlers struct {
-	bl     *middleware.Blacklist
-	logger *slog.Logger
+	bl         *middleware.Blacklist
+	apiClients *apiclient.Service
+	logger     *slog.Logger
 }
 
 func writeJSONError(w http.ResponseWriter, status int, message string) {
@@ -94,6 +99,13 @@ type adminBanInfoResponse struct {
 	// never omitted, so the panel can tell "no owner" apart from a
 	// field it forgot to render.
 	APIClientID string `json:"api_client_id"`
+	// APIClientName rides alongside APIClientID the same way userListItem.
+	// APIClientName does for GET /admin/users — "" when APIClientID is ""
+	// (no owner at all) or when the owner id no longer resolves to a
+	// client row (e.g. deleted directly in Postgres, bypassing this API's
+	// own deactivate-don't-delete convention). Always present, never
+	// omitted, same reasoning as APIClientID.
+	APIClientName string `json:"api_client_name"`
 }
 
 type listAllBlacklistResponse struct {
@@ -111,15 +123,33 @@ func (h *blacklistHandlers) ListAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One query for every distinct owner across the whole listing, not one
+	// per ban — see apiclient.Repository.FindByIDs's doc comment.
+	ownerIDs := make([]string, 0, len(bans))
+	seen := make(map[string]bool, len(bans))
+	for _, b := range bans {
+		if b.OwnerAPIClientID == "" || seen[b.OwnerAPIClientID] {
+			continue
+		}
+		seen[b.OwnerAPIClientID] = true
+		ownerIDs = append(ownerIDs, b.OwnerAPIClientID)
+	}
+	names, err := h.apiClients.FindByIDs(r.Context(), ownerIDs)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "no se pudieron listar los baneos")
+		return
+	}
+
 	out := make([]adminBanInfoResponse, 0, len(bans))
 	for _, b := range bans {
 		item := adminBanInfoResponse{
-			IP:          b.IP,
-			BannedAt:    b.BannedAt.Unix(),
-			BannedUntil: b.BannedUntil.Unix(),
-			Level:       b.Level,
-			Strikes:     b.Strikes,
-			APIClientID: b.OwnerAPIClientID,
+			IP:            b.IP,
+			BannedAt:      b.BannedAt.Unix(),
+			BannedUntil:   b.BannedUntil.Unix(),
+			Level:         b.Level,
+			Strikes:       b.Strikes,
+			APIClientID:   b.OwnerAPIClientID,
+			APIClientName: names[b.OwnerAPIClientID],
 		}
 		if b.HasRef {
 			ref := b.Reference

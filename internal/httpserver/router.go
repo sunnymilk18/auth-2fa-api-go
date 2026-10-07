@@ -108,7 +108,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		banReferenceSecret,
 	)
 	r.Use(blacklist.Middleware)
-	blHandlers := &blacklistHandlers{bl: blacklist, logger: logger}
+	blHandlers := &blacklistHandlers{bl: blacklist, apiClients: apiClients, logger: logger}
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health

@@ -331,16 +331,28 @@ func TestAdminPanel_Me_ReportsActorAndRole(t *testing.T) {
 func TestAdminPanel_Blacklist_ListsAcrossTenants(t *testing.T) {
 	r, adminAccounts, pool, rdb := newTestRouterWithAdminPanel(t)
 
+	// Real api_clients rows, so api_client_name can actually resolve —
+	// unlike a made-up literal owner id, which FindByIDs would correctly
+	// find nothing for.
+	clientA, _ := testutil.NewAPIClient(t, pool)
+	clientB, _ := testutil.NewAPIClient(t, pool)
+
 	// A single strike is enough to ban, so each RecordViolation call below
 	// produces one ban directly — no need to drive it through the rate
 	// limiter.
 	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
-	ipA, ipB := "203.0.113.10", "203.0.113.20"
-	if err := bl.RecordViolation(t.Context(), ipA, "tenant-a"); err != nil {
-		t.Fatalf("RecordViolation(tenant-a): %v", err)
+	ipA, ipB, ipNoOwner := "203.0.113.10", "203.0.113.20", "203.0.113.30"
+	if err := bl.RecordViolation(t.Context(), ipA, clientA.ID); err != nil {
+		t.Fatalf("RecordViolation(clientA): %v", err)
 	}
-	if err := bl.RecordViolation(t.Context(), ipB, "tenant-b"); err != nil {
-		t.Fatalf("RecordViolation(tenant-b): %v", err)
+	if err := bl.RecordViolation(t.Context(), ipB, clientB.ID); err != nil {
+		t.Fatalf("RecordViolation(clientB): %v", err)
+	}
+	// No resolvable owner at all (e.g. the triggering request had no
+	// api_client_id in context) — api_client_name must come back "", not
+	// error the whole listing out.
+	if err := bl.RecordViolation(t.Context(), ipNoOwner, ""); err != nil {
+		t.Fatalf("RecordViolation(no owner): %v", err)
 	}
 
 	email := "blacklist-admin-" + testutil.UniqueSuffix(t) + "@example.com"
@@ -364,22 +376,31 @@ func TestAdminPanel_Blacklist_ListsAcrossTenants(t *testing.T) {
 	}
 	var resp struct {
 		Bans []struct {
-			IP          string `json:"ip"`
-			APIClientID string `json:"api_client_id"`
+			IP            string `json:"ip"`
+			APIClientID   string `json:"api_client_id"`
+			APIClientName string `json:"api_client_name"`
 		} `json:"bans"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decoding /admin/blacklist response: %v", err)
 	}
-	owners := map[string]string{}
+	byIP := map[string]struct {
+		id, name string
+	}{}
 	for _, b := range resp.Bans {
-		owners[b.IP] = b.APIClientID
+		byIP[b.IP] = struct{ id, name string }{b.APIClientID, b.APIClientName}
 	}
-	if owners[ipA] != "tenant-a" {
-		t.Fatalf("ban for %s = owner %q, want %q (full list: %+v)", ipA, owners[ipA], "tenant-a", resp.Bans)
+	if byIP[ipA].id != clientA.ID || byIP[ipA].name != clientA.Name {
+		t.Fatalf("ban for %s = (id=%q, name=%q), want (id=%q, name=%q) (full list: %+v)",
+			ipA, byIP[ipA].id, byIP[ipA].name, clientA.ID, clientA.Name, resp.Bans)
 	}
-	if owners[ipB] != "tenant-b" {
-		t.Fatalf("ban for %s = owner %q, want %q (full list: %+v)", ipB, owners[ipB], "tenant-b", resp.Bans)
+	if byIP[ipB].id != clientB.ID || byIP[ipB].name != clientB.Name {
+		t.Fatalf("ban for %s = (id=%q, name=%q), want (id=%q, name=%q) (full list: %+v)",
+			ipB, byIP[ipB].id, byIP[ipB].name, clientB.ID, clientB.Name, resp.Bans)
+	}
+	if byIP[ipNoOwner].id != "" || byIP[ipNoOwner].name != "" {
+		t.Fatalf("ban for %s (no owner) = (id=%q, name=%q), want both empty (full list: %+v)",
+			ipNoOwner, byIP[ipNoOwner].id, byIP[ipNoOwner].name, resp.Bans)
 	}
 
 	// No session at all: rejected.

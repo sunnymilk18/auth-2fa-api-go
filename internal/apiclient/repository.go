@@ -92,6 +92,34 @@ func (r *Repository) FindByID(ctx context.Context, id string) (*APIClient, error
 	return c, nil
 }
 
+// FindByIDs resolves many client ids to their names in a single query —
+// used by blacklistHandlers.ListAll to attach api_client_name to every ban
+// in one platform-wide listing without a query per row. Missing/unknown ids
+// (including "") are simply absent from the returned map rather than an
+// error — the caller treats that the same as "name unknown".
+func (r *Repository) FindByIDs(ctx context.Context, ids []string) (map[string]string, error) {
+	names := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return names, nil
+	}
+
+	q := `SELECT id, name FROM api_clients WHERE id = ANY($1)`
+	rows, err := r.pool.Query(ctx, q, ids)
+	if err != nil {
+		return nil, fmt.Errorf("querying api clients by ids: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, fmt.Errorf("scanning api client id/name: %w", err)
+		}
+		names[id] = name
+	}
+	return names, rows.Err()
+}
+
 // List returns every api client, oldest first — used by the admin CLI
 // (cmd/createclient) so an operator can find an id to deactivate/rotate
 // without querying Postgres directly.

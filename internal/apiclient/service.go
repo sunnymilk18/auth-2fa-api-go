@@ -135,6 +135,12 @@ func (s *Service) FindByID(ctx context.Context, id string) (*APIClient, error) {
 	return s.repo.FindByID(ctx, id)
 }
 
+// FindByIDs resolves many client ids to their names in one query — see
+// Repository.FindByIDs.
+func (s *Service) FindByIDs(ctx context.Context, ids []string) (map[string]string, error) {
+	return s.repo.FindByIDs(ctx, ids)
+}
+
 // SetPanelBaseURL configures where this tenant's admin panel is deployed
 // (e.g. "https://panel.example.com"), used to build a link in the
 // admin-initiated change-email email — see auth.Service.AdminChangeEmail.
