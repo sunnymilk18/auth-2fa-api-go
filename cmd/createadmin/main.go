@@ -88,6 +88,7 @@ func runCreate(args []string) error {
 	svc := adminauth.NewService(
 		adminauth.NewAccountRepository(pool),
 		adminauth.NewSessionRepository(pool),
+		nil, // no TOTP rotation store needed for account creation
 		totpManager,
 		nil, // no login-attempt limiter needed for account creation
 		0,

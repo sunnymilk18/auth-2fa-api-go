@@ -32,6 +32,7 @@ func newTestService(t *testing.T) (*adminauth.Service, *pgxpool.Pool) {
 	svc := adminauth.NewService(
 		adminauth.NewAccountRepository(pool),
 		adminauth.NewSessionRepository(pool),
+		adminauth.NewTOTPRotationStore(rdb),
 		totpManager,
 		limiter,
 		time.Hour,
@@ -424,5 +425,209 @@ func TestAccountRepository_Reprovision_RejectsSecondConcurrentCall(t *testing.T)
 	if reloaded.PasswordHash != "hash-from-first-caller" || reloaded.TOTPSecretEnc != "secret-from-first-caller" {
 		t.Fatalf("account credentials after the race = (%q, %q), want the first caller's values — the second call overwrote them",
 			reloaded.PasswordHash, reloaded.TOTPSecretEnc)
+	}
+}
+
+func TestService_ChangeOwnPassword_Success(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, secret := createTestAccount(t, svc, pool, "old-password-1")
+	code := currentCode(t, secret)
+
+	// Two sessions — one is the "current" request, the other must be
+	// revoked once the password changes.
+	currentToken, _, err := svc.Login(ctx, account.Email, "old-password-1", code)
+	if err != nil {
+		t.Fatalf("Login (current session): %v", err)
+	}
+	otherToken, _, err := svc.Login(ctx, account.Email, "old-password-1", currentCode(t, secret))
+	if err != nil {
+		t.Fatalf("Login (other session): %v", err)
+	}
+
+	if err := svc.ChangeOwnPassword(ctx, account.Email, currentToken, "old-password-1", "new-password-1"); err != nil {
+		t.Fatalf("ChangeOwnPassword: %v", err)
+	}
+
+	if _, _, ok, err := svc.ValidateSession(ctx, currentToken); err != nil || !ok {
+		t.Fatalf("ValidateSession(current) after password change = (ok=%v, err=%v), want (true, nil) — the calling session must survive", ok, err)
+	}
+	if _, _, ok, err := svc.ValidateSession(ctx, otherToken); err != nil || ok {
+		t.Fatalf("ValidateSession(other) after password change = (ok=%v, err=%v), want (false, nil) — every other session must be revoked", ok, err)
+	}
+
+	if _, _, err := svc.Login(ctx, account.Email, "old-password-1", currentCode(t, secret)); !errors.Is(err, adminauth.ErrInvalidCredentials) {
+		t.Fatalf("Login with the old password after change: err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, _, err := svc.Login(ctx, account.Email, "new-password-1", currentCode(t, secret)); err != nil {
+		t.Fatalf("Login with the new password after change: %v", err)
+	}
+}
+
+func TestService_ChangeOwnPassword_WrongCurrentPassword(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, secret := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	err := svc.ChangeOwnPassword(ctx, account.Email, "whatever-token", "wrong-password", "new-password-1")
+	if !errors.Is(err, adminauth.ErrCurrentPasswordIncorrect) {
+		t.Fatalf("ChangeOwnPassword(wrong current password): err = %v, want ErrCurrentPasswordIncorrect", err)
+	}
+
+	// Nothing changed — the original password still works.
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, secret)); err != nil {
+		t.Fatalf("Login with the original password after a refused change: %v", err)
+	}
+}
+
+// A stolen session shouldn't be able to exhaust the LOGIN counter by
+// spamming wrong current-password guesses here — see
+// selfServiceLimiterNamespace's doc comment. This proves the two counters
+// are actually separate, not just separately named.
+func TestService_ChangeOwnPassword_TooManyFailures_DoesNotLockLogin(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, secret := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		lastErr = svc.ChangeOwnPassword(ctx, account.Email, "whatever-token", "wrong-password", "new-password-1")
+	}
+	var locked *auth.LockedOutError
+	if !errors.As(lastErr, &locked) {
+		t.Fatalf("ChangeOwnPassword after repeated failures: err = %v, want *auth.LockedOutError", lastErr)
+	}
+
+	// Login itself, a separate counter, must still work.
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, secret)); err != nil {
+		t.Fatalf("Login after the self-service counter locked: %v, want it to still work (separate counter)", err)
+	}
+}
+
+func TestService_StartAndConfirmTOTPRotation_Success(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, oldSecret := createTestAccount(t, svc, pool, "correct-horse-battery")
+	currentToken, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, oldSecret))
+	if err != nil {
+		t.Fatalf("Login (current session): %v", err)
+	}
+	otherToken, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, oldSecret))
+	if err != nil {
+		t.Fatalf("Login (other session): %v", err)
+	}
+
+	otpauthURL, err := svc.StartTOTPRotation(ctx, account.Email, "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("StartTOTPRotation: %v", err)
+	}
+	newSecret := otpauthSecret(t, otpauthURL)
+	if newSecret == oldSecret {
+		t.Fatal("StartTOTPRotation returned the same secret the account already had — want a freshly generated one")
+	}
+
+	// The old secret still logs in — nothing is active yet.
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, oldSecret)); err != nil {
+		t.Fatalf("Login with the old (still active) secret before confirming: %v", err)
+	}
+
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, currentToken, currentCode(t, newSecret)); err != nil {
+		t.Fatalf("ConfirmTOTPRotation: %v", err)
+	}
+
+	if _, _, ok, err := svc.ValidateSession(ctx, currentToken); err != nil || !ok {
+		t.Fatalf("ValidateSession(current) after confirming rotation = (ok=%v, err=%v), want (true, nil)", ok, err)
+	}
+	if _, _, ok, err := svc.ValidateSession(ctx, otherToken); err != nil || ok {
+		t.Fatalf("ValidateSession(other) after confirming rotation = (ok=%v, err=%v), want (false, nil) — every other session must be revoked", ok, err)
+	}
+
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, oldSecret)); !errors.Is(err, adminauth.ErrInvalidCredentials) {
+		t.Fatalf("Login with the old secret after confirming rotation: err = %v, want ErrInvalidCredentials", err)
+	}
+	if _, _, err := svc.Login(ctx, account.Email, "correct-horse-battery", currentCode(t, newSecret)); err != nil {
+		t.Fatalf("Login with the new secret after confirming rotation: %v", err)
+	}
+}
+
+func TestService_StartTOTPRotation_WrongPassword(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	if _, err := svc.StartTOTPRotation(ctx, account.Email, "wrong-password"); !errors.Is(err, adminauth.ErrCurrentPasswordIncorrect) {
+		t.Fatalf("StartTOTPRotation(wrong password): err = %v, want ErrCurrentPasswordIncorrect", err)
+	}
+}
+
+// A wrong confirmation code must not throw away the pending rotation —
+// otherwise a simple typo would force restarting the whole enrollment
+// (scan the QR again, etc.) instead of just retrying the code.
+func TestService_ConfirmTOTPRotation_WrongCodeKeepsPendingForRetry(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
+	otpauthURL, err := svc.StartTOTPRotation(ctx, account.Email, "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("StartTOTPRotation: %v", err)
+	}
+	newSecret := otpauthSecret(t, otpauthURL)
+
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, "whatever-token", "000000"); !errors.Is(err, adminauth.ErrTOTPCodeIncorrect) {
+		t.Fatalf("ConfirmTOTPRotation(wrong code): err = %v, want ErrTOTPCodeIncorrect", err)
+	}
+
+	// Retrying with the right code still works — the pending rotation
+	// survived the earlier wrong attempt.
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, "whatever-token", currentCode(t, newSecret)); err != nil {
+		t.Fatalf("ConfirmTOTPRotation(correct code, after a prior wrong one): %v", err)
+	}
+}
+
+func TestService_ConfirmTOTPRotation_NothingPending(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, secret := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, "whatever-token", currentCode(t, secret)); !errors.Is(err, adminauth.ErrNoPendingTOTPRotation) {
+		t.Fatalf("ConfirmTOTPRotation(nothing pending): err = %v, want ErrNoPendingTOTPRotation", err)
+	}
+}
+
+// Starting a second rotation before confirming the first replaces it —
+// only one pending rotation per account, matching what someone restarting
+// the flow from scratch expects.
+func TestService_StartTOTPRotation_RestartReplacesPending(t *testing.T) {
+	svc, pool := newTestService(t)
+	ctx := t.Context()
+
+	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
+
+	firstURL, err := svc.StartTOTPRotation(ctx, account.Email, "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("StartTOTPRotation (first): %v", err)
+	}
+	firstSecret := otpauthSecret(t, firstURL)
+
+	secondURL, err := svc.StartTOTPRotation(ctx, account.Email, "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("StartTOTPRotation (second): %v", err)
+	}
+	secondSecret := otpauthSecret(t, secondURL)
+
+	// The first secret's code no longer confirms anything — only the
+	// second (latest) pending rotation is live.
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, "whatever-token", currentCode(t, firstSecret)); !errors.Is(err, adminauth.ErrTOTPCodeIncorrect) {
+		t.Fatalf("ConfirmTOTPRotation with the FIRST (superseded) secret's code: err = %v, want ErrTOTPCodeIncorrect", err)
+	}
+	if err := svc.ConfirmTOTPRotation(ctx, account.Email, "whatever-token", currentCode(t, secondSecret)); err != nil {
+		t.Fatalf("ConfirmTOTPRotation with the SECOND (current) secret's code: %v", err)
 	}
 }

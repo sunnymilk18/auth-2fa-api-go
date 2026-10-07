@@ -44,12 +44,44 @@ var ErrCannotRevokeSelf = errors.New("an admin cannot revoke their own account")
 // already has full access regardless.
 var ErrLastSuperAdminAccount = errors.New("cannot revoke the only active superadmin account")
 
+// ErrCurrentPasswordIncorrect means a self-service endpoint
+// (ChangeOwnPassword, StartTOTPRotation) received a password that doesn't
+// match the caller's own account. Deliberately distinct from
+// ErrInvalidCredentials (which Login returns, and which also covers an
+// unknown/inactive account): here the caller is already authenticated via
+// their session, only this one password check failed, so the HTTP handler
+// maps this to 403, never 401 — the panel treats 401 as "the session
+// itself ended" and redirects to the login screen, which is wrong when
+// the session is fine and only the typed password was wrong.
+var ErrCurrentPasswordIncorrect = errors.New("current password incorrect")
+
+// ErrTOTPCodeIncorrect means ConfirmTOTPRotation's code didn't validate
+// against the pending secret — same 403-not-401 reasoning as
+// ErrCurrentPasswordIncorrect.
+var ErrTOTPCodeIncorrect = errors.New("totp code incorrect")
+
+// ErrNoPendingTOTPRotation means ConfirmTOTPRotation was called with
+// nothing in TOTPRotationStore for this account — never started, already
+// confirmed, or expired; see TOTPRotationStore.GetPending's doc comment
+// for why those three are indistinguishable on purpose.
+var ErrNoPendingTOTPRotation = errors.New("no pending totp rotation")
+
 // loginLimiterNamespace is the apiClientID auth.LoginAttemptLimiter keys
 // failures under for admin logins — a fixed, non-UUID string so it can
 // never collide with a real tenant's own lockout counters (those are
 // always real api_client UUIDs), same trick as middleware.Blacklist's
 // operator-owned allowlist entries using "" for the same reason.
 const loginLimiterNamespace = "admin-panel"
+
+// selfServiceLimiterNamespace is the namespace ChangeOwnPassword/
+// StartTOTPRotation/ConfirmTOTPRotation key their failed-attempt counter
+// under — deliberately NOT loginLimiterNamespace: an already-stolen
+// session could otherwise be used to exhaust the login counter and lock
+// the real admin out of logging back in at all. Same *auth.
+// LoginAttemptLimiter instance as login, just a separate namespace — same
+// trick loginLimiterNamespace itself already uses to avoid colliding with
+// a real tenant's own lockout counters.
+const selfServiceLimiterNamespace = "admin-panel-selfservice"
 
 // adminSessionTokenBytes is the raw entropy behind a session token before
 // hex-encoding — 32 bytes (256 bits), same as apiclient's API keys and
@@ -63,15 +95,17 @@ const adminSessionTokenBytes = 32
 type Service struct {
 	accounts     *AccountRepository
 	sessions     *SessionRepository
+	totpRotation *TOTPRotationStore
 	totp         *auth.TOTPManager
 	loginLimiter *auth.LoginAttemptLimiter
 	sessionTTL   time.Duration
 }
 
-func NewService(accounts *AccountRepository, sessions *SessionRepository, totp *auth.TOTPManager, loginLimiter *auth.LoginAttemptLimiter, sessionTTL time.Duration) *Service {
+func NewService(accounts *AccountRepository, sessions *SessionRepository, totpRotation *TOTPRotationStore, totp *auth.TOTPManager, loginLimiter *auth.LoginAttemptLimiter, sessionTTL time.Duration) *Service {
 	return &Service{
 		accounts:     accounts,
 		sessions:     sessions,
+		totpRotation: totpRotation,
 		totp:         totp,
 		loginLimiter: loginLimiter,
 		sessionTTL:   sessionTTL,
@@ -301,6 +335,149 @@ func (s *Service) ReactivateAccount(ctx context.Context, id, password string) (a
 
 	account.Active = true
 	return account, url, nil
+}
+
+// ChangeOwnPassword lets an already-authenticated admin change their own
+// password — email identifies the caller (resolved from their session by
+// the HTTP handler, same as every other self-attribution in this
+// package), currentSessionToken is the raw token of the session making
+// this call (kept alive — see below), currentPassword must match the
+// account's existing one before newPassword is accepted.
+//
+// Throttled under selfServiceLimiterNamespace, not loginLimiterNamespace
+// — see that constant's own doc comment for why. On success, every OTHER
+// session this account holds is revoked (RevokeAllForAccountExcept) —
+// changing a password is exactly the moment a stolen session elsewhere
+// should stop working, but the browser that just proved it knows the
+// current password shouldn't be logged out by its own request.
+func (s *Service) ChangeOwnPassword(ctx context.Context, email, currentSessionToken, currentPassword, newPassword string) error {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return err
+	}
+
+	locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, selfServiceLimiterNamespace, account.Email)
+	if err != nil {
+		return err
+	}
+	if locked {
+		return &auth.LockedOutError{RetryAfter: retryAfter}
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(currentPassword)); err != nil {
+		_ = s.loginLimiter.RecordFailure(ctx, selfServiceLimiterNamespace, account.Email)
+		return ErrCurrentPasswordIncorrect
+	}
+	_ = s.loginLimiter.Reset(ctx, selfServiceLimiterNamespace, account.Email)
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("hashing new admin password: %w", err)
+	}
+	if err := s.accounts.UpdatePasswordHash(ctx, account.ID, string(newHash)); err != nil {
+		return err
+	}
+	return s.sessions.RevokeAllForAccountExcept(ctx, account.ID, currentSessionToken)
+}
+
+// StartTOTPRotation begins replacing email's TOTP secret — step one of
+// two (see ConfirmTOTPRotation for step two). Requires the account's
+// current password, same identity-proof requirement and same throttle
+// (selfServiceLimiterNamespace) as ChangeOwnPassword. Generates a new
+// secret and stores it, encrypted, as this account's one pending rotation
+// (TOTPRotationStore — replacing any earlier pending rotation that was
+// never confirmed) WITHOUT touching the account's actual totp_secret_enc
+// column — the account keeps authenticating with its OLD secret until
+// ConfirmTOTPRotation proves the new one was actually enrolled, so a
+// mistake or an abandoned flow never locks the account out of its own
+// TOTP.
+func (s *Service) StartTOTPRotation(ctx context.Context, email, password string) (otpauthURL string, err error) {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return "", err
+	}
+
+	locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, selfServiceLimiterNamespace, account.Email)
+	if err != nil {
+		return "", err
+	}
+	if locked {
+		return "", &auth.LockedOutError{RetryAfter: retryAfter}
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)); err != nil {
+		_ = s.loginLimiter.RecordFailure(ctx, selfServiceLimiterNamespace, account.Email)
+		return "", ErrCurrentPasswordIncorrect
+	}
+	_ = s.loginLimiter.Reset(ctx, selfServiceLimiterNamespace, account.Email)
+
+	secret, url, err := s.totp.GenerateSecret(account.Email)
+	if err != nil {
+		return "", fmt.Errorf("generating totp secret: %w", err)
+	}
+	secretEnc, err := s.totp.Encrypt(secret)
+	if err != nil {
+		return "", fmt.Errorf("encrypting totp secret: %w", err)
+	}
+	if err := s.totpRotation.SetPending(ctx, account.ID, secretEnc); err != nil {
+		return "", err
+	}
+	return url, nil
+}
+
+// ConfirmTOTPRotation is step two of StartTOTPRotation: proves the admin
+// actually enrolled the new secret (a valid code from it) before it
+// replaces the account's real one. A wrong code is throttled under
+// selfServiceLimiterNamespace but does NOT consume the pending rotation —
+// see TOTPRotationStore.GetPending's doc comment for why a typo shouldn't
+// force restarting the whole flow. Refuses with ErrNoPendingTOTPRotation
+// if nothing is pending (never started, already confirmed, or expired).
+//
+// On success: the account's totp_secret_enc is replaced, the pending
+// rotation is cleared, and — same reasoning as ChangeOwnPassword, more
+// pointed here since rotating TOTP is exactly what someone does after
+// suspecting their old secret leaked — every OTHER session this account
+// holds is revoked, keeping only currentSessionToken (the one that just
+// proved it controls the new secret) alive.
+func (s *Service) ConfirmTOTPRotation(ctx context.Context, email, currentSessionToken, code string) error {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return err
+	}
+
+	locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, selfServiceLimiterNamespace, account.Email)
+	if err != nil {
+		return err
+	}
+	if locked {
+		return &auth.LockedOutError{RetryAfter: retryAfter}
+	}
+
+	secretEnc, ok, err := s.totpRotation.GetPending(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNoPendingTOTPRotation
+	}
+
+	secret, err := s.totp.Decrypt(secretEnc)
+	if err != nil {
+		return fmt.Errorf("decrypting pending totp secret: %w", err)
+	}
+	if !s.totp.ValidateCode(secret, code) {
+		_ = s.loginLimiter.RecordFailure(ctx, selfServiceLimiterNamespace, account.Email)
+		return ErrTOTPCodeIncorrect
+	}
+	_ = s.loginLimiter.Reset(ctx, selfServiceLimiterNamespace, account.Email)
+
+	if err := s.accounts.UpdateTOTPSecret(ctx, account.ID, secretEnc); err != nil {
+		return err
+	}
+	if err := s.totpRotation.ClearPending(ctx, account.ID); err != nil {
+		return err
+	}
+	return s.sessions.RevokeAllForAccountExcept(ctx, account.ID, currentSessionToken)
 }
 
 func generateSessionToken() (string, error) {

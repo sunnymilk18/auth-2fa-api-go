@@ -208,6 +208,39 @@ func (r *AccountRepository) Reprovision(ctx context.Context, id, passwordHash, t
 	return nil
 }
 
+// UpdatePasswordHash replaces an account's password hash alone — used by
+// Service.ChangeOwnPassword (self-service, the account is already active
+// and the caller already proved the current password), unlike Reprovision
+// which changes password+TOTP+active together as part of reactivating a
+// revoked account.
+func (r *AccountRepository) UpdatePasswordHash(ctx context.Context, id, passwordHash string) error {
+	const q = `UPDATE admin_accounts SET password_hash = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, passwordHash)
+	if err != nil {
+		return fmt.Errorf("updating admin account password: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateTOTPSecret replaces an account's TOTP secret alone, leaving
+// password/active untouched — used by Service.ConfirmTOTPRotation once the
+// caller has proven control of the new secret, unlike Reprovision which
+// only ever runs as part of reactivating a revoked account.
+func (r *AccountRepository) UpdateTOTPSecret(ctx context.Context, id, totpSecretEnc string) error {
+	const q = `UPDATE admin_accounts SET totp_secret_enc = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, totpSecretEnc)
+	if err != nil {
+		return fmt.Errorf("updating admin account totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // CountActiveByRole counts currently-active admin accounts of one role —
 // Service.RevokeAccount uses this with RoleSuperAdmin to keep at least one
 // superadmin always able to log in and manage other accounts; a regular

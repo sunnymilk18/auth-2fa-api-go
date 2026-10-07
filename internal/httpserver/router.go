@@ -489,6 +489,15 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			adminRouter.Post("/auth/logout", adminAuth.Logout)
 			adminRouter.With(adminAccess).Get("/auth/me", adminAuth.Me)
 
+			// Self-service on the caller's own account — any admin or
+			// superadmin with a valid session, not superadmin-only (unlike
+			// /accounts below, which manages OTHER accounts). See
+			// adminAuthHandlers.selfServiceActor's doc comment for why the
+			// shared X-Admin-Token path is refused here.
+			adminRouter.With(adminAccess).Post("/auth/password", adminAuth.ChangePassword)
+			adminRouter.With(adminAccess).Post("/auth/totp/rotate", adminAuth.RotateTOTP)
+			adminRouter.With(adminAccess).Post("/auth/totp/rotate/confirm", adminAuth.ConfirmRotateTOTP)
+
 			adminRouter.Route("/accounts", func(r chi.Router) {
 				// Superadmin-only — managing who has operator access at
 				// all is the most fundamental privilege in the system; a

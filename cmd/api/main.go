@@ -165,6 +165,7 @@ func run(logger *slog.Logger) error {
 		adminAccounts = adminauth.NewService(
 			adminauth.NewAccountRepository(pgPool),
 			adminSessions,
+			adminauth.NewTOTPRotationStore(rdb),
 			totpManager,
 			loginAttempts,
 			cfg.AdminSessionTTL,

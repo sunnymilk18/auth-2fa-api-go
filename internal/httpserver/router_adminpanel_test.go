@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -62,6 +63,7 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 	adminAccounts := adminauth.NewService(
 		adminauth.NewAccountRepository(pool),
 		adminauth.NewSessionRepository(pool),
+		adminauth.NewTOTPRotationStore(rdb),
 		totpManager,
 		auth.NewLoginAttemptLimiter(rdb, 3, time.Hour),
 		time.Hour,
@@ -508,4 +510,184 @@ func TestAdminPanel_Reactivate(t *testing.T) {
 	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "another-password-1"}); rec.Code != http.StatusConflict {
 		t.Fatalf("reactivate already-active account: status = %d, want 409", rec.Code)
 	}
+}
+
+// POST /admin/auth/password — the key contract point is the status code
+// for a wrong current password: the panel treats 401 as "the session
+// ended" and redirects to login, so a wrong password here must NOT be
+// 401 (see adminauth.ErrCurrentPasswordIncorrect's doc comment).
+func TestAdminPanel_ChangePassword(t *testing.T) {
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
+
+	email := "selfservice-pw-" + testutil.UniqueSuffix(t) + "@example.com"
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "old-password-1", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, account.ID)
+	})
+	key, err := otp.NewKeyFromURL(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+
+	currentCookie := loginAsAdmin(t, r, email, "old-password-1", key.Secret())
+	otherCookie := loginAsAdmin(t, r, email, "old-password-1", key.Secret())
+
+	// No session at all (the shared X-Admin-Token path) — refused, there's
+	// no "own account" to act on.
+	noSessionReq := httptest.NewRequest(http.MethodPost, "/admin/auth/password", bytes.NewReader(nil))
+	noSessionReq.Header.Set("X-Admin-Token", testAdminToken)
+	noSessionReq.Header.Set("Content-Type", "application/json")
+	noSessionRec := httptest.NewRecorder()
+	r.ServeHTTP(noSessionRec, noSessionReq)
+	if noSessionRec.Code != http.StatusBadRequest {
+		t.Fatalf("change password with the shared token, no session: status = %d, want 400", noSessionRec.Code)
+	}
+
+	// Wrong current password — 403, not 401 (see this test's doc comment).
+	wrongRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "not-the-password", "new_password": "new-password-1"})
+	if wrongRec.Code != http.StatusForbidden {
+		t.Fatalf("change password with wrong current password: status = %d, want 403", wrongRec.Code)
+	}
+	var errBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(wrongRec.Body.Bytes(), &errBody); err != nil || errBody.Error == "" {
+		t.Fatalf("decoding error body: %v, body = %s", err, wrongRec.Body.String())
+	}
+
+	// Too-short new password.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "short"}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("change password with a too-short new password: status = %d, want 400", rec.Code)
+	}
+
+	// The real change.
+	okRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"})
+	if okRec.Code != http.StatusNoContent {
+		t.Fatalf("change password: status = %d, body = %s, want 204", okRec.Code, okRec.Body.String())
+	}
+
+	// The calling session still works; the other one doesn't.
+	if rec := adminPanelRequest(r, http.MethodGet, "/admin/auth/me", currentCookie); rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/auth/me with the current session after password change: status = %d, want 200", rec.Code)
+	}
+	if rec := adminPanelRequest(r, http.MethodGet, "/admin/auth/me", otherCookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /admin/auth/me with the OTHER session after password change: status = %d, want 401 (revoked)", rec.Code)
+	}
+}
+
+// POST /admin/auth/totp/rotate + /confirm — the two-step flow, plus the
+// same 403-not-401 contract point as ChangePassword for a wrong password
+// or a wrong confirmation code, and 404 for confirming with nothing
+// pending.
+func TestAdminPanel_RotateTOTP(t *testing.T) {
+	r, adminAccounts, pool, _ := newTestRouterWithAdminPanel(t)
+
+	email := "selfservice-totp-" + testutil.UniqueSuffix(t) + "@example.com"
+	account, otpauthURL, err := adminAccounts.CreateAccount(t.Context(), email, "correct-horse-battery", adminauth.RoleAdmin)
+	if err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_accounts WHERE id = $1`, account.ID)
+	})
+	oldKey, err := otp.NewKeyFromURL(otpauthURL)
+	if err != nil {
+		t.Fatalf("parsing otpauth url: %v", err)
+	}
+
+	currentCookie := loginAsAdmin(t, r, email, "correct-horse-battery", oldKey.Secret())
+	otherCookie := loginAsAdmin(t, r, email, "correct-horse-battery", oldKey.Secret())
+
+	// Confirming before ever starting a rotation: nothing pending.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": "000000"}); rec.Code != http.StatusNotFound {
+		t.Fatalf("confirm with nothing pending: status = %d, want 404", rec.Code)
+	}
+
+	// Wrong password on step one — 403, not 401.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate", currentCookie,
+		map[string]string{"password": "not-the-password"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("rotate with wrong password: status = %d, want 403", rec.Code)
+	}
+
+	// Step one, for real: returns a fresh otpauth_url, doesn't touch the
+	// active secret yet.
+	startRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate", currentCookie,
+		map[string]string{"password": "correct-horse-battery"})
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("rotate step one: status = %d, body = %s", startRec.Code, startRec.Body.String())
+	}
+	var startResp struct {
+		OTPAuthURL string `json:"otpauth_url"`
+	}
+	if err := json.Unmarshal(startRec.Body.Bytes(), &startResp); err != nil || startResp.OTPAuthURL == "" {
+		t.Fatalf("decoding rotate step-one response: %v, body = %s", err, startRec.Body.String())
+	}
+	newKey, err := otp.NewKeyFromURL(startResp.OTPAuthURL)
+	if err != nil {
+		t.Fatalf("parsing new otpauth url: %v", err)
+	}
+	if newKey.Secret() == oldKey.Secret() {
+		t.Fatal("rotate step one returned the account's existing secret, want a freshly generated one")
+	}
+
+	// The old secret still logs in — nothing active yet.
+	if _, err := loginExpectingOK(t, r, email, "correct-horse-battery", oldKey.Secret()); err != nil {
+		t.Fatalf("login with the old (still active) secret before confirming: %v", err)
+	}
+
+	// Wrong code on step two — 403, not 401 — and the pending rotation
+	// must survive for a retry.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": "000000"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("confirm with wrong code: status = %d, want 403", rec.Code)
+	}
+
+	newCode, err := totp.GenerateCode(newKey.Secret(), time.Now())
+	if err != nil {
+		t.Fatalf("generating totp code: %v", err)
+	}
+	confirmRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": newCode})
+	if confirmRec.Code != http.StatusNoContent {
+		t.Fatalf("confirm rotation: status = %d, body = %s, want 204", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	// The calling session survives; the other one is revoked.
+	if rec := adminPanelRequest(r, http.MethodGet, "/admin/auth/me", currentCookie); rec.Code != http.StatusOK {
+		t.Fatalf("GET /admin/auth/me with the current session after confirming rotation: status = %d, want 200", rec.Code)
+	}
+	if rec := adminPanelRequest(r, http.MethodGet, "/admin/auth/me", otherCookie); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /admin/auth/me with the OTHER session after confirming rotation: status = %d, want 401 (revoked)", rec.Code)
+	}
+}
+
+// loginExpectingOK is loginAsAdmin without the t.Fatalf on failure — used
+// where the test itself wants to report the failure with its own message.
+func loginExpectingOK(t *testing.T, r http.Handler, email, password, totpSecret string) (*http.Cookie, error) {
+	t.Helper()
+	code, err := totp.GenerateCode(totpSecret, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(map[string]string{"email": email, "password": password, "totp_code": code})
+	req := httptest.NewRequest(http.MethodPost, "/admin/auth/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		return nil, fmt.Errorf("login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "admin_session" {
+			return c, nil
+		}
+	}
+	return nil, fmt.Errorf("login response did not set an admin_session cookie")
 }

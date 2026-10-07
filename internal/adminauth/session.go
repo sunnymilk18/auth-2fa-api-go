@@ -78,6 +78,21 @@ func (r *SessionRepository) RevokeAllForAccount(ctx context.Context, adminAccoun
 	return nil
 }
 
+// RevokeAllForAccountExcept invalidates every session an account holds
+// except exceptToken — used by self-service actions (password change,
+// TOTP rotation) that deliberately keep the caller's own current session
+// alive while killing every other one, unlike RevokeAllForAccount (used
+// when an account is revoked or reactivated outright, where nothing
+// should survive).
+func (r *SessionRepository) RevokeAllForAccountExcept(ctx context.Context, adminAccountID, exceptToken string) error {
+	const q = `UPDATE admin_sessions SET revoked = TRUE, revoked_at = now() WHERE admin_account_id = $1 AND revoked = FALSE AND token_hash != $2`
+	_, err := r.pool.Exec(ctx, q, adminAccountID, hashSessionToken(exceptToken))
+	if err != nil {
+		return fmt.Errorf("revoking other admin sessions for account: %w", err)
+	}
+	return nil
+}
+
 // DeleteExpired removes rows that no longer serve any purpose — same
 // retention shape as auth.RefreshRepository.DeleteExpired, meant to be
 // called from the same periodic cleanup job.

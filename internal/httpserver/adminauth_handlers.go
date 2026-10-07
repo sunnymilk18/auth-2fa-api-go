@@ -320,3 +320,147 @@ func (h *adminAuthHandlers) Reactivate(w http.ResponseWriter, r *http.Request) {
 		OTPAuthURL: otpauthURL,
 	})
 }
+
+// selfServiceActor resolves the caller's own email for the three
+// self-service handlers below (ChangePassword, RotateTOTP,
+// ConfirmRotateTOTP) and the raw session token to keep alive (see
+// adminauth.Service.ChangeOwnPassword's doc comment on why one session
+// survives). Refuses outright when the caller authenticated with the
+// shared X-Admin-Token (middleware.AdminActorToken) rather than an
+// individual session — there's no "own account" to act on in that case,
+// and none of these three actions make sense for the script/automation
+// credential.
+func selfServiceActor(w http.ResponseWriter, r *http.Request) (email, sessionToken string, ok bool) {
+	actor, _ := auth.AdminActorFromContext(r.Context())
+	if actor == "" || actor == middleware.AdminActorToken {
+		writeJSONError(w, http.StatusBadRequest, "esta acción requiere una sesión de administrador individual, no el token compartido")
+		return "", "", false
+	}
+	cookie, err := r.Cookie(middleware.AdminSessionCookieName)
+	if err != nil || cookie.Value == "" {
+		writeJSONError(w, http.StatusBadRequest, "esta acción requiere una sesión de administrador individual")
+		return "", "", false
+	}
+	return actor, cookie.Value, true
+}
+
+// writeSelfServiceError maps the handful of errors ChangeOwnPassword/
+// StartTOTPRotation/ConfirmTOTPRotation can return to HTTP. Deliberately
+// never 401 for a wrong password/code — see adminauth.
+// ErrCurrentPasswordIncorrect's doc comment for why: the panel treats 401
+// as "the session ended" and redirects to the login screen, which would
+// be wrong here (the session is fine, only the typed secret was wrong).
+func writeSelfServiceError(w http.ResponseWriter, err error) {
+	var locked *auth.LockedOutError
+	switch {
+	case errors.As(err, &locked):
+		w.Header().Set("Retry-After", fmt.Sprintf("%.0f", locked.RetryAfter.Seconds()))
+		writeJSONError(w, http.StatusTooManyRequests, "demasiados intentos fallidos, vuelve a intentar más tarde")
+	case errors.Is(err, adminauth.ErrCurrentPasswordIncorrect):
+		writeJSONError(w, http.StatusForbidden, "la contraseña actual no es correcta")
+	case errors.Is(err, adminauth.ErrTOTPCodeIncorrect):
+		writeJSONError(w, http.StatusForbidden, "el código no es válido")
+	case errors.Is(err, adminauth.ErrNoPendingTOTPRotation):
+		writeJSONError(w, http.StatusNotFound, "no hay una rotación de TOTP pendiente, vuelve a iniciarla")
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo completar la operación")
+	}
+}
+
+type changePasswordRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+// ChangePassword lets the caller change their own password — see
+// adminauth.Service.ChangeOwnPassword's doc comment for the verification,
+// throttling, and "keep this session, kill every other one" behavior.
+func (h *adminAuthHandlers) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	email, sessionToken, ok := selfServiceActor(w, r)
+	if !ok {
+		return
+	}
+
+	var req changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		writeJSONError(w, http.StatusBadRequest, "la contraseña nueva debe tener al menos 8 caracteres")
+		return
+	}
+
+	if err := h.svc.ChangeOwnPassword(r.Context(), email, sessionToken, req.CurrentPassword, req.NewPassword); err != nil {
+		writeSelfServiceError(w, err)
+		return
+	}
+
+	h.logger.Info("admin changed own password", "actor", email)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type rotateTOTPRequest struct {
+	Password string `json:"password"`
+}
+
+type rotateTOTPResponse struct {
+	OTPAuthURL string `json:"otpauth_url"`
+}
+
+// RotateTOTP is step one of two for replacing the caller's own TOTP
+// secret — see adminauth.Service.StartTOTPRotation's doc comment. Does
+// NOT touch the account's active secret; nothing changes until
+// ConfirmRotateTOTP succeeds.
+func (h *adminAuthHandlers) RotateTOTP(w http.ResponseWriter, r *http.Request) {
+	email, _, ok := selfServiceActor(w, r)
+	if !ok {
+		return
+	}
+
+	var req rotateTOTPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	otpauthURL, err := h.svc.StartTOTPRotation(r.Context(), email, req.Password)
+	if err != nil {
+		writeSelfServiceError(w, err)
+		return
+	}
+
+	h.logger.Info("admin started totp rotation", "actor", email)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rotateTOTPResponse{OTPAuthURL: otpauthURL})
+}
+
+type confirmRotateTOTPRequest struct {
+	Code string `json:"code"`
+}
+
+// ConfirmRotateTOTP is step two: a valid code from the secret RotateTOTP
+// just generated replaces the account's real one — see adminauth.Service.
+// ConfirmTOTPRotation's doc comment, including why a wrong code doesn't
+// consume the pending rotation (safe to retry) and why every other
+// session gets revoked on success.
+func (h *adminAuthHandlers) ConfirmRotateTOTP(w http.ResponseWriter, r *http.Request) {
+	email, sessionToken, ok := selfServiceActor(w, r)
+	if !ok {
+		return
+	}
+
+	var req confirmRotateTOTPRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+
+	if err := h.svc.ConfirmTOTPRotation(r.Context(), email, sessionToken, req.Code); err != nil {
+		writeSelfServiceError(w, err)
+		return
+	}
+
+	h.logger.Info("admin confirmed totp rotation", "actor", email)
+	w.WriteHeader(http.StatusNoContent)
+}
