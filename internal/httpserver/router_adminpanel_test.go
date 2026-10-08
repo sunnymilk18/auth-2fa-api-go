@@ -136,6 +136,29 @@ func TestAdminPanel_CORS_AllowsAdminPinHeader(t *testing.T) {
 	}
 }
 
+// TestAdminPanel_CORS_ExposesRetryAfter guards against the exact bug a
+// third review caught: Retry-After rides on every lockout response here
+// (login, self-service, PIN), but a browser strips any response header not
+// explicitly exposed via CORS — without this, the panel's JS could never
+// read it to show "intenta de nuevo en N minutos", only a generic message.
+// ExposedHeaders only ever shows up on the actual response, not the
+// preflight, so this issues a real request with an Origin header rather
+// than an OPTIONS one (unlike the Allow-Headers test above).
+func TestAdminPanel_CORS_ExposesRetryAfter(t *testing.T) {
+	r, _, _, _ := newTestRouterWithAdminPanel(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/auth/me", nil)
+	req.Header.Set("Origin", testAdminPanelOrigin)
+	req.Header.Set("X-Admin-Panel", "1")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	exposed := rec.Header().Get("Access-Control-Expose-Headers")
+	if !strings.Contains(strings.ToLower(exposed), "retry-after") {
+		t.Fatalf("Access-Control-Expose-Headers = %q, want it to include Retry-After", exposed)
+	}
+}
+
 func TestAdminPanel_CORS_RestOfAPIStaysWildcardNoCredentials(t *testing.T) {
 	r, _, _, _ := newTestRouterWithAdminPanel(t)
 

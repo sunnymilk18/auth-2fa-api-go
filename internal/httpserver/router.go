@@ -344,9 +344,17 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// together with credentials) — see config.Config.
 			// AdminPanelOrigin's doc comment.
 			adminRouter.Use(cors.Handler(cors.Options{
-				AllowedOrigins:   []string{adminPanelOrigin},
-				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token", middleware.AdminPanelHeader, AdminPinHeader},
+				AllowedOrigins: []string{adminPanelOrigin},
+				AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+				AllowedHeaders: []string{"Content-Type", "X-Admin-Token", middleware.AdminPanelHeader, AdminPinHeader},
+				// Retry-After backs every lockout response here (login,
+				// self-service, PIN) — without it listed, the browser sets
+				// it on the response but strips it before JS can read it
+				// (a CORS response only exposes a handful of headers by
+				// default; anything else needs an explicit opt-in), so the
+				// panel can never show "intenta de nuevo en N minutos",
+				// only a generic message.
+				ExposedHeaders:   []string{"Retry-After"},
 				AllowCredentials: true,
 				MaxAge:           300,
 			}))
@@ -364,9 +372,16 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// explains there. No real caller ever needs this header allowed
 			// in this branch.
 			adminRouter.Use(cors.Handler(cors.Options{
-				AllowedOrigins:   []string{"*"},
-				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token"},
+				AllowedOrigins: []string{"*"},
+				AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
+				AllowedHeaders: []string{"Content-Type", "X-Admin-Token"},
+				// Same reasoning as the panel branch above — kept here too
+				// even though no lockout is reachable through this
+				// script-only branch today (no login route, and
+				// X-Admin-Token is exempt from the PIN check), so a future
+				// rate limiter added to this branch doesn't silently repeat
+				// the same CORS gap.
+				ExposedHeaders:   []string{"Retry-After"},
 				AllowCredentials: false,
 				MaxAge:           300,
 			}))
