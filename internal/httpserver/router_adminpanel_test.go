@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,6 +110,29 @@ func TestAdminPanel_CORS_OnlyAllowsConfiguredOrigin(t *testing.T) {
 
 	if got := rec2.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("Access-Control-Allow-Origin for an untrusted origin = %q, want empty", got)
+	}
+}
+
+// TestAdminPanel_CORS_AllowsAdminPinHeader guards against the exact bug a
+// second review caught: the panel's credentialed CORS branch listing every
+// custom header the panel sends EXCEPT X-Admin-Pin — invisible to every
+// other test here because they all call the router directly, never going
+// through an actual browser preflight the way the panel's own JS fetch()
+// would. A real browser refuses to even send a PIN-gated request if this
+// preflight doesn't allow the header, which httptest can't otherwise catch.
+func TestAdminPanel_CORS_AllowsAdminPinHeader(t *testing.T) {
+	r, _, _, _ := newTestRouterWithAdminPanel(t)
+
+	req := httptest.NewRequest(http.MethodOptions, "/admin/users/some-id/ban", nil)
+	req.Header.Set("Origin", testAdminPanelOrigin)
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "x-admin-pin")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	allowed := rec.Header().Get("Access-Control-Allow-Headers")
+	if !strings.Contains(strings.ToLower(allowed), "x-admin-pin") {
+		t.Fatalf("Access-Control-Allow-Headers = %q, want it to include x-admin-pin", allowed)
 	}
 }
 

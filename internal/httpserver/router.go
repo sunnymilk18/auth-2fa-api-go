@@ -346,7 +346,7 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			adminRouter.Use(cors.Handler(cors.Options{
 				AllowedOrigins:   []string{adminPanelOrigin},
 				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
-				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token", middleware.AdminPanelHeader},
+				AllowedHeaders:   []string{"Content-Type", "X-Admin-Token", middleware.AdminPanelHeader, AdminPinHeader},
 				AllowCredentials: true,
 				MaxAge:           300,
 			}))
@@ -356,7 +356,13 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// X-Admin-Token/script-only case (curl doesn't need CORS
 			// headers at all, but a hypothetical browser-based fetch using
 			// just the token header still worked under the old single
-			// global CORS config, so this preserves that).
+			// global CORS config, so this preserves that). AdminPinHeader
+			// deliberately NOT listed here: with no panel there's no
+			// cookie-session login route at all (see below), so the only
+			// way through RequireAdminAccess is the X-Admin-Token path —
+			// which requireAdminPin exempts outright, same as the comment
+			// explains there. No real caller ever needs this header allowed
+			// in this branch.
 			adminRouter.Use(cors.Handler(cors.Options{
 				AllowedOrigins:   []string{"*"},
 				AllowedMethods:   []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions},
