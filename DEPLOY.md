@@ -85,6 +85,20 @@ Si `<ip>` no tiene un formato válido, `400`. Si no estaba en la lista, `404`.
 
 `POST /admin/users/{id}/ban` desactiva una cuenta puntual, revoca todos sus refresh tokens y dispositivos de confianza, y marca sus access tokens ya emitidos como inválidos desde ese instante (revierte con `/unban`) — a diferencia de la lista negra por IP, esto nunca se dispara solo por intentos fallidos de login, precisamente para que nadie pueda bloquear la cuenta de otra persona a propósito solo sabiendo su email/usuario/rut.
 
+## Estadísticas
+
+Números de solo lectura para el panel (sin tablas nuevas: todo se calcula al vuelo sobre `users` y `admin_audit_log`). Mismo acceso que `GET /admin/users` — cualquier administrador, no solo superadmin — y, al ser de solo lectura, no exige el PIN de operador. Deliberadamente tampoco está en `/docs` ni en `openapi.yaml`, mismo criterio que el resto de `/admin/*`.
+
+```bash
+curl "https://tu-api/admin/stats?range=7d&tz=America/Santiago" -H "X-Admin-Token: $ADMIN_API_TOKEN"
+```
+
+- `range` es obligatorio: `7d` o `30d` (cualquier otro valor, `400`). Son días calendario, hoy incluido.
+- `tz` es opcional (`America/Santiago`, `UTC`, cualquier nombre IANA real) y define en qué zona horaria se cortan los días de `users_per_day`/`operator_actions_per_day` — sin especificarla, UTC. Un valor inválido, incluido `Local` (Go lo acepta como "la hora del servidor", pero acá se rechaza a propósito para que el resultado no dependa de dónde corre el contenedor), responde `400`.
+- `users_per_day` y `operator_actions_per_day` siempre traen un elemento por cada día del rango, con `count: 0` donde no hubo datos — nunca hay huecos para el gráfico.
+- `users_per_tenant` es un top 50 por cantidad total de usuarios (no el listado completo de sistemas — para eso está `GET /admin/clients`), de mayor a menor; empates se ordenan por nombre y después por id.
+- `operator_actions_per_day` y `operator_actions_by_type` solo aparecen en la respuesta si quien llama es superadmin — mismo nivel que `GET /admin/audit`. Para un administrador regular, esos dos campos no vienen (ni siquiera vacíos).
+
 ## Administración por sistema (credencial scoped)
 
 Para que el equipo detrás de un sistema consumidor pueda moderar **sus propios** usuarios sin necesitar tu `X-Admin-Token` (que puede tocar todos los sistemas, no solo el suyo). Se provisiona una vez por cliente, con tu `X-Admin-Token`:

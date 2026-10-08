@@ -19,6 +19,7 @@ import (
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/middleware"
+	"auth-2fa-api/internal/stats"
 	"auth-2fa-api/internal/user"
 )
 
@@ -443,8 +444,8 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// in openapi.yaml/docs: those are served unauthenticated at
 			// /docs, and this route's existence shouldn't be discoverable
 			// by anyone without the operator's own credential — see
-			// README's /admin/users section for where this is documented
-			// instead.
+			// DEPLOY.md's "Moderación" section for where this is
+			// documented instead.
 			r.Get("/", adminUserHandlers.ListUsers)
 
 			r.With(pin).Post("/{id}/ban", adminUserHandlers.Ban)
@@ -462,6 +463,21 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
 			r.Get("/{id}/lockouts", adminUserHandlers.GetLockouts)
 			r.Post("/{id}/clear-lockouts", adminUserHandlers.ClearLockouts)
+		})
+
+		// Read-only numbers for the panel's dashboard, computed from data
+		// that already exists (no new tables — see internal/stats' own
+		// doc comment). Same access level as GET /admin/users right above
+		// (any admin or superadmin, no PIN — nothing here mutates
+		// anything): OperatorActionsPerDay/OperatorActionsByType inside
+		// the response are the only superadmin-only part, gated inside
+		// statsHandlers.Overview itself rather than by a route-level
+		// RequireSuperAdmin, since the rest of the response is still
+		// meant for a regular admin too.
+		sHandlers := &statsHandlers{svc: stats.NewService(stats.NewRepository(pgPool))}
+		adminRouter.Route("/stats", func(r chi.Router) {
+			r.Use(adminAccess)
+			r.Get("/", sHandlers.Overview)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a

@@ -11,6 +11,16 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+	// Embeds the full IANA timezone database into the binary — GET
+	// /admin/stats accepts an arbitrary tz query param (e.g.
+	// "America/Santiago") and resolves it via time.LoadLocation, which
+	// otherwise depends on the OS shipping a tzdata package. The runtime
+	// image is alpine:3.20 with only ca-certificates installed (see
+	// Dockerfile), so without this blank import every non-UTC tz would
+	// fail in production with "unknown time zone" even though the exact
+	// same binary works fine on a developer's machine (most OSes already
+	// have tzdata installed system-wide).
+	_ "time/tzdata"
 
 	"auth-2fa-api/internal/adminauth"
 	"auth-2fa-api/internal/apiclient"
