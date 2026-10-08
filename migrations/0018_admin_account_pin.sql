@@ -1,0 +1,13 @@
+-- Operator PIN: confirms a destructive /admin/* action from an
+-- already-authenticated session (see internal/adminauth's SetPin/
+-- VerifyAdminPin/ResetPin and httpserver's requireAdminPin middleware) —
+-- distinct from migration 0012_account_pin.sql's end-user PIN, which lives
+-- on `users` and unlocks a trusted device.
+--
+-- Only a hash is ever stored, same as password_hash. NULL means the
+-- account has no PIN configured yet — unlike totp_secret_enc (mandatory
+-- from creation, see migration 0015's doc comment), a PIN starts unset on
+-- every new or reactivated account and every PIN-gated route refuses with
+-- pin_not_set until its holder creates one; there is no server-side way to
+-- provision it on their behalf, by design (same reasoning as a password).
+ALTER TABLE admin_accounts ADD COLUMN IF NOT EXISTS pin_hash TEXT;

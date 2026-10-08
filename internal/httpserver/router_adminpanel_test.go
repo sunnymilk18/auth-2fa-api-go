@@ -244,6 +244,15 @@ func adminPanelRequest(r http.Handler, method, path string, cookie *http.Cookie)
 }
 
 func adminPanelRequestWithBody(r http.Handler, method, path string, cookie *http.Cookie, body any) *httptest.ResponseRecorder {
+	return adminPanelRequestWithBodyAndPin(r, method, path, cookie, body, "")
+}
+
+// adminPanelRequestWithBodyAndPin is adminPanelRequestWithBody plus an
+// X-Admin-Pin header — needed by any test exercising a PIN-gated route
+// (see router.go's requireAdminPin wiring) for anything past the gate
+// itself; pin == "" omits the header entirely, same as
+// adminPanelRequestWithBody.
+func adminPanelRequestWithBodyAndPin(r http.Handler, method, path string, cookie *http.Cookie, body any, pin string) *httptest.ResponseRecorder {
 	var reader *bytes.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -257,9 +266,23 @@ func adminPanelRequestWithBody(r http.Handler, method, path string, cookie *http
 		req.AddCookie(cookie)
 	}
 	req.Header.Set("X-Admin-Panel", "1")
+	if pin != "" {
+		req.Header.Set(httpserver.AdminPinHeader, pin)
+	}
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 	return rec
+}
+
+// mustSetPin creates email's PIN via the real self-service endpoint (not
+// a direct DB write) — proves the whole SetPin flow, not just that the
+// column got written. t.Fatal on any non-204.
+func mustSetPin(t *testing.T, r http.Handler, cookie *http.Cookie, password, pin string) {
+	t.Helper()
+	rec := adminPanelRequestWithBody(r, http.MethodPut, "/admin/auth/pin", cookie, map[string]string{"password": password, "pin": pin})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("setting pin: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 // A regular ("admin") role can use the day-to-day moderation routes but
@@ -448,6 +471,8 @@ func TestAdminPanel_Reactivate(t *testing.T) {
 		t.Fatalf("parsing otpauth url: %v", err)
 	}
 	superCookie := loginAsAdmin(t, r, superEmail, "correct-horse-battery", superKey.Secret())
+	mustSetPin(t, r, superCookie, "correct-horse-battery", "123456")
+	const superPin = "123456"
 
 	regularEmail := "reactivate-regular-" + testutil.UniqueSuffix(t) + "@example.com"
 	regularAccount, regularURL, err := adminAccounts.CreateAccount(t.Context(), regularEmail, "correct-horse-battery", adminauth.RoleAdmin)
@@ -484,19 +509,25 @@ func TestAdminPanel_Reactivate(t *testing.T) {
 		t.Fatalf("reactivate with no session: status = %d, want 401", rec.Code)
 	}
 
+	// No PIN header at all — blocked before the handler even sees the
+	// body, see requireAdminPin.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "new-password-1"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("reactivate with no X-Admin-Pin: status = %d, want 403", rec.Code)
+	}
+
 	// Too-short password.
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "short"}); rec.Code != http.StatusBadRequest {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, path, superCookie, map[string]string{"password": "short"}, superPin); rec.Code != http.StatusBadRequest {
 		t.Fatalf("reactivate with short password: status = %d, want 400", rec.Code)
 	}
 
 	// Unknown account id.
 	unknownPath := "/admin/accounts/00000000-0000-0000-0000-000000000000/reactivate"
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, unknownPath, superCookie, map[string]string{"password": "new-password-1"}); rec.Code != http.StatusNotFound {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, unknownPath, superCookie, map[string]string{"password": "new-password-1"}, superPin); rec.Code != http.StatusNotFound {
 		t.Fatalf("reactivate unknown account: status = %d, want 404", rec.Code)
 	}
 
 	// The real reactivation, as superadmin.
-	rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "new-password-1"})
+	rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, path, superCookie, map[string]string{"password": "new-password-1"}, superPin)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reactivate as superadmin: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -514,7 +545,7 @@ func TestAdminPanel_Reactivate(t *testing.T) {
 	}
 
 	// Reactivating an already-active account is refused.
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, path, superCookie, map[string]string{"password": "another-password-1"}); rec.Code != http.StatusConflict {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, path, superCookie, map[string]string{"password": "another-password-1"}, superPin); rec.Code != http.StatusConflict {
 		t.Fatalf("reactivate already-active account: status = %d, want 409", rec.Code)
 	}
 }
@@ -541,6 +572,8 @@ func TestAdminPanel_ChangePassword(t *testing.T) {
 
 	currentCookie := loginAsAdmin(t, r, email, "old-password-1", key.Secret())
 	otherCookie := loginAsAdmin(t, r, email, "old-password-1", key.Secret())
+	mustSetPin(t, r, currentCookie, "old-password-1", "123456")
+	const pin = "123456"
 
 	// No session at all (the shared X-Admin-Token path) — refused, there's
 	// no "own account" to act on.
@@ -553,9 +586,16 @@ func TestAdminPanel_ChangePassword(t *testing.T) {
 		t.Fatalf("change password with the shared token, no session: status = %d, want 400", noSessionRec.Code)
 	}
 
+	// No X-Admin-Pin at all — blocked before the handler even sees the
+	// body.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("change password with no X-Admin-Pin: status = %d, want 403", rec.Code)
+	}
+
 	// Wrong current password — 403, not 401 (see this test's doc comment).
-	wrongRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
-		map[string]string{"current_password": "not-the-password", "new_password": "new-password-1"})
+	wrongRec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "not-the-password", "new_password": "new-password-1"}, pin)
 	if wrongRec.Code != http.StatusForbidden {
 		t.Fatalf("change password with wrong current password: status = %d, want 403", wrongRec.Code)
 	}
@@ -567,14 +607,14 @@ func TestAdminPanel_ChangePassword(t *testing.T) {
 	}
 
 	// Too-short new password.
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
-		map[string]string{"current_password": "old-password-1", "new_password": "short"}); rec.Code != http.StatusBadRequest {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "short"}, pin); rec.Code != http.StatusBadRequest {
 		t.Fatalf("change password with a too-short new password: status = %d, want 400", rec.Code)
 	}
 
 	// The real change.
-	okRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", currentCookie,
-		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"})
+	okRec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/password", currentCookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"}, pin)
 	if okRec.Code != http.StatusNoContent {
 		t.Fatalf("change password: status = %d, body = %s, want 204", okRec.Code, okRec.Body.String())
 	}
@@ -610,10 +650,19 @@ func TestAdminPanel_RotateTOTP(t *testing.T) {
 
 	currentCookie := loginAsAdmin(t, r, email, "correct-horse-battery", oldKey.Secret())
 	otherCookie := loginAsAdmin(t, r, email, "correct-horse-battery", oldKey.Secret())
+	mustSetPin(t, r, currentCookie, "correct-horse-battery", "123456")
+	const pin = "123456"
+
+	// No X-Admin-Pin at all — blocked before the handler even looks for a
+	// pending rotation.
+	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": "000000"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("confirm with no X-Admin-Pin: status = %d, want 403", rec.Code)
+	}
 
 	// Confirming before ever starting a rotation: nothing pending.
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
-		map[string]string{"code": "000000"}); rec.Code != http.StatusNotFound {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": "000000"}, pin); rec.Code != http.StatusNotFound {
 		t.Fatalf("confirm with nothing pending: status = %d, want 404", rec.Code)
 	}
 
@@ -651,8 +700,8 @@ func TestAdminPanel_RotateTOTP(t *testing.T) {
 
 	// Wrong code on step two — 403, not 401 — and the pending rotation
 	// must survive for a retry.
-	if rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
-		map[string]string{"code": "000000"}); rec.Code != http.StatusForbidden {
+	if rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": "000000"}, pin); rec.Code != http.StatusForbidden {
 		t.Fatalf("confirm with wrong code: status = %d, want 403", rec.Code)
 	}
 
@@ -660,8 +709,8 @@ func TestAdminPanel_RotateTOTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating totp code: %v", err)
 	}
-	confirmRec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
-		map[string]string{"code": newCode})
+	confirmRec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/totp/rotate/confirm", currentCookie,
+		map[string]string{"code": newCode}, pin)
 	if confirmRec.Code != http.StatusNoContent {
 		t.Fatalf("confirm rotation: status = %d, body = %s, want 204", confirmRec.Code, confirmRec.Body.String())
 	}

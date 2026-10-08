@@ -380,6 +380,17 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		}
 		adminAccess := middleware.RequireAdminAccess(adminToken, sessionValidator)
 
+		// Gates a destructive /admin/* route behind the caller's own PIN —
+		// see requireAdminPin's own doc comment for exactly what counts as
+		// "destructive" here and why (the design notes this implements
+		// walked the full route inventory explicitly, route by route,
+		// rather than by a general rule, since "destructive" alone doesn't
+		// cleanly separate e.g. user.ban (needs it) from user.unban
+		// (doesn't) — see that route's own comment below). adminAccounts
+		// can be nil here — see requireAdminPin's own doc comment for why
+		// that's safe.
+		pin := requireAdminPin(adminAccounts, auditSvc)
+
 		adminHandlers := apiclient.NewHandlers(apiClients, auditSvc)
 		adminRouter.Route("/clients", func(r chi.Router) {
 			// Superadmin-only — provisioning/deactivating/rotating a
@@ -390,16 +401,16 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 
 			r.Post("/", adminHandlers.Create)
 			r.Get("/", adminHandlers.List)
-			r.Post("/{id}/deactivate", adminHandlers.Deactivate)
+			r.With(pin).Post("/{id}/deactivate", adminHandlers.Deactivate)
 			r.Post("/{id}/activate", adminHandlers.Activate)
-			r.Post("/{id}/rotate", adminHandlers.Rotate)
+			r.With(pin).Post("/{id}/rotate", adminHandlers.Rotate)
 			r.Put("/{id}/panel-base-url", adminHandlers.SetPanelBaseURL)
 
 			// Provisions/revokes the credential a client's own operators
 			// use against /system-admin/users below — an operator-only
 			// action, never something a tenant can do to itself.
-			r.Post("/{id}/system-admin-key/rotate", adminHandlers.RotateSystemAdminKey)
-			r.Delete("/{id}/system-admin-key", adminHandlers.RevokeSystemAdminKey)
+			r.With(pin).Post("/{id}/system-admin-key/rotate", adminHandlers.RotateSystemAdminKey)
+			r.With(pin).Delete("/{id}/system-admin-key", adminHandlers.RevokeSystemAdminKey)
 		})
 
 		adminRouter.Route("/users", func(r chi.Router) {
@@ -415,12 +426,18 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// instead.
 			r.Get("/", adminUserHandlers.ListUsers)
 
-			r.Post("/{id}/ban", adminUserHandlers.Ban)
+			r.With(pin).Post("/{id}/ban", adminUserHandlers.Ban)
+			// unban is deliberately NOT PIN-gated, unlike ban right above
+			// — an intentional asymmetry, not an oversight: what REMOVES
+			// a user's access needs confirming, what RESTORES it doesn't
+			// (same reasoning as blacklist.unban below). Leave this
+			// comment (and its mirror on /admin/blacklist/{ip}) if anyone
+			// is tempted to "fix" the asymmetry later.
 			r.Post("/{id}/unban", adminUserHandlers.Unban)
-			r.Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
+			r.With(pin).Post("/{id}/disable-totp", adminUserHandlers.DisableTOTP)
 			r.Post("/{id}/revoke-sessions", adminUserHandlers.RevokeSessions)
-			r.Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
-			r.Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
+			r.With(pin).Post("/{id}/reset-pin", adminUserHandlers.ResetPin)
+			r.With(pin).Post("/{id}/change-email", adminUserHandlers.ChangeEmail)
 			r.Put("/{id}/login-pin-required", adminUserHandlers.SetLoginPinRequired)
 			r.Get("/{id}/lockouts", adminUserHandlers.GetLockouts)
 			r.Post("/{id}/clear-lockouts", adminUserHandlers.ClearLockouts)
@@ -439,6 +456,9 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// blacklistHandlers.ListAll's doc comment.
 			r.Get("/", blHandlers.ListAll)
 
+			// NOT PIN-gated — lifting a ban restores access/service, it
+			// doesn't remove it; same "restoring access never needs
+			// confirming" asymmetry as /admin/users/{id}/unban above.
 			r.Delete("/{ip}", blHandlers.UnbanAny)
 
 			// Exempts an IP from ever being struck/banned — operator-only,
@@ -456,8 +476,8 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				// scoped to one tenant's own data the way an unban is.
 				r.Use(middleware.RequireSuperAdmin)
 				r.Get("/", blHandlers.ListAllowlist)
-				r.Post("/", blHandlers.AddAllowlist)
-				r.Delete("/{ip}", blHandlers.RemoveAllowlist)
+				r.With(pin).Post("/", blHandlers.AddAllowlist)
+				r.With(pin).Delete("/{ip}", blHandlers.RemoveAllowlist)
 			})
 		})
 
@@ -498,9 +518,19 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			// /accounts below, which manages OTHER accounts). See
 			// adminAuthHandlers.selfServiceActor's doc comment for why the
 			// shared X-Admin-Token path is refused here.
-			adminRouter.With(adminAccess).Post("/auth/password", adminAuth.ChangePassword)
+			adminRouter.With(adminAccess, pin).Post("/auth/password", adminAuth.ChangePassword)
+			// Step one of TOTP rotation is NOT PIN-gated — it only
+			// generates a pending secret, nothing real changes until
+			// /rotate/confirm (same reasoning audit_test.go's
+			// expectedAdminRoutes already documents for why step one
+			// isn't audited either).
 			adminRouter.With(adminAccess).Post("/auth/totp/rotate", adminAuth.RotateTOTP)
-			adminRouter.With(adminAccess).Post("/auth/totp/rotate/confirm", adminAuth.ConfirmRotateTOTP)
+			adminRouter.With(adminAccess, pin).Post("/auth/totp/rotate/confirm", adminAuth.ConfirmRotateTOTP)
+			// Creating/changing the PIN itself is deliberately NOT behind
+			// requireAdminPin — see adminAuthHandlers.SetPin's own doc
+			// comment for why (nothing to confirm with before the first
+			// PIN exists; changing one already requires proving it).
+			adminRouter.With(adminAccess).Put("/auth/pin", adminAuth.SetPin)
 
 			adminRouter.Route("/accounts", func(r chi.Router) {
 				// Superadmin-only — managing who has operator access at
@@ -510,9 +540,12 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 				// comment.
 				r.Use(adminAccess, middleware.RequireSuperAdmin)
 				r.Get("/", adminAuth.ListAccounts)
-				r.Post("/", adminAuth.CreateAccount)
-				r.Post("/{id}/revoke", adminAuth.RevokeAccount)
-				r.Post("/{id}/reactivate", adminAuth.Reactivate)
+				r.With(pin).Post("/", adminAuth.CreateAccount)
+				r.With(pin).Post("/{id}/revoke", adminAuth.RevokeAccount)
+				r.With(pin).Post("/{id}/reactivate", adminAuth.Reactivate)
+				// NOT PIN-gated, same as ClearLockouts/RevokeSessions for
+				// end users — see the design notes' route-by-route list.
+				r.Post("/{id}/pin/reset", adminAuth.ResetPin)
 			})
 		}
 	}

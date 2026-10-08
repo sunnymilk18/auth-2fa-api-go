@@ -57,6 +57,10 @@ const (
 	ActionAccountReactivate     = "account.reactivate"
 	ActionAccountPasswordChange = "account.password_change"
 	ActionAccountTOTPRotate     = "account.totp_rotate"
+	ActionAccountPinSet         = "account.pin_set"
+	ActionAccountPinChange      = "account.pin_change"
+	ActionAccountPinReset       = "account.pin_reset"
+	ActionAccountPinFailed      = "account.pin_failed"
 
 	ActionAdminLogin       = "admin.login"
 	ActionAdminLoginFailed = "admin.login_failed"

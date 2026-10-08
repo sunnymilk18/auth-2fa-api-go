@@ -66,6 +66,13 @@ var ErrTOTPCodeIncorrect = errors.New("totp code incorrect")
 // for why those three are indistinguishable on purpose.
 var ErrNoPendingTOTPRotation = errors.New("no pending totp rotation")
 
+// ErrCurrentPinIncorrect means SetPin's currentPin (changing an existing
+// PIN) didn't match — same 403-not-401 reasoning as
+// ErrCurrentPasswordIncorrect. Never returned for the "no PIN yet" shape
+// of SetPin, which checks password instead (see that method's own doc
+// comment).
+var ErrCurrentPinIncorrect = errors.New("current pin incorrect")
+
 // loginLimiterNamespace is the apiClientID auth.LoginAttemptLimiter keys
 // failures under for admin logins — a fixed, non-UUID string so it can
 // never collide with a real tenant's own lockout counters (those are
@@ -82,6 +89,15 @@ const loginLimiterNamespace = "admin-panel"
 // trick loginLimiterNamespace itself already uses to avoid colliding with
 // a real tenant's own lockout counters.
 const selfServiceLimiterNamespace = "admin-panel-selfservice"
+
+// pinLimiterNamespace is the namespace SetPin's currentPin check and
+// VerifyAdminPin key their failed-attempt counter under — deliberately
+// its own namespace, separate from both loginLimiterNamespace and
+// selfServiceLimiterNamespace: a 6-digit PIN is a much smaller guess
+// space than a password, so it needs its own counter rather than sharing
+// (and diluting the signal of) either of the other two. Same *auth.
+// LoginAttemptLimiter instance, same trick as the other two namespaces.
+const pinLimiterNamespace = "admin-panel-pin"
 
 // adminSessionTokenBytes is the raw entropy behind a session token before
 // hex-encoding — 32 bytes (256 bits), same as apiclient's API keys and
@@ -487,6 +503,127 @@ func (s *Service) ConfirmTOTPRotation(ctx context.Context, email, currentSession
 		return err
 	}
 	return s.sessions.RevokeAllForAccountExcept(ctx, account.ID, currentSessionToken)
+}
+
+// SetPin creates or changes email's own PIN — a two-shape contract
+// matching PUT /admin/auth/pin's body: when the account has no PIN yet,
+// password proves identity (same check and same throttle,
+// selfServiceLimiterNamespace, as StartTOTPRotation); once it has one,
+// currentPin proves it instead — the PIN itself, not the password, since
+// changing or removing a PIN that already exists is exactly the action a
+// PIN exists to protect, and requiring the full password on top would
+// just make the PIN a second password rather than a distinct 2FA-style
+// confirmation. currentPin is throttled under pinLimiterNamespace, not
+// selfServiceLimiterNamespace — see that constant's own doc comment.
+// newPin's format (exactly 6 digits) is validated by the HTTP handler,
+// not here, same layering as newPassword's length in ChangeOwnPassword.
+//
+// created reports which shape ran (true: no PIN existed before this
+// call) — purely for the caller to pick the right audit action
+// (account.pin_set vs account.pin_change), not used by SetPin itself.
+func (s *Service) SetPin(ctx context.Context, email, password, currentPin, newPin string) (created bool, err error) {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return false, err
+	}
+	created = account.PinHash == ""
+
+	if created {
+		locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, selfServiceLimiterNamespace, account.Email)
+		if err != nil {
+			return false, err
+		}
+		if locked {
+			return false, &auth.LockedOutError{RetryAfter: retryAfter}
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(account.PasswordHash), []byte(password)); err != nil {
+			_ = s.loginLimiter.RecordFailure(ctx, selfServiceLimiterNamespace, account.Email)
+			return false, ErrCurrentPasswordIncorrect
+		}
+		_ = s.loginLimiter.Reset(ctx, selfServiceLimiterNamespace, account.Email)
+		// A stale pinLimiterNamespace lockout from an OLD PIN (e.g. one a
+		// superadmin just cleared via ResetPin after a suspected leak)
+		// must not carry over to this brand-new one — same reasoning as
+		// ReactivateAccount resetting loginLimiterNamespace for a fresh
+		// password/TOTP. Harmless no-op when nothing was pending.
+		_ = s.loginLimiter.Reset(ctx, pinLimiterNamespace, account.Email)
+	} else {
+		locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, pinLimiterNamespace, account.Email)
+		if err != nil {
+			return false, err
+		}
+		if locked {
+			return false, &auth.LockedOutError{RetryAfter: retryAfter}
+		}
+		if err := bcrypt.CompareHashAndPassword([]byte(account.PinHash), []byte(currentPin)); err != nil {
+			_ = s.loginLimiter.RecordFailure(ctx, pinLimiterNamespace, account.Email)
+			return false, ErrCurrentPinIncorrect
+		}
+		_ = s.loginLimiter.Reset(ctx, pinLimiterNamespace, account.Email)
+	}
+
+	newHash, err := bcrypt.GenerateFromPassword([]byte(newPin), bcrypt.DefaultCost)
+	if err != nil {
+		return false, fmt.Errorf("hashing admin pin: %w", err)
+	}
+	if err := s.accounts.UpdatePinHash(ctx, account.ID, string(newHash)); err != nil {
+		return false, err
+	}
+	return created, nil
+}
+
+// HasPin reports whether email's account currently has a PIN configured —
+// what GET /admin/auth/me surfaces as has_pin, so the panel knows whether
+// to prompt the admin to create one before they hit a pin_not_set refusal
+// on some unrelated destructive action.
+func (s *Service) HasPin(ctx context.Context, email string) (bool, error) {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return false, err
+	}
+	return account.PinHash != "", nil
+}
+
+// VerifyAdminPin confirms email's PIN for a destructive-action gate (see
+// httpserver's requireAdminPin middleware) — pure verification, never
+// creates or revokes anything. notSet reports the account has no PIN
+// configured at all (ok is always false then, and no failure is recorded
+// — there's nothing to have gotten wrong, see pin_not_set in the design
+// notes). retryAfter > 0 means the PIN is currently locked out under
+// pinLimiterNamespace; ok/notSet don't matter in that case. err is only
+// ever a real infrastructure failure, never "the PIN didn't match".
+func (s *Service) VerifyAdminPin(ctx context.Context, email, pin string) (ok, notSet bool, retryAfter time.Duration, err error) {
+	account, err := s.accounts.FindByEmail(ctx, email)
+	if err != nil {
+		return false, false, 0, err
+	}
+	if account.PinHash == "" {
+		return false, true, 0, nil
+	}
+
+	locked, retryAfter, err := s.loginLimiter.IsLocked(ctx, pinLimiterNamespace, account.Email)
+	if err != nil {
+		return false, false, 0, err
+	}
+	if locked {
+		return false, false, retryAfter, nil
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(account.PinHash), []byte(pin)); err != nil {
+		_ = s.loginLimiter.RecordFailure(ctx, pinLimiterNamespace, account.Email)
+		return false, false, 0, nil
+	}
+	_ = s.loginLimiter.Reset(ctx, pinLimiterNamespace, account.Email)
+	return true, false, 0, nil
+}
+
+// ResetPin clears id's PIN — a superadmin acting on another account (e.g.
+// a suspected leak), distinct from the automatic clear ReactivateAccount
+// already does as part of a full reactivation (see AccountRepository.
+// Reprovision). Its holder must create a new PIN before any PIN-gated
+// action works for them again — see VerifyAdminPin's notSet case.
+func (s *Service) ResetPin(ctx context.Context, id string) error {
+	return s.accounts.ClearPin(ctx, id)
 }
 
 func generateSessionToken() (string, error) {

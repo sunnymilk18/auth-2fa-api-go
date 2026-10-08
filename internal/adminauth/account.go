@@ -58,9 +58,14 @@ type AdminAccount struct {
 	Email         string
 	PasswordHash  string
 	TOTPSecretEnc string
-	Role          Role
-	Active        bool
-	CreatedAt     time.Time
+	// PinHash is "" when the account has no PIN configured yet (NULL in
+	// the database — see migration 0018_admin_account_pin.sql) — never a
+	// zero-length bcrypt hash, so "" is an unambiguous sentinel for
+	// Service.VerifyAdminPin/SetPin to branch on.
+	PinHash   string
+	Role      Role
+	Active    bool
+	CreatedAt time.Time
 }
 
 // AccountRepository persists AdminAccount rows in Postgres.
@@ -72,11 +77,11 @@ func NewAccountRepository(pool *pgxpool.Pool) *AccountRepository {
 	return &AccountRepository{pool: pool}
 }
 
-const selectAccountColumns = "id, email, password_hash, totp_secret_enc, role, active, created_at"
+const selectAccountColumns = "id, email, password_hash, totp_secret_enc, role, active, created_at, COALESCE(pin_hash, '') AS pin_hash"
 
 func scanAccount(row pgx.Row) (*AdminAccount, error) {
 	a := &AdminAccount{}
-	err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.TOTPSecretEnc, &a.Role, &a.Active, &a.CreatedAt)
+	err := row.Scan(&a.ID, &a.Email, &a.PasswordHash, &a.TOTPSecretEnc, &a.Role, &a.Active, &a.CreatedAt, &a.PinHash)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -175,9 +180,10 @@ func (r *AccountRepository) SetActive(ctx context.Context, id string, active boo
 }
 
 // Reprovision replaces a revoked account's credentials and reactivates it
-// in one statement — password, TOTP secret, and active all change
-// together, so there's no window where the row is active with stale
-// credentials or reactivated-but-still-locked-out. Used only by
+// in one statement — password, TOTP secret, active, and the PIN (cleared
+// back to unset — see migration 0018_admin_account_pin.sql's doc comment)
+// all change together, so there's no window where the row is active with
+// stale credentials or reactivated-but-still-locked-out. Used only by
 // Service.ReactivateAccount, which checks Active itself first and refuses
 // early with ErrAccountAlreadyActive before ever reaching here — but that
 // check and this UPDATE aren't atomic with each other, so the WHERE clause
@@ -190,7 +196,7 @@ func (r *AccountRepository) SetActive(ctx context.Context, id string, active boo
 func (r *AccountRepository) Reprovision(ctx context.Context, id, passwordHash, totpSecretEnc string) error {
 	const q = `
 		UPDATE admin_accounts
-		SET password_hash = $2, totp_secret_enc = $3, active = TRUE, updated_at = now()
+		SET password_hash = $2, totp_secret_enc = $3, active = TRUE, pin_hash = NULL, updated_at = now()
 		WHERE id = $1 AND active = FALSE`
 	tag, err := r.pool.Exec(ctx, q, id, passwordHash, totpSecretEnc)
 	if err != nil {
@@ -234,6 +240,39 @@ func (r *AccountRepository) UpdateTOTPSecret(ctx context.Context, id, totpSecret
 	tag, err := r.pool.Exec(ctx, q, id, totpSecretEnc)
 	if err != nil {
 		return fmt.Errorf("updating admin account totp secret: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdatePinHash sets or replaces an account's PIN hash — used by
+// Service.SetPin for both creating the PIN the first time and changing an
+// existing one. Never called with "" (that would collide with the
+// NULL-means-unset sentinel — see AdminAccount.PinHash's doc comment); to
+// remove a PIN entirely, see ClearPin.
+func (r *AccountRepository) UpdatePinHash(ctx context.Context, id, pinHash string) error {
+	const q = `UPDATE admin_accounts SET pin_hash = $2, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id, pinHash)
+	if err != nil {
+		return fmt.Errorf("updating admin account pin: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClearPin removes an account's PIN (back to NULL/unset) — used by
+// Service.ResetPin (a superadmin clearing another account's PIN after,
+// say, a suspected leak) independently of Reprovision, which already
+// clears it as part of a full reactivation.
+func (r *AccountRepository) ClearPin(ctx context.Context, id string) error {
+	const q = `UPDATE admin_accounts SET pin_hash = NULL, updated_at = now() WHERE id = $1`
+	tag, err := r.pool.Exec(ctx, q, id)
+	if err != nil {
+		return fmt.Errorf("clearing admin account pin: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

@@ -35,9 +35,11 @@ var expectedAdminRoutes = map[string]string{
 	"POST /admin/accounts/":                            "audited", // account.create
 	"POST /admin/accounts/{id}/reactivate":             "audited", // account.reactivate
 	"POST /admin/accounts/{id}/revoke":                 "audited", // account.revoke
+	"POST /admin/accounts/{id}/pin/reset":              "audited", // account.pin_reset
 	"POST /admin/auth/login":                           "audited", // admin.login / admin.login_failed, logged specially (no session yet)
 	"POST /admin/auth/logout":                          "excluded: ending a session isn't a moderation action worth auditing",
 	"POST /admin/auth/password":                        "audited", // account.password_change
+	"PUT /admin/auth/pin":                              "audited", // account.pin_set / account.pin_change
 	"POST /admin/auth/totp/rotate":                     "excluded: step one of two — generates a pending secret but changes nothing real yet; only /rotate/confirm does",
 	"POST /admin/auth/totp/rotate/confirm":             "audited", // account.totp_rotate
 	"POST /admin/blacklist/allowlist/":                 "audited", // allowlist.add
@@ -181,6 +183,7 @@ func TestAdminAudit_RecordsClientAndUserActions(t *testing.T) {
 		t.Fatalf("parsing otpauth url: %v", err)
 	}
 	cookie := loginAsAdmin(t, r, operatorEmail, "correct-horse-battery", key.Secret())
+	mustSetPin(t, r, cookie, "correct-horse-battery", "123456")
 
 	// client.create, with a human-readable target_label (the name).
 	clientName := "audit-client-" + testutil.UniqueSuffix(t)
@@ -202,7 +205,7 @@ func TestAdminAudit_RecordsClientAndUserActions(t *testing.T) {
 	// email, resolved server-side (never sent by the client).
 	targetClient, _ := testutil.NewAPIClient(t, pool)
 	targetUser := testutil.NewUser(t, pool, targetClient.ID, "correcthorsebattery")
-	banRec := adminPanelRequest(r, http.MethodPost, "/admin/users/"+targetUser.ID+"/ban", cookie)
+	banRec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/users/"+targetUser.ID+"/ban", cookie, nil, "123456")
 	if banRec.Code != http.StatusNoContent {
 		t.Fatalf("ban user: status = %d, body = %s", banRec.Code, banRec.Body.String())
 	}
@@ -352,9 +355,10 @@ func TestAdminAudit_SelfServicePasswordChange(t *testing.T) {
 		t.Fatalf("parsing otpauth url: %v", err)
 	}
 	cookie := loginAsAdmin(t, r, email, "old-password-1", key.Secret())
+	mustSetPin(t, r, cookie, "old-password-1", "123456")
 
-	rec := adminPanelRequestWithBody(r, http.MethodPost, "/admin/auth/password", cookie,
-		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"})
+	rec := adminPanelRequestWithBodyAndPin(r, http.MethodPost, "/admin/auth/password", cookie,
+		map[string]string{"current_password": "old-password-1", "new_password": "new-password-1"}, "123456")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("change password: status = %d, body = %s", rec.Code, rec.Body.String())
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -175,6 +176,11 @@ func (h *adminAuthHandlers) Logout(w http.ResponseWriter, r *http.Request) {
 type meResponse struct {
 	Actor string `json:"actor"`
 	Role  string `json:"role"`
+	// HasPin tells the panel whether to offer "create your PIN" or
+	// "change your PIN" — see adminauth.Service.HasPin's doc comment.
+	// Always false for the X-Admin-Token/script path (middleware.
+	// AdminActorToken): there's no individual account to have a PIN.
+	HasPin bool `json:"has_pin"`
 }
 
 // Me reports who the caller is currently authenticated as (actor — the
@@ -191,8 +197,15 @@ type meResponse struct {
 func (h *adminAuthHandlers) Me(w http.ResponseWriter, r *http.Request) {
 	actor, _ := adminctx.Actor(r.Context())
 	role, _ := adminctx.Role(r.Context())
+	var hasPin bool
+	if actor != "" && actor != middleware.AdminActorToken {
+		// Best-effort, same as accountLabel: a lookup failure here just
+		// means the panel shows "create your PIN" when it maybe didn't
+		// need to, never a reason to fail the whole request.
+		hasPin, _ = h.svc.HasPin(r.Context(), actor)
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(meResponse{Actor: actor, Role: role})
+	_ = json.NewEncoder(w).Encode(meResponse{Actor: actor, Role: role, HasPin: hasPin})
 }
 
 type adminAccountResponse struct {
@@ -414,6 +427,8 @@ func writeSelfServiceError(w http.ResponseWriter, err error) {
 		writeJSONError(w, http.StatusTooManyRequests, "demasiados intentos fallidos, vuelve a intentar más tarde")
 	case errors.Is(err, adminauth.ErrCurrentPasswordIncorrect):
 		writeJSONError(w, http.StatusForbidden, "la contraseña actual no es correcta")
+	case errors.Is(err, adminauth.ErrCurrentPinIncorrect):
+		writeJSONError(w, http.StatusForbidden, "el PIN actual no es correcto")
 	case errors.Is(err, adminauth.ErrTOTPCodeIncorrect):
 		writeJSONError(w, http.StatusForbidden, "el código no es válido")
 	case errors.Is(err, adminauth.ErrNoPendingTOTPRotation):
@@ -520,5 +535,77 @@ func (h *adminAuthHandlers) ConfirmRotateTOTP(w http.ResponseWriter, r *http.Req
 
 	h.logger.Info("admin confirmed totp rotation", "actor", email)
 	h.logAccountAction(r, audit.ActionAccountTOTPRotate, "", email)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// pinFormatRe matches exactly 6 digits — the only format SetPin accepts
+// for the new PIN, checked here (not in adminauth.Service) same layering
+// as ChangePassword's own length check on newPassword.
+var pinFormatRe = regexp.MustCompile(`^\d{6}$`)
+
+type setPinRequest struct {
+	Password   string `json:"password"`
+	CurrentPin string `json:"current_pin"`
+	Pin        string `json:"pin"`
+}
+
+// SetPin creates or changes the caller's own PIN — see adminauth.Service.
+// SetPin's doc comment for the two-shape contract (password proves
+// identity when there's no PIN yet, current_pin once there is).
+// Deliberately NOT behind requireAdminPin itself — there's no PIN to
+// confirm with before the first one exists, and changing an existing one
+// already requires proving it via current_pin.
+func (h *adminAuthHandlers) SetPin(w http.ResponseWriter, r *http.Request) {
+	email, _, ok := selfServiceActor(w, r)
+	if !ok {
+		return
+	}
+
+	var req setPinRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "cuerpo de la solicitud inválido")
+		return
+	}
+	if !pinFormatRe.MatchString(req.Pin) {
+		writeJSONError(w, http.StatusBadRequest, "el PIN debe ser de exactamente 6 dígitos")
+		return
+	}
+
+	created, err := h.svc.SetPin(r.Context(), email, req.Password, req.CurrentPin, req.Pin)
+	if err != nil {
+		writeSelfServiceError(w, err)
+		return
+	}
+
+	action := audit.ActionAccountPinChange
+	if created {
+		action = audit.ActionAccountPinSet
+	}
+	h.logger.Info("admin set own pin", "actor", email, "created", created)
+	h.logAccountAction(r, action, "", email)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ResetPin clears another admin account's PIN (superadmin-only, see
+// router.go's RequireSuperAdmin wiring on this route) — its holder must
+// create a new one before any PIN-gated action works for them again. See
+// adminauth.Service.ResetPin's doc comment for how this differs from the
+// automatic clear Reactivate already does.
+func (h *adminAuthHandlers) ResetPin(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	label := h.accountLabel(r, id)
+
+	if err := h.svc.ResetPin(r.Context(), id); err != nil {
+		if errors.Is(err, adminauth.ErrNotFound) {
+			writeJSONError(w, http.StatusNotFound, "administrador no encontrado")
+			return
+		}
+		writeJSONError(w, http.StatusInternalServerError, "no se pudo restablecer el PIN")
+		return
+	}
+
+	actor, _ := adminctx.Actor(r.Context())
+	h.logger.Info("admin pin reset", "actor", actor, "target_admin_id", id)
+	h.logAccountAction(r, audit.ActionAccountPinReset, id, label)
 	w.WriteHeader(http.StatusNoContent)
 }
