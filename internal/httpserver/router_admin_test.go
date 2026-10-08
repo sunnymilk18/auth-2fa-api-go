@@ -6,6 +6,7 @@ package httpserver_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/metric/noop"
 
 	"auth-2fa-api/internal/apiclient"
@@ -26,6 +28,22 @@ import (
 )
 
 const testAdminToken = "test-admin-token"
+
+// cleanupAPIClient registers a t.Cleanup deleting apiClientID and every
+// user under it — same shape as testutil.NewAPIClient's own cleanup, for
+// the handful of tests in this file that call apiclient.Service.Create
+// directly (to control the client's name, or to create two in one test)
+// instead of going through that helper. Without this, every such test run
+// leaves its client and users behind forever — see the orphaned-row
+// investigation this was added to fix.
+func cleanupAPIClient(t *testing.T, pool *pgxpool.Pool, apiClientID string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = pool.Exec(ctx, `DELETE FROM users WHERE api_client_id = $1`, apiClientID)
+		_, _ = pool.Exec(ctx, `DELETE FROM api_clients WHERE id = $1`, apiClientID)
+	})
+}
 
 func newTestRouterWithAdmin(t *testing.T, adminToken string) http.Handler {
 	t.Helper()
@@ -572,10 +590,12 @@ func TestSystemAdminResetPin_ClearsPinRevokesDevicesAndSessions_ScopedToTenant(t
 	if err != nil {
 		t.Fatalf("creating client A: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientA.ID)
 	clientB, _, err := apiClients.Create(t.Context(), "reset-pin-b-"+testutil.UniqueSuffix(t))
 	if err != nil {
 		t.Fatalf("creating client B: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientB.ID)
 	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
 	if err != nil {
 		t.Fatalf("rotating system admin key for client A: %v", err)
@@ -666,10 +686,12 @@ func TestSystemAdminSetLoginPinRequired_ScopedToTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating client A: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientA.ID)
 	clientB, _, err := apiClients.Create(t.Context(), "login-pin-required-b-"+testutil.UniqueSuffix(t))
 	if err != nil {
 		t.Fatalf("creating client B: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientB.ID)
 	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
 	if err != nil {
 		t.Fatalf("rotating system admin key for client A: %v", err)
@@ -763,10 +785,12 @@ func TestSystemAdminChangeEmail_EndToEndAndScopedToTenant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating client A: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientA.ID)
 	clientB, _, err := apiClients.Create(t.Context(), "change-email-b-"+testutil.UniqueSuffix(t))
 	if err != nil {
 		t.Fatalf("creating client B: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientB.ID)
 	systemAdminKeyA, err := apiClients.RotateSystemAdminKey(t.Context(), clientA.ID)
 	if err != nil {
 		t.Fatalf("rotating system admin key for client A: %v", err)
@@ -857,6 +881,7 @@ func TestSystemAdminChangeEmail_MailerFailure_Returns502(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
+	cleanupAPIClient(t, pool, client.ID)
 	systemAdminKey, err := apiClients.RotateSystemAdminKey(t.Context(), client.ID)
 	if err != nil {
 		t.Fatalf("rotating system admin key: %v", err)
@@ -915,6 +940,7 @@ func TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientWithPanel.ID)
 	if err := apiClients.SetPanelBaseURL(t.Context(), clientWithPanel.ID, "https://panel.example.com/"); err != nil {
 		t.Fatalf("SetPanelBaseURL: %v", err)
 	}
@@ -922,6 +948,7 @@ func TestSystemAdminChangeEmail_IncludesPanelLinkWhenConfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating client: %v", err)
 	}
+	cleanupAPIClient(t, pool, clientWithoutPanel.ID)
 
 	oldEmailWith := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
 	userWith, err := svc.Register(t.Context(), clientWithPanel.ID, oldEmailWith, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
