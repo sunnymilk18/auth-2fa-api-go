@@ -143,6 +143,88 @@ func TestTruncateUserAgent_CutsAtMaxLength(t *testing.T) {
 	}
 }
 
+// TestResolveEventRange covers GET /admin/security/events' from/to rules in
+// isolation from the HTTP layer — see ResolveEventRange's own doc comment
+// for the rules themselves; internal/httpserver's own security_events_test.go
+// covers the same cases end-to-end through the real endpoint.
+func TestResolveEventRange(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+
+	t.Run("neither given defaults to the last 7 days ending now", func(t *testing.T) {
+		from, to, err := authevents.ResolveEventRange(nil, nil, now)
+		if err != nil {
+			t.Fatalf("ResolveEventRange: %v", err)
+		}
+		if !to.Equal(now) {
+			t.Fatalf("to = %v, want %v", to, now)
+		}
+		if want := now.Add(-authevents.DefaultEventRangeWindow); !from.Equal(want) {
+			t.Fatalf("from = %v, want %v", from, want)
+		}
+	})
+
+	t.Run("to without from defaults to 7 days ending at to, not at now", func(t *testing.T) {
+		to := now.Add(-30 * 24 * time.Hour)
+		from, resolvedTo, err := authevents.ResolveEventRange(nil, &to, now)
+		if err != nil {
+			t.Fatalf("ResolveEventRange: %v", err)
+		}
+		if !resolvedTo.Equal(to) {
+			t.Fatalf("to = %v, want %v", resolvedTo, to)
+		}
+		if want := to.Add(-authevents.DefaultEventRangeWindow); !from.Equal(want) {
+			t.Fatalf("from = %v, want %v (relative to to, not to now)", from, want)
+		}
+	})
+
+	t.Run("from without to defaults to now", func(t *testing.T) {
+		from := now.Add(-time.Hour)
+		resolvedFrom, to, err := authevents.ResolveEventRange(&from, nil, now)
+		if err != nil {
+			t.Fatalf("ResolveEventRange: %v", err)
+		}
+		if !to.Equal(now) {
+			t.Fatalf("to = %v, want %v (defaults to now)", to, now)
+		}
+		if !resolvedFrom.Equal(from) {
+			t.Fatalf("from = %v, want %v (unchanged)", resolvedFrom, from)
+		}
+	})
+
+	t.Run("a span over 90 days is rejected, not clamped", func(t *testing.T) {
+		from := now.Add(-91 * 24 * time.Hour)
+		if _, _, err := authevents.ResolveEventRange(&from, &now, now); err == nil {
+			t.Fatal("ResolveEventRange with a 91-day span: err = nil, want an error")
+		}
+	})
+
+	t.Run("exactly 90 days is accepted", func(t *testing.T) {
+		from := now.Add(-authevents.MaxEventRangeWindow)
+		if _, _, err := authevents.ResolveEventRange(&from, &now, now); err != nil {
+			t.Fatalf("ResolveEventRange with exactly a 90-day span: %v, want accepted", err)
+		}
+	})
+
+	t.Run("from after to is rejected", func(t *testing.T) {
+		from := now
+		to := now.Add(-time.Hour)
+		if _, _, err := authevents.ResolveEventRange(&from, &to, now); err == nil {
+			t.Fatal("ResolveEventRange with from after to: err = nil, want an error")
+		}
+	})
+
+	t.Run("a to in the future is accepted", func(t *testing.T) {
+		future := now.Add(24 * time.Hour)
+		_, to, err := authevents.ResolveEventRange(nil, &future, now)
+		if err != nil {
+			t.Fatalf("ResolveEventRange with a future to: %v, want accepted", err)
+		}
+		if !to.Equal(future) {
+			t.Fatalf("to = %v, want %v", to, future)
+		}
+	})
+}
+
 func TestParseIP_RejectsGarbageKeepsValid(t *testing.T) {
 	if got := authevents.ParseIP(""); got != "" {
 		t.Fatalf("ParseIP(\"\") = %q, want empty", got)

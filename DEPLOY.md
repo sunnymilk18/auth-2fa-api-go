@@ -112,12 +112,30 @@ curl "https://tu-api/admin/stats?range=7d&tz=America/Santiago" -H "X-Admin-Token
 
 ## Eventos de autenticación de usuarios finales (`auth_events`)
 
-Tabla append-only (migración `0020_auth_events.sql`) que registra cada intento de login, solicitud/confirmación de recuperación de contraseña y registro de usuarios finales, además del historial de baneos/desbaneos de IP — la base de la sección Estadísticas de arriba y, más adelante, de un Centro de Seguridad. No tiene endpoint de lectura propio todavía (llegará en una entrega futura, `GET /admin/security/events`) — hoy solo se consume agregada vía `GET /admin/stats`.
+Tabla append-only (migración `0020_auth_events.sql`) que registra cada intento de login, solicitud/confirmación de recuperación de contraseña y registro de usuarios finales, además del historial de baneos/desbaneos de IP — la base de la sección Estadísticas de arriba y, más adelante, de un Centro de Seguridad. Se consume agregada vía `GET /admin/stats` y, fila por fila, vía `GET /admin/security/events` (ver más abajo).
 
 - Nunca guarda contraseñas, códigos, PIN ni tokens, ni el correo en claro — cuando el identificador de un intento no resuelve a una cuenta real, se guarda `email_hash` (HMAC-SHA256, ver `AUTH_EVENTS_EMAIL_HASH_SECRET` abajo) en vez de `user_id`.
 - Escribir un evento nunca bloquea ni hace fallar la acción real (login, registro, etc.) — un error de escritura solo se registra en el log del servidor y en una métrica (`auth.events.write_failures`), igual que `admin_audit_log`.
 - Retención configurable con `AUTH_EVENTS_RETENTION_DAYS` (90 días por defecto) — limpieza periódica cada 24h, igual que `AUDIT_RETENTION_DAYS`.
 - `AUTH_EVENTS_EMAIL_HASH_SECRET` es opcional: sin configurar, el servidor arranca igual (con una advertencia en el log) y `email_hash` queda `NULL` para esos intentos — nunca se usa un hash sin clave (SHA-256 simple) como respaldo, porque eso permitiría adivinar correos por diccionario.
+
+### `GET /admin/security/events` — detalle fila por fila
+
+Mismo acceso que `GET /admin/stats` (administrador o superadmin, con sesión del panel, sin PIN — es de solo lectura) — **no** el nivel superadmin-only de `GET /admin/audit`, porque esto es actividad de usuarios finales, no visibilidad de operadores. Pensado para alimentar una futura sección "Accesos" del panel. Igual que el resto de `/admin/*`, no está en `openapi.yaml`.
+
+**Paginación y orden**: `page`/`page_size` con el mismo recorte que `GET /admin/audit` (`page_size` entre 1 y 100, 50 por defecto). Respuesta: `{ "events": [...], "page": N, "total": N }`. Orden: `created_at DESC, id DESC` (el desempate por `id` es más estricto que `GET /admin/audit`, que no lo tiene — bajo volumen alto, varias filas pueden compartir el mismo milisegundo).
+
+**Filtros opcionales** — `tenant` (`api_client_id`), `kind`, `method`, `result`, `ip`, `from`, `to`:
+
+- Un valor bien formado que no coincide con nada devuelve lista vacía, nunca error.
+- A diferencia de `GET /admin/audit` (que ignora un filtro mal formado), acá un valor mal formado responde `400` con `{"error": "..."}` — silenciarlo haría que un typo en una IP muestre todo el tráfico sin avisar, justo lo opuesto de lo que este endpoint existe para investigar.
+- `tenant` se valida como UUID antes de consultar — nunca llega a ser un error de sintaxis de Postgres (`500`).
+- `ip` se valida como dirección IP antes de consultar (se compara contra la columna `inet` con cast).
+- `from`/`to` son RFC 3339, igual que `GET /admin/audit`.
+
+**Rango de fechas**: sin `to`, es "ahora". Sin `from`, son los 7 días anteriores a `to` (si `to` no vino, 7 días antes de ahora — no siempre relativo a "ahora": pedir solo `to` en el pasado trae los 7 días que terminan ahí, no los últimos 7 días del calendario). El rango entre `from` y `to` nunca puede superar los 90 días (igual a la retención) — se responde `400`, nunca se recorta en silencio. `from` posterior a `to` también es `400`. Un `to` en el futuro se acepta sin error (simplemente no habrá filas ahí todavía).
+
+**Cada evento** trae: `id`, `created_at` (ISO 8601), `kind`, `method` (`null` si no aplica), `result`, `tenant: {id, name}` (ambos ausentes si el intento no se pudo atribuir a ningún tenant), `user: {id, email}` o `null` (se incluye el correo porque un admin ya puede verlo en `GET /admin/users` — no es una superficie de exposición nueva), `ip` (sin el sufijo `/32` que `ip::text` agregaría — ver `host(ip)`), `user_agent`, `ban_origin` y `actor_email` (`null` salvo en `ip_ban`/`ip_unban`), `is_decoy`. **Nunca** incluye `email_hash`.
 
 ## IP registrada en la actividad de operadores (`GET /admin/audit`)
 

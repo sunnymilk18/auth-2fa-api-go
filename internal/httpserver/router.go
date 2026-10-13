@@ -482,6 +482,19 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Get("/", sHandlers.Overview)
 		})
 
+		// Row-level detail behind the "tanda 2" blocks in GET /admin/stats
+		// above — same access level (any admin or superadmin, no PIN),
+		// not the superadmin-only tier GET /admin/audit uses below: this
+		// is end-user auth activity, not operator visibility, same
+		// reasoning as /admin/stats' own LoginsByDay/FailuresByTenant/
+		// TopFailingIPs/BansByDay. See securityEventsHandlers.List's own
+		// doc comment for the filter/range contract.
+		secEventsHandlers := &securityEventsHandlers{svc: authEventsSvc}
+		adminRouter.Route("/security/events", func(r chi.Router) {
+			r.Use(adminAccess)
+			r.Get("/", secEventsHandlers.List)
+		})
+
 		// Manual override for the automatic IP blacklist above — lifts a
 		// ban early (most commonly: a shared IP where the actual offender
 		// is long gone, but everyone else behind it is still paying for

@@ -27,6 +27,7 @@ import (
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/middleware"
@@ -77,9 +78,16 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 	// same pool and reading the same admin_audit_log table.
 	auditSvc := audit.NewService(audit.NewRepository(pool), 365*24*time.Hour, noop.NewMeterProvider().Meter("test"), testLogger())
 
+	// Same reasoning as auditSvc above, not nil — TestSecurityEvents_*
+	// exercises GET /admin/security/events end-to-end against this same
+	// pool, and authevents.Service.ListEvents (unlike Log) isn't nil-safe:
+	// a read endpoint has no "swallow the failure and move on" option the
+	// way a best-effort write does.
+	authEventsSvc := authevents.NewService(authevents.NewRepository(pool), 90*24*time.Hour, nil, noop.NewMeterProvider().Meter("test"), testLogger())
+
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients,
 		noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil,
-		adminAccounts, testAdminPanelOrigin, true, time.Hour, auditSvc, nil, testLogger())
+		adminAccounts, testAdminPanelOrigin, true, time.Hour, auditSvc, authEventsSvc, testLogger())
 
 	return r, adminAccounts, pool, rdb
 }

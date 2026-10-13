@@ -216,6 +216,159 @@ func (r *Repository) Insert(ctx context.Context, e Entry) error {
 // enough that a stuck connection can't hang around indefinitely.
 const writeTimeout = 3 * time.Second
 
+// ListedEvent is one row as GET /admin/security/events returns it.
+// APIClientID/APIClientName/UserID/UserEmail/Method/BanOrigin/ActorEmail/
+// IP are "" when the underlying column is NULL — same COALESCE-to-""
+// convention stats.Repository.FailuresByTenant already uses for the same
+// nullable columns, rather than a pointer/sql.Null* type; the HTTP handler
+// is what turns "" back into an absent JSON field where the contract calls
+// for that (Method/BanOrigin/ActorEmail as null, User as a null object).
+type ListedEvent struct {
+	ID            int64
+	CreatedAt     time.Time
+	Kind          string
+	Method        string
+	Result        string
+	APIClientID   string
+	APIClientName string
+	UserID        string
+	UserEmail     string
+	IP            string
+	UserAgent     string
+	BanOrigin     string
+	ActorEmail    string
+	IsDecoy       bool
+}
+
+// EventFilter narrows ListEvents — every field left at its zero value
+// means "no filter on this". Unlike audit.Filter, a caller-supplied value
+// that doesn't even parse (a malformed IP, a non-UUID tenant, an
+// unparsable date) is rejected by the HTTP handler with 400 before it ever
+// reaches here — this endpoint is meant for investigating incidents, so a
+// typo silently matching "everything" instead of "nothing" would be
+// actively misleading. From/To are always already resolved by the time
+// they reach here — see ResolveEventRange.
+type EventFilter struct {
+	APIClientID string
+	Kind        string
+	Method      string
+	Result      string
+	IP          string
+	From        time.Time
+	To          time.Time
+}
+
+// DefaultEventRangeWindow/MaxEventRangeWindow bound the from/to a caller
+// can ask ListEvents for — see ResolveEventRange.
+const (
+	DefaultEventRangeWindow = 7 * 24 * time.Hour
+	MaxEventRangeWindow     = 90 * 24 * time.Hour
+)
+
+// ResolveEventRange turns the caller's optional from/to into the pair
+// EventFilter.From/To actually need, enforcing GET /admin/security/events'
+// range rules: to defaults to now; from defaults to DefaultEventRangeWindow
+// (7 days) before whichever to ends up being — so "to given, from not"
+// still yields a 7-day window ending at that to, not at now; from after to
+// is rejected outright rather than silently swapped; and the resolved
+// span may never exceed MaxEventRangeWindow (90 days, matching
+// AUTH_EVENTS_RETENTION_DAYS' default) — never silently clamped, since a
+// quietly-narrowed range during an incident investigation would be worse
+// than an explicit error. A to in the future is accepted without error:
+// there's nothing unsafe about it, it just won't match any rows yet.
+func ResolveEventRange(from, to *time.Time, now time.Time) (resolvedFrom, resolvedTo time.Time, err error) {
+	if to != nil {
+		resolvedTo = *to
+	} else {
+		resolvedTo = now
+	}
+	if from != nil {
+		resolvedFrom = *from
+	} else {
+		resolvedFrom = resolvedTo.Add(-DefaultEventRangeWindow)
+	}
+	if resolvedFrom.After(resolvedTo) {
+		return time.Time{}, time.Time{}, fmt.Errorf("from no puede ser posterior a to")
+	}
+	if resolvedTo.Sub(resolvedFrom) > MaxEventRangeWindow {
+		return time.Time{}, time.Time{}, fmt.Errorf("el rango entre from y to no puede superar los 90 días")
+	}
+	return resolvedFrom, resolvedTo, nil
+}
+
+// ListEvents returns one page of auth_events for GET /admin/security/events,
+// most recent first (created_at DESC, id DESC as the tie-break — unlike
+// admin_audit_log's own List, which has none; auth_events can write several
+// rows in the same millisecond under load, so a stable tie-break actually
+// matters here). Joins api_clients/users to resolve APIClientName/UserEmail
+// — both LEFT JOINs, since api_client_id/user_id are nullable (see the
+// migration's own doc comment) and must never turn into an INNER JOIN that
+// would silently drop an unattributed row. Never selects email_hash — see
+// package doc comment.
+func (r *Repository) ListEvents(ctx context.Context, f EventFilter, offset, limit int) ([]*ListedEvent, int, error) {
+	query := `
+		SELECT auth_events.id, auth_events.created_at, auth_events.kind, COALESCE(auth_events.method, ''), auth_events.result,
+			COALESCE(auth_events.api_client_id::text, ''), COALESCE(api_clients.name, ''),
+			COALESCE(auth_events.user_id::text, ''), COALESCE(users.email, ''),
+			COALESCE(host(auth_events.ip), ''), auth_events.user_agent,
+			COALESCE(auth_events.ban_origin, ''), COALESCE(auth_events.actor_email, ''), auth_events.is_decoy,
+			COUNT(*) OVER() AS total
+		FROM auth_events
+		LEFT JOIN api_clients ON api_clients.id = auth_events.api_client_id
+		LEFT JOIN users ON users.id = auth_events.user_id
+		WHERE auth_events.created_at >= $1 AND auth_events.created_at <= $2`
+	args := []any{f.From, f.To}
+	if f.APIClientID != "" {
+		args = append(args, f.APIClientID)
+		query += fmt.Sprintf(" AND auth_events.api_client_id = $%d", len(args))
+	}
+	if f.Kind != "" {
+		args = append(args, f.Kind)
+		query += fmt.Sprintf(" AND auth_events.kind = $%d", len(args))
+	}
+	if f.Method != "" {
+		args = append(args, f.Method)
+		query += fmt.Sprintf(" AND auth_events.method = $%d", len(args))
+	}
+	if f.Result != "" {
+		args = append(args, f.Result)
+		query += fmt.Sprintf(" AND auth_events.result = $%d", len(args))
+	}
+	if f.IP != "" {
+		args = append(args, f.IP)
+		query += fmt.Sprintf(" AND auth_events.ip = $%d::inet", len(args))
+	}
+	query += fmt.Sprintf(" ORDER BY auth_events.created_at DESC, auth_events.id DESC OFFSET $%d LIMIT $%d", len(args)+1, len(args)+2)
+	args = append(args, offset, limit)
+
+	rows, err := r.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("listing auth events: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*ListedEvent
+	total := 0
+	for rows.Next() {
+		e := &ListedEvent{}
+		if err := rows.Scan(
+			&e.ID, &e.CreatedAt, &e.Kind, &e.Method, &e.Result,
+			&e.APIClientID, &e.APIClientName,
+			&e.UserID, &e.UserEmail,
+			&e.IP, &e.UserAgent,
+			&e.BanOrigin, &e.ActorEmail, &e.IsDecoy,
+			&total,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scanning auth event: %w", err)
+		}
+		out = append(out, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("listing auth events: %w", err)
+	}
+	return out, total, nil
+}
+
 // DeleteOlderThan removes every entry created before cutoff — the
 // retention sweep (see Service.DeleteExpired), same periodic-job pattern
 // as audit.Repository.DeleteOlderThan/RefreshRepository.DeleteExpired.
@@ -321,6 +474,32 @@ func (s *Service) HasEmailHashSecret() bool {
 // project's other DeleteExpired-style cleanups.
 func (s *Service) DeleteExpired(ctx context.Context) (int64, error) {
 	return s.repo.DeleteOlderThan(ctx, time.Now().Add(-s.retention))
+}
+
+// defaultEventPageSize/maxEventPageSize mirror audit.Service.List's own
+// constants — same reasoning, same values, kept independent since the two
+// have no other reason to depend on each other.
+const (
+	defaultEventPageSize = 50
+	maxEventPageSize     = 100
+)
+
+// ListEvents returns one page of entries for GET /admin/security/events —
+// page/pageSize clamped the same way audit.Service.List already does for
+// its own listing.
+func (s *Service) ListEvents(ctx context.Context, f EventFilter, page, pageSize int) (events []*ListedEvent, total, effectivePage, effectivePageSize int, err error) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = defaultEventPageSize
+	}
+	if pageSize > maxEventPageSize {
+		pageSize = maxEventPageSize
+	}
+	offset := (page - 1) * pageSize
+	events, total, err = s.repo.ListEvents(ctx, f, offset, pageSize)
+	return events, total, page, pageSize, err
 }
 
 // ParseIP validates and normalizes ip for Entry.IP — "" (not an error)
