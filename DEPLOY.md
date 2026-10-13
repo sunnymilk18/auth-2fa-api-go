@@ -119,6 +119,13 @@ Tabla append-only (migración `0020_auth_events.sql`) que registra cada intento 
 - Retención configurable con `AUTH_EVENTS_RETENTION_DAYS` (90 días por defecto) — limpieza periódica cada 24h, igual que `AUDIT_RETENTION_DAYS`.
 - `AUTH_EVENTS_EMAIL_HASH_SECRET` es opcional: sin configurar, el servidor arranca igual (con una advertencia en el log) y `email_hash` queda `NULL` para esos intentos — nunca se usa un hash sin clave (SHA-256 simple) como respaldo, porque eso permitiría adivinar correos por diccionario.
 
+## IP registrada en la actividad de operadores (`GET /admin/audit`)
+
+La columna IP de `admin_audit_log` (lo que el panel muestra como "IP" en Actividad) resuelve la dirección del operador de la misma forma trusted-proxy-aware que el resto de la API — respeta `X-Forwarded-For` únicamente cuando la conexión TCP en sí misma viene de una red listada en `TRUSTED_PROXY_CIDRS` (ver esa variable en el README). Antes de esto, siempre leía la dirección de la conexión TCP cruda, bajo el supuesto de que un operador le habla directo a esta API — supuesto que no se cumple en este despliegue, donde Traefik está delante también de `/admin/*`: todas las filas mostraban la IP interna de Traefik (`10.0.1.4` en Dokploy) en vez de la del operador.
+
+- Sin `TRUSTED_PROXY_CIDRS` configurada, el comportamiento es exactamente el de antes: la dirección de la conexión TCP, sin consultar ningún header.
+- Las filas de `admin_audit_log` escritas **antes** de este cambio no se corrigen retroactivamente — conservan la IP de Traefik que se les registró en su momento. Solo las acciones nuevas quedan con la IP real del operador.
+
 ## Administración por sistema (credencial scoped)
 
 Para que el equipo detrás de un sistema consumidor pueda moderar **sus propios** usuarios sin necesitar tu `X-Admin-Token` (que puede tocar todos los sistemas, no solo el suyo). Se provisiona una vez por cliente, con tu `X-Admin-Token`:

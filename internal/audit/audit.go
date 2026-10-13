@@ -288,16 +288,41 @@ func (s *Service) DeleteExpired(ctx context.Context) (int64, error) {
 	return s.repo.DeleteOlderThan(ctx, time.Now().Add(-s.retention))
 }
 
-// RemoteIP extracts the caller's bare IP (no port) from r.RemoteAddr, for
-// Entry.ActorIP. Deliberately NOT middleware.ClientIP: that resolves
-// X-Forwarded-For for traffic a *trusted proxy* forwards (end users going
-// through a consuming system's own backend — see TRUSTED_PROXY_CIDRS),
-// which doesn't apply here — an operator's browser or script talks to
-// this API directly, so the real TCP peer address is already the right
-// one, and reaching for middleware.ClientIP would require importing
-// internal/middleware here, which this package deliberately never does
-// (see package doc comment).
+// clientIPResolver, when set, is what RemoteIP delegates to instead of
+// reading r.RemoteAddr raw — see SetClientIPResolver's own doc comment.
+var clientIPResolver func(*http.Request) string
+
+// SetClientIPResolver lets cmd/api/main.go wire RemoteIP to
+// middleware.ClientIP (trusted-proxy-aware: resolves X-Forwarded-For only
+// for a connection that genuinely originates from TRUSTED_PROXY_CIDRS —
+// see that function's own doc comment) without this package importing
+// internal/middleware, which would cycle (middleware already imports
+// internal/auth and internal/apiclient, both of which call RemoteIP — see
+// package doc comment). Meant to be called exactly once, at startup,
+// before the server accepts any request — same "configure once before
+// serving traffic" convention as middleware.ValidateTrustedProxyCIDRs
+// itself, so no additional synchronization beyond that ordering guarantee
+// is needed. Left unset (nil, the zero value) means RemoteIP behaves
+// exactly as it always has: the bare RemoteAddr, no header ever
+// consulted — correct for any test that constructs *audit.Service
+// directly without wiring a resolver, and for a deployment that never
+// configures TRUSTED_PROXY_CIDRS at all.
+func SetClientIPResolver(resolver func(*http.Request) string) {
+	clientIPResolver = resolver
+}
+
+// RemoteIP resolves the caller's IP for Entry.ActorIP. Without a resolver
+// configured (see SetClientIPResolver), this is just r.RemoteAddr with the
+// port stripped — correct when an operator's browser or script talks to
+// this API directly. In production, where every /admin/* request actually
+// arrives through Traefik first, main.go wires a resolver that only
+// trusts X-Forwarded-For from a connection originating inside
+// TRUSTED_PROXY_CIDRS — otherwise every row would show the reverse
+// proxy's own address instead of the operator's.
 func RemoteIP(r *http.Request) string {
+	if clientIPResolver != nil {
+		return clientIPResolver(r)
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

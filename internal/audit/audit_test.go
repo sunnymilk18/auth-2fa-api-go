@@ -2,13 +2,18 @@ package audit_test
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/metric/noop"
 
 	"auth-2fa-api/internal/audit"
+	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/testutil"
 )
 
@@ -28,6 +33,76 @@ func cleanupActor(t *testing.T, pool *pgxpool.Pool, actorEmail string) {
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM admin_audit_log WHERE actor_email = $1`, actorEmail)
 	})
+}
+
+// resolveRemoteIP mirrors middleware's own resolveClientIP test helper
+// (clientip_test.go) but drives audit.RemoteIP instead of
+// middleware.ClientIP directly — this is the external audit_test package,
+// so it can import internal/middleware to wire the real resolver without
+// creating any cycle in the production build (see audit.
+// SetClientIPResolver's own doc comment for why audit.go itself never
+// imports internal/middleware). Resets both pieces of shared package state
+// afterward so nothing leaks into an unrelated test.
+func resolveRemoteIP(t *testing.T, cidrs []string, remoteAddr, xForwardedFor string) string {
+	t.Helper()
+	middleware.ValidateTrustedProxyCIDRs(strings.Join(cidrs, ","))
+	audit.SetClientIPResolver(middleware.ClientIP)
+	t.Cleanup(func() {
+		middleware.ValidateTrustedProxyCIDRs("")
+		audit.SetClientIPResolver(nil)
+	})
+
+	var got string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = audit.RemoteIP(r)
+	})
+
+	var wrapped http.Handler = handler
+	if len(cidrs) > 0 {
+		wrapped = chimw.ClientIPFromXFF(cidrs...)(handler)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = remoteAddr
+	if xForwardedFor != "" {
+		r.Header.Set("X-Forwarded-For", xForwardedFor)
+	}
+	wrapped.ServeHTTP(httptest.NewRecorder(), r)
+	return got
+}
+
+// Without a resolver configured (the zero value — no test or production
+// caller ever called SetClientIPResolver), RemoteIP must keep behaving the
+// way it always has: the bare RemoteAddr, no header ever consulted.
+func TestRemoteIP_NoResolverConfigured_FallsBackToRemoteAddr(t *testing.T) {
+	t.Cleanup(func() { audit.SetClientIPResolver(nil) })
+
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "203.0.113.5:12345"
+	r.Header.Set("X-Forwarded-For", "198.51.100.9")
+	if got := audit.RemoteIP(r); got != "203.0.113.5" {
+		t.Fatalf("RemoteIP() = %q, want %q (no resolver configured, header must be ignored)", got, "203.0.113.5")
+	}
+}
+
+// The scenario this whole change exists for: a request that really did
+// arrive through Traefik (RemoteAddr inside TRUSTED_PROXY_CIDRS) must log
+// the operator's real IP from X-Forwarded-For, not Traefik's own address.
+func TestRemoteIP_TrustedProxyResolverConfigured_UsesForwardedFor(t *testing.T) {
+	got := resolveRemoteIP(t, []string{"10.0.1.0/24"}, "10.0.1.4:54321", "152.172.68.141")
+	if got != "152.172.68.141" {
+		t.Fatalf("RemoteIP() = %q, want %q (RemoteAddr is inside TRUSTED_PROXY_CIDRS)", got, "152.172.68.141")
+	}
+}
+
+// A connection that doesn't genuinely originate from a trusted network
+// must never have its logged IP overridden by a header the caller could
+// have forged — RemoteAddr wins regardless of what X-Forwarded-For says.
+func TestRemoteIP_UntrustedRemoteAddr_IgnoresForgedForwardedFor(t *testing.T) {
+	got := resolveRemoteIP(t, []string{"10.0.1.0/24"}, "198.51.100.9:12345", "1.2.3.4")
+	if got != "198.51.100.9" {
+		t.Fatalf("RemoteIP() = %q, want %q (RemoteAddr isn't a trusted proxy, header must be ignored)", got, "198.51.100.9")
+	}
 }
 
 func TestService_LogAndList_RoundTrip(t *testing.T) {

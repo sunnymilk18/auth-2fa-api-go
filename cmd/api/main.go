@@ -75,6 +75,15 @@ func run(logger *slog.Logger) error {
 	if len(invalidProxyCIDRs) > 0 {
 		logger.Warn("TRUSTED_PROXY_CIDRS has invalid entries, ignoring them", "invalid", invalidProxyCIDRs)
 	}
+	// Lets audit.RemoteIP resolve X-Forwarded-For through Traefik (or any
+	// other reverse proxy in front of /admin/*) the same trusted-proxy-aware
+	// way as every other IP resolution in this project — wired here, not in
+	// internal/audit itself, because that package must not import
+	// internal/middleware (see audit.SetClientIPResolver's own doc comment
+	// for why). Called once, before the server accepts any request — no
+	// further synchronization needed, same convention as
+	// ValidateTrustedProxyCIDRs above.
+	audit.SetClientIPResolver(middleware.ClientIP)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
