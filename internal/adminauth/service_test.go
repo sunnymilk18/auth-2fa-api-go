@@ -212,11 +212,53 @@ func TestService_RevokeAccount_CannotRevokeLastActiveSuperAdmin(t *testing.T) {
 	svc, pool := newTestService(t)
 	ctx := t.Context()
 
+	isolateOnlyActiveSuperAdmin(t, pool)
 	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
 
 	if err := svc.RevokeAccount(ctx, "", account.ID); !errors.Is(err, adminauth.ErrLastSuperAdminAccount) {
 		t.Fatalf("RevokeAccount(last superadmin): err = %v, want ErrLastSuperAdminAccount", err)
 	}
+}
+
+// isolateOnlyActiveSuperAdmin temporarily deactivates every currently-active
+// superadmin account in the (shared, persistent — see
+// testutil.PostgresPool's doc comment) database, restoring them in
+// t.Cleanup. CountActiveByRole has no tenant or test-run scoping by design
+// (admin_accounts isn't tenant data, it's the panel's own operators), so
+// without this, a manually-created superadmin left active from a prior
+// round of manual testing makes this test's own account no longer "the
+// last one" and the test flakes depending on what else happens to be in
+// the database at the time.
+func isolateOnlyActiveSuperAdmin(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx := context.Background()
+
+	rows, err := pool.Query(ctx, `SELECT id FROM admin_accounts WHERE active = TRUE AND role = 'superadmin'`)
+	if err != nil {
+		t.Fatalf("querying active superadmin accounts: %v", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scanning active superadmin id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating active superadmin accounts: %v", err)
+	}
+
+	for _, id := range ids {
+		if _, err := pool.Exec(ctx, `UPDATE admin_accounts SET active = FALSE WHERE id = $1`, id); err != nil {
+			t.Fatalf("deactivating pre-existing superadmin %s: %v", id, err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, id := range ids {
+			_, _ = pool.Exec(context.Background(), `UPDATE admin_accounts SET active = TRUE WHERE id = $1`, id)
+		}
+	})
 }
 
 // Revoking the last active *regular* admin, by contrast, is fine as long
