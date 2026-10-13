@@ -42,6 +42,30 @@ type actionTypeCountResponse struct {
 	Count  int    `json:"count"`
 }
 
+type loginDayCountResponse struct {
+	Day     string `json:"day"`
+	Success int    `json:"success"`
+	Failed  int    `json:"failed"`
+}
+
+type tenantLoginCountResponse struct {
+	APIClientID string `json:"api_client_id"`
+	Name        string `json:"name"`
+	Success     int    `json:"success"`
+	Failed      int    `json:"failed"`
+}
+
+type ipFailureCountResponse struct {
+	IP     string `json:"ip"`
+	Failed int    `json:"failed"`
+	LastAt string `json:"last_at"`
+}
+
+type banDayCountResponse struct {
+	Day  string `json:"day"`
+	Bans int    `json:"bans"`
+}
+
 // statsResponse is what GET /admin/stats returns. OperatorActionsPerDay/
 // OperatorActionsByType are pointers, not plain slices: a regular admin
 // gets these fields OMITTED from the JSON entirely (pointer left nil), a
@@ -57,6 +81,15 @@ type statsResponse struct {
 	UsersBanned    int                   `json:"users_banned"`
 	UsersPerDay    []dayCountResponse    `json:"users_per_day"`
 	UsersPerTenant []tenantCountResponse `json:"users_per_tenant"`
+
+	// LoginsByDay/FailuresByTenant/TopFailingIPs/BansByDay are "tanda 2" —
+	// end-user authentication activity — visible to admin and superadmin
+	// alike, same as everything above (never behind includeOperatorStats,
+	// see stats.Overview's own doc comment).
+	LoginsByDay      []loginDayCountResponse    `json:"logins_by_day"`
+	FailuresByTenant []tenantLoginCountResponse `json:"failures_by_tenant"`
+	TopFailingIPs    []ipFailureCountResponse   `json:"top_failing_ips"`
+	BansByDay        []banDayCountResponse      `json:"bans_by_day"`
 
 	OperatorActionsPerDay *[]dayActionCountResponse  `json:"operator_actions_per_day,omitempty"`
 	OperatorActionsByType *[]actionTypeCountResponse `json:"operator_actions_by_type,omitempty"`
@@ -109,12 +142,16 @@ func (h *statsHandlers) Overview(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := statsResponse{
-		Range:          overview.RangeParam,
-		TZ:             overview.TZName,
-		UsersTotal:     overview.UsersTotal,
-		UsersBanned:    overview.UsersBanned,
-		UsersPerDay:    toDayCountResponses(overview.UsersPerDay),
-		UsersPerTenant: toTenantCountResponses(overview.UsersPerTenant),
+		Range:            overview.RangeParam,
+		TZ:               overview.TZName,
+		UsersTotal:       overview.UsersTotal,
+		UsersBanned:      overview.UsersBanned,
+		UsersPerDay:      toDayCountResponses(overview.UsersPerDay),
+		UsersPerTenant:   toTenantCountResponses(overview.UsersPerTenant),
+		LoginsByDay:      toLoginDayCountResponses(overview.LoginsByDay),
+		FailuresByTenant: toTenantLoginCountResponses(overview.FailuresByTenant),
+		TopFailingIPs:    toIPFailureCountResponses(overview.TopFailingIPs),
+		BansByDay:        toBanDayCountResponses(overview.BansByDay),
 	}
 	if includeOperatorStats {
 		perDay := toDayActionCountResponses(overview.OperatorActionsPerDay)
@@ -150,6 +187,40 @@ func toTenantCountResponses(in []stats.TenantCount) []tenantCountResponse {
 			APIClientID: t.APIClientID, APIClientName: t.APIClientName,
 			Total: t.Total, NewInRange: t.NewInRange,
 		})
+	}
+	return out
+}
+
+func toLoginDayCountResponses(in []stats.LoginDayCount) []loginDayCountResponse {
+	out := make([]loginDayCountResponse, 0, len(in))
+	for _, d := range in {
+		out = append(out, loginDayCountResponse{Day: d.Day, Success: d.Success, Failed: d.Failed})
+	}
+	return out
+}
+
+func toTenantLoginCountResponses(in []stats.TenantLoginCount) []tenantLoginCountResponse {
+	out := make([]tenantLoginCountResponse, 0, len(in))
+	for _, t := range in {
+		out = append(out, tenantLoginCountResponse{
+			APIClientID: t.APIClientID, Name: t.APIClientName, Success: t.Success, Failed: t.Failed,
+		})
+	}
+	return out
+}
+
+func toIPFailureCountResponses(in []stats.IPFailureCount) []ipFailureCountResponse {
+	out := make([]ipFailureCountResponse, 0, len(in))
+	for _, f := range in {
+		out = append(out, ipFailureCountResponse{IP: f.IP, Failed: f.Failed, LastAt: f.LastAt.Format(time.RFC3339)})
+	}
+	return out
+}
+
+func toBanDayCountResponses(in []stats.DayCount) []banDayCountResponse {
+	out := make([]banDayCountResponse, 0, len(in))
+	for _, d := range in {
+		out = append(out, banDayCountResponse{Day: d.Day, Bans: d.Count})
 	}
 	return out
 }

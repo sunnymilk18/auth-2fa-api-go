@@ -32,7 +32,7 @@ func newTestServiceWithPush(t *testing.T) (svc *auth.Service, userSvc *user.Serv
 	mailer = testutil.NewFakeMailer()
 	pushLogin = auth.NewPushLoginStore(rdb, time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, pushLogin, nil, nil, nil, nil, "", nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, pushLogin, nil, nil, nil, nil, "", nil, nil, nil)
 	return svc, users, pushLogin, mailer, client.ID
 }
 
@@ -101,7 +101,7 @@ func TestRequestLoginEmailCode_NotConfigured(t *testing.T) {
 
 	// pushLogin deliberately nil — same "feature not configured" shape as
 	// every other push method.
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil, nil, nil)
 	_ = client
 
 	if err := svc.RequestLoginEmailCode(t.Context(), "whatever"); err != auth.ErrPushNotConfigured {

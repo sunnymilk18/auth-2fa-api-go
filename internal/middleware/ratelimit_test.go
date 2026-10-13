@@ -293,7 +293,7 @@ func TestRateLimiter_MiddlewareByKey_CountsByCustomKeyNotIP(t *testing.T) {
 // whichever identifier a particular limiter happens to count requests by.
 func TestRateLimiter_MiddlewareByKey_StrikesRecordedAgainstIP(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 24*time.Hour, nil)
+	bl := NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 24*time.Hour, nil, nil)
 	rl := NewRateLimiter(rdb, "test-by-key-strikes", 1, time.Minute).AttachBlacklist(bl)
 
 	handler := rl.MiddlewareByKey(func(r *http.Request) string {

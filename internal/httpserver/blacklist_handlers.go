@@ -12,6 +12,7 @@ import (
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/middleware"
 )
 
@@ -31,6 +32,11 @@ type blacklistHandlers struct {
 	bl         *middleware.Blacklist
 	apiClients *apiclient.Service
 	audit      *audit.Service
+	// authEvents records every unban as an auth_events row (kind
+	// ip_unban) — UnbanAny (operator, origin "operator") and Unban
+	// (tenant, origin "tenant") below each attribute it differently, see
+	// authevents.BanOrigin*'s own doc comments. Nil-safe, same as audit.
+	authEvents *authevents.Service
 	logger     *slog.Logger
 }
 
@@ -199,6 +205,11 @@ func (h *blacklistHandlers) UnbanAny(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logOperatorAction(r, audit.ActionBlacklistUnban, audit.TargetTypeBlacklistIP, ip, ip)
+	actor, _ := adminctx.Actor(r.Context())
+	h.authEvents.Log(r.Context(), authevents.Entry{
+		Kind: authevents.KindIPUnban, Result: authevents.ResultUnbanned,
+		BanOrigin: authevents.BanOriginOperator, ActorEmail: actor, IP: authevents.ParseIP(ip),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -243,6 +254,13 @@ func (h *blacklistHandlers) Unban(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("ip ban lifted", "api_client_id", apiClientID, "ip", ip, "reason", req.Reason)
+	// No operator identity on this route (see this file's own doc comment)
+	// — ActorEmail stays "", APIClientID is the attribution instead, see
+	// authevents.BanOriginTenant's own doc comment.
+	h.authEvents.Log(r.Context(), authevents.Entry{
+		APIClientID: apiClientID, Kind: authevents.KindIPUnban, Result: authevents.ResultUnbanned,
+		BanOrigin: authevents.BanOriginTenant, IP: authevents.ParseIP(ip),
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

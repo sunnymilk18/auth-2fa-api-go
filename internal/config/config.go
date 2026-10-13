@@ -241,6 +241,27 @@ type Config struct {
 	// can have different retention requirements, and that shouldn't need a
 	// code change to adjust.
 	AuditRetentionDays int
+
+	// AuthEventsRetentionDays bounds how long an auth_events entry
+	// survives before the periodic cleanup removes it — same reasoning as
+	// AuditRetentionDays, independent default (90, not 365): this table
+	// is much higher volume (every end-user login attempt, not just
+	// operator actions) and exists for near-term stats/security
+	// visibility, not a long-term compliance trail.
+	AuthEventsRetentionDays int
+
+	// AuthEventsEmailHashSecret derives auth_events.email_hash (HMAC-
+	// SHA256, see internal/authevents.HashEmail's doc comment) — its own
+	// secret, not reused from BanReferenceSecret or anything else already
+	// in this project, same reasoning as BanReferenceSecret's own doc
+	// comment. Empty (the default) disables it: email_hash is simply left
+	// NULL for a login attempt against an unknown identifier, not a
+	// startup failure — a deployment that never configures this just
+	// loses that one field's data, same "degrade, don't fail" contract as
+	// BanReferenceSecret/BAN_REFERENCE_SECRET. cmd/api/main.go logs a
+	// warning at startup when this is unset, so a deployment that forgot
+	// it notices instead of silently losing that data forever.
+	AuthEventsEmailHashSecret string
 }
 
 // Load reads a .env file if present (ignored if missing) and then reads
@@ -274,6 +295,8 @@ func Load() (*Config, error) {
 		TrustedProxyCIDRs: getEnv("TRUSTED_PROXY_CIDRS", ""),
 
 		BanReferenceSecret: getEnv("BAN_REFERENCE_SECRET", ""),
+
+		AuthEventsEmailHashSecret: getEnv("AUTH_EVENTS_EMAIL_HASH_SECRET", ""),
 
 		TOTPEncryptionKeyBase64: getEnv("TOTP_ENCRYPTION_KEY", ""),
 		TOTPIssuer:              getEnv("TOTP_ISSUER", "auth-2fa-api"),
@@ -362,6 +385,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if cfg.AuditRetentionDays, err = getEnvInt("AUDIT_RETENTION_DAYS", 365); err != nil {
+		return nil, err
+	}
+	if cfg.AuthEventsRetentionDays, err = getEnvInt("AUTH_EVENTS_RETENTION_DAYS", 90); err != nil {
 		return nil, err
 	}
 

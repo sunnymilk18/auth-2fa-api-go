@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+
+	"auth-2fa-api/internal/authevents"
 )
 
 // This file holds every Service method specific to the optional second
@@ -72,8 +75,14 @@ func (s *Service) SendLoginEmailCode(ctx context.Context, loginToken string) err
 // which loginAttempts already tracks separately in LoginStep1. Called only
 // from LoginStep2 (service.go), once it already confirmed loginToken
 // belongs to a pending TOTP login, not the email-OTP flow.
-func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess pendingLoginSession, code string) (LoginResult, error) {
+func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess pendingLoginSession, code string, r *http.Request) (LoginResult, error) {
 	lockoutKey := "totp:" + loginToken
+
+	logFailure := func(result string) {
+		s.logAuthEvent(ctx, r, sess.APIClientID, authevents.Entry{
+			Kind: authevents.KindLogin, Method: authevents.MethodTOTP, Result: result, UserID: sess.UserID,
+		})
+	}
 
 	locked, _, err := s.loginAttempts.IsLocked(ctx, sess.APIClientID, lockoutKey)
 	if err != nil {
@@ -81,6 +90,7 @@ func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess p
 	}
 	if locked {
 		_ = s.totpLogin.Consume(ctx, loginToken)
+		logFailure(authevents.ResultTooManyAttempts)
 		return LoginResult{}, ErrTooManyAttempts
 	}
 
@@ -92,6 +102,7 @@ func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess p
 		// The account disabled TOTP after LoginStep1 issued this token
 		// (e.g. from another device/tab) — nothing left to verify against.
 		_ = s.totpLogin.Consume(ctx, loginToken)
+		logFailure(authevents.ResultBadTOTP)
 		return LoginResult{}, ErrInvalidTOTPCode
 	}
 
@@ -102,6 +113,7 @@ func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess p
 
 	if !s.totp.ValidateCode(secret, code) {
 		_ = s.loginAttempts.RecordFailure(ctx, sess.APIClientID, lockoutKey)
+		logFailure(authevents.ResultBadTOTP)
 		return LoginResult{}, ErrInvalidTOTPCode
 	}
 
@@ -109,7 +121,7 @@ func (s *Service) verifyTOTPLogin(ctx context.Context, loginToken string, sess p
 	if err := s.totpLogin.Consume(ctx, loginToken); err != nil {
 		return LoginResult{}, err
 	}
-	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email, authevents.MethodTOTP, r)
 }
 
 // StartTOTPEnrollment generates a new TOTP secret for the already
@@ -199,7 +211,7 @@ func (s *Service) PeekTwoFactorSetup(ctx context.Context, loginToken string) (us
 // login right there, issuing a token pair directly. There's no separate
 // VerifyOTP step for this path: confirming the code both activates TOTP and
 // finishes the login in one call.
-func (s *Service) ConfirmTOTPEnrollmentAndLogin(ctx context.Context, loginToken, code string) (LoginResult, error) {
+func (s *Service) ConfirmTOTPEnrollmentAndLogin(ctx context.Context, loginToken, code string, r *http.Request) (LoginResult, error) {
 	if s.twoFactorSetup == nil {
 		return LoginResult{}, ErrTOTPNotConfigured
 	}
@@ -212,12 +224,17 @@ func (s *Service) ConfirmTOTPEnrollmentAndLogin(ctx context.Context, loginToken,
 	}
 
 	if err := s.ConfirmTOTPEnrollment(ctx, sess.UserID, code); err != nil {
+		if errors.Is(err, ErrInvalidTOTPCode) {
+			s.logAuthEvent(ctx, r, sess.APIClientID, authevents.Entry{
+				Kind: authevents.KindLogin, Method: authevents.MethodTOTP, Result: authevents.ResultBadTOTP, UserID: sess.UserID,
+			})
+		}
 		return LoginResult{}, err
 	}
 	if err := s.twoFactorSetup.Consume(ctx, loginToken); err != nil {
 		return LoginResult{}, err
 	}
-	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	return s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email, authevents.MethodTOTP, r)
 }
 
 // DisableTOTP turns the TOTP second factor off — login falls back to the

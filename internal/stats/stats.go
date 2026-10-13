@@ -1,9 +1,10 @@
 // Package stats computes the read-only numbers GET /admin/stats shows —
-// everything from data that already exists (users, admin_audit_log), no
-// new tables. Deliberately its own package rather than folded into
-// internal/user or internal/audit: it reads across both those tables in
-// ways neither of those packages' own repositories need for their own
-// purposes, so it would be an odd fit grafted onto either one.
+// from data that already exists (users, admin_audit_log, auth_events — see
+// internal/authevents for that last one, added for "tanda 2": end-user
+// login/ban activity). Deliberately its own package rather than folded
+// into internal/user or internal/audit: it reads across tables none of
+// those packages' own repositories need for their own purposes, so it
+// would be an odd fit grafted onto any one of them.
 package stats
 
 import (
@@ -13,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"auth-2fa-api/internal/authevents"
 )
 
 // Range7d/Range30d are the only values GET /admin/stats' range query
@@ -22,12 +25,13 @@ const (
 	Range30d = "30d"
 )
 
-// maxTenants/maxActionTypes bound UsersPerTenant/OperatorActionsByType —
-// see Service.Overview's doc comment for why these are a fixed "top N"
-// rather than paginated.
+// maxTenants/maxActionTypes/maxFailingIPs bound UsersPerTenant/
+// OperatorActionsByType/TopFailingIPs — see Service.Overview's doc comment
+// for why these are a fixed "top N" rather than paginated.
 const (
 	maxTenants     = 50
 	maxActionTypes = 10
+	maxFailingIPs  = 10
 )
 
 // ParseRangeDays turns "7d"/"30d" into the number of calendar days the
@@ -275,6 +279,155 @@ func (r *Repository) OperatorActionsByType(ctx context.Context, rng Range, limit
 	return out, rows.Err()
 }
 
+// LoginDayCount is one bucket of LoginsByDay — Success/Failed are end-user
+// login attempts (auth_events.kind = 'login'), not operator actions (see
+// DayActionCount for that, a separate thing).
+type LoginDayCount struct {
+	Day     string
+	Success int
+	Failed  int
+}
+
+// LoginsByDay returns end-user login attempt counts bucketed by day in
+// rng.TZName, same zero-fill contract as UsersPerDay. Success/Failed
+// split on auth_events.result = 'success' vs anything else — see
+// authevents.Result*'s own doc comment for why "anything else" is safe to
+// collapse into one bucket here (the per-result breakdown isn't what this
+// chart is for; GET /admin/security/events, a later entry, is where that
+// detail will live).
+func (r *Repository) LoginsByDay(ctx context.Context, rng Range) ([]LoginDayCount, error) {
+	const q = `
+		SELECT (created_at AT TIME ZONE $1)::date AS day,
+			count(*) FILTER (WHERE result = $2) AS success,
+			count(*) FILTER (WHERE result <> $2) AS failed
+		FROM auth_events
+		WHERE kind = $3 AND created_at >= $4 AND created_at < $5
+		GROUP BY day
+		ORDER BY day`
+	rows, err := r.pool.Query(ctx, q, rng.TZName, authevents.ResultSuccess, authevents.KindLogin, rng.Start, rng.End)
+	if err != nil {
+		return nil, fmt.Errorf("counting logins per day: %w", err)
+	}
+	defer rows.Close()
+
+	var out []LoginDayCount
+	for rows.Next() {
+		var day time.Time
+		var lc LoginDayCount
+		if err := rows.Scan(&day, &lc.Success, &lc.Failed); err != nil {
+			return nil, fmt.Errorf("scanning logins per day: %w", err)
+		}
+		lc.Day = day.Format("2006-01-02")
+		out = append(out, lc)
+	}
+	return out, rows.Err()
+}
+
+// TenantLoginCount is one row of FailuresByTenant.
+type TenantLoginCount struct {
+	APIClientID   string
+	APIClientName string
+	Success       int
+	Failed        int
+}
+
+// FailuresByTenant returns up to limit tenants, most login failures
+// first, within rng — same "top N for a dashboard" reasoning as
+// UsersPerTenant, and the same stable tie-break (name then id, both
+// ascending).
+func (r *Repository) FailuresByTenant(ctx context.Context, rng Range, limit int) ([]TenantLoginCount, error) {
+	const q = `
+		SELECT COALESCE(auth_events.api_client_id::text, ''), COALESCE(api_clients.name, ''),
+			count(*) FILTER (WHERE auth_events.result = $1) AS success,
+			count(*) FILTER (WHERE auth_events.result <> $1) AS failed
+		FROM auth_events
+		LEFT JOIN api_clients ON api_clients.id = auth_events.api_client_id
+		WHERE auth_events.kind = $2 AND auth_events.created_at >= $3 AND auth_events.created_at < $4
+		GROUP BY auth_events.api_client_id, api_clients.name
+		ORDER BY failed DESC, api_clients.name ASC, auth_events.api_client_id ASC
+		LIMIT $5`
+	rows, err := r.pool.Query(ctx, q, authevents.ResultSuccess, authevents.KindLogin, rng.Start, rng.End, limit)
+	if err != nil {
+		return nil, fmt.Errorf("counting login failures per tenant: %w", err)
+	}
+	defer rows.Close()
+
+	var out []TenantLoginCount
+	for rows.Next() {
+		var t TenantLoginCount
+		if err := rows.Scan(&t.APIClientID, &t.APIClientName, &t.Success, &t.Failed); err != nil {
+			return nil, fmt.Errorf("scanning login failures per tenant: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// IPFailureCount is one row of TopFailingIPs.
+type IPFailureCount struct {
+	IP     string
+	Failed int
+	LastAt time.Time
+}
+
+// TopFailingIPs returns up to limit IPs, most failed login attempts first
+// within rng — ties break by IP ascending for stability. Rows with no IP
+// resolved (see internal/auth's clientIP — practically never happens once
+// TRUSTED_PROXY_CIDRS is configured correctly, but possible if it isn't)
+// are excluded rather than grouped into one misleading "" bucket.
+func (r *Repository) TopFailingIPs(ctx context.Context, rng Range, limit int) ([]IPFailureCount, error) {
+	const q = `
+		SELECT host(ip), count(*) AS failed, max(created_at) AS last_at
+		FROM auth_events
+		WHERE kind = $1 AND result <> $2 AND ip IS NOT NULL AND created_at >= $3 AND created_at < $4
+		GROUP BY ip
+		ORDER BY failed DESC, ip ASC
+		LIMIT $5`
+	rows, err := r.pool.Query(ctx, q, authevents.KindLogin, authevents.ResultSuccess, rng.Start, rng.End, limit)
+	if err != nil {
+		return nil, fmt.Errorf("counting top failing ips: %w", err)
+	}
+	defer rows.Close()
+
+	var out []IPFailureCount
+	for rows.Next() {
+		var f IPFailureCount
+		if err := rows.Scan(&f.IP, &f.Failed, &f.LastAt); err != nil {
+			return nil, fmt.Errorf("scanning top failing ips: %w", err)
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// BansByDay returns IP ban counts (auth_events.kind = 'ip_ban', any
+// origin — see authevents.BanOrigin*) bucketed by day in rng.TZName, same
+// zero-fill contract as UsersPerDay.
+func (r *Repository) BansByDay(ctx context.Context, rng Range) ([]DayCount, error) {
+	const q = `
+		SELECT (created_at AT TIME ZONE $1)::date AS day, count(*)
+		FROM auth_events
+		WHERE kind = $2 AND created_at >= $3 AND created_at < $4
+		GROUP BY day
+		ORDER BY day`
+	rows, err := r.pool.Query(ctx, q, rng.TZName, authevents.KindIPBan, rng.Start, rng.End)
+	if err != nil {
+		return nil, fmt.Errorf("counting bans per day: %w", err)
+	}
+	defer rows.Close()
+
+	var out []DayCount
+	for rows.Next() {
+		var day time.Time
+		var count int
+		if err := rows.Scan(&day, &count); err != nil {
+			return nil, fmt.Errorf("scanning bans per day: %w", err)
+		}
+		out = append(out, DayCount{Day: day.Format("2006-01-02"), Count: count})
+	}
+	return out, rows.Err()
+}
+
 // Overview is what GET /admin/stats returns — OperatorActionsPerDay/
 // OperatorActionsByType are nil for a regular admin (see Service.
 // Overview's includeOperatorStats parameter) and non-nil, possibly empty,
@@ -287,6 +440,17 @@ type Overview struct {
 	UsersBanned    int
 	UsersPerDay    []DayCount
 	UsersPerTenant []TenantCount
+
+	// LoginsByDay/FailuresByTenant/TopFailingIPs/BansByDay are "tanda 2" —
+	// end-user authentication activity (internal/authevents) — always
+	// present for both a regular admin and a superadmin, unlike
+	// OperatorActionsPerDay/OperatorActionsByType below: this is about
+	// what end users are doing, not operator visibility, so there's no
+	// reason to restrict it the same way GET /admin/audit is.
+	LoginsByDay      []LoginDayCount
+	FailuresByTenant []TenantLoginCount
+	TopFailingIPs    []IPFailureCount
+	BansByDay        []DayCount
 
 	OperatorActionsPerDay []DayActionCount
 	OperatorActionsByType []ActionTypeCount
@@ -312,6 +476,21 @@ func zeroFillDays(days []string, counts []DayCount) []DayCount {
 	out := make([]DayCount, len(days))
 	for i, d := range days {
 		out[i] = DayCount{Day: d, Count: byDay[d]}
+	}
+	return out
+}
+
+// zeroFillLoginDays mirrors zeroFillActionDays for LoginsByDay.
+func zeroFillLoginDays(days []string, counts []LoginDayCount) []LoginDayCount {
+	byDay := make(map[string]LoginDayCount, len(counts))
+	for _, c := range counts {
+		byDay[c.Day] = c
+	}
+	out := make([]LoginDayCount, len(days))
+	for i, d := range days {
+		c := byDay[d]
+		c.Day = d
+		out[i] = c
 	}
 	return out
 }
@@ -368,6 +547,36 @@ func (s *Service) Overview(ctx context.Context, rangeParam string, rng Range, in
 	if perTenant == nil {
 		out.UsersPerTenant = []TenantCount{}
 	}
+
+	loginsByDay, err := s.repo.LoginsByDay(ctx, rng)
+	if err != nil {
+		return nil, err
+	}
+	out.LoginsByDay = zeroFillLoginDays(rng.Days, loginsByDay)
+
+	failuresByTenant, err := s.repo.FailuresByTenant(ctx, rng, maxTenants)
+	if err != nil {
+		return nil, err
+	}
+	out.FailuresByTenant = failuresByTenant
+	if failuresByTenant == nil {
+		out.FailuresByTenant = []TenantLoginCount{}
+	}
+
+	topFailingIPs, err := s.repo.TopFailingIPs(ctx, rng, maxFailingIPs)
+	if err != nil {
+		return nil, err
+	}
+	out.TopFailingIPs = topFailingIPs
+	if topFailingIPs == nil {
+		out.TopFailingIPs = []IPFailureCount{}
+	}
+
+	bansByDay, err := s.repo.BansByDay(ctx, rng)
+	if err != nil {
+		return nil, err
+	}
+	out.BansByDay = zeroFillDays(rng.Days, bansByDay)
 
 	if !includeOperatorStats {
 		return out, nil

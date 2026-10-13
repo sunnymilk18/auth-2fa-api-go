@@ -54,7 +54,7 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 		auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6),
 		nil,
 		auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute),
-		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil,
+		testutil.NewFakeMailer(), 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, testLogger(), accessRevocation, apiClients, "", nil, nil, nil,
 	)
 	handlers := auth.NewHandlers(svc)
 
@@ -79,7 +79,7 @@ func newTestRouterWithAdminPanel(t *testing.T) (http.Handler, *adminauth.Service
 
 	r := httpserver.NewRouter(handlers, svc, tokens, accessRevocation, users, pool, rdb, apiClients,
 		noop.NewMeterProvider().Meter("test"), testAdminToken, false, false, nil, nil,
-		adminAccounts, testAdminPanelOrigin, true, time.Hour, auditSvc, testLogger())
+		adminAccounts, testAdminPanelOrigin, true, time.Hour, auditSvc, nil, testLogger())
 
 	return r, adminAccounts, pool, rdb
 }
@@ -419,7 +419,7 @@ func TestAdminPanel_Blacklist_ListsAcrossTenants(t *testing.T) {
 	// A single strike is enough to ban, so each RecordViolation call below
 	// produces one ban directly — no need to drive it through the rate
 	// limiter.
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ipA, ipB, ipNoOwner := "203.0.113.10", "203.0.113.20", "203.0.113.30"
 	if err := bl.RecordViolation(t.Context(), ipA, clientA.ID); err != nil {
 		t.Fatalf("RecordViolation(clientA): %v", err)

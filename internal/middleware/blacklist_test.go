@@ -1,12 +1,16 @@
 package middleware_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/metric/noop"
+
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/testutil"
 )
@@ -14,7 +18,7 @@ import (
 func TestBlacklist_BansAfterStrikeThreshold(t *testing.T) {
 	rdb := testutil.RedisClient(t)
 	bl := middleware.NewBlacklist(rdb, 3, 24*time.Hour,
-		[]time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour}, 30*24*time.Hour, nil)
+		[]time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	for i := 1; i < 3; i++ {
@@ -54,7 +58,7 @@ func TestBlacklist_BansAfterStrikeThreshold(t *testing.T) {
 func TestBlacklist_EscalatesBanDurationOnRepeatOffense(t *testing.T) {
 	rdb, mr := testutil.RedisClientAndServer(t)
 	banDurations := []time.Duration{time.Hour, 2 * time.Hour, 3 * time.Hour}
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, banDurations, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, banDurations, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	// 1st ban: threshold is 1, so a single violation bans immediately.
@@ -99,7 +103,7 @@ func TestBlacklist_EscalatesBanDurationOnRepeatOffense(t *testing.T) {
 func TestBlacklist_Unban_ClearsBanAndHistory(t *testing.T) {
 	rdb := testutil.RedisClient(t)
 	bl := middleware.NewBlacklist(rdb, 1, time.Hour,
-		[]time.Duration{time.Hour, 2 * time.Hour}, 30*24*time.Hour, nil)
+		[]time.Duration{time.Hour, 2 * time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "8.8.8.8", "test-client"); err != nil {
@@ -149,7 +153,7 @@ func TestBlacklist_Middleware_BannedResponseShape(t *testing.T) {
 	}
 
 	t.Run("without a reference secret", func(t *testing.T) {
-		bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+		bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 		if err := bl.RecordViolation(t.Context(), "198.51.100.20", "tenant-a"); err != nil {
 			t.Fatalf("RecordViolation: %v", err)
 		}
@@ -174,7 +178,7 @@ func TestBlacklist_Middleware_BannedResponseShape(t *testing.T) {
 	})
 
 	t.Run("with a reference secret", func(t *testing.T) {
-		bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"))
+		bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"), nil)
 		if err := bl.RecordViolation(t.Context(), "198.51.100.21", "tenant-a"); err != nil {
 			t.Fatalf("RecordViolation: %v", err)
 		}
@@ -193,7 +197,7 @@ func TestBlacklist_Middleware_BannedResponseShape(t *testing.T) {
 
 func TestBlacklist_Middleware_RejectsBannedIP(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "203.0.113.9", "test-client"); err != nil {
@@ -235,7 +239,7 @@ func TestBlacklist_RecordViolation_NeverBansTrustedProxyAddr(t *testing.T) {
 	t.Cleanup(func() { middleware.ValidateTrustedProxyCIDRs("") })
 
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	for i := 0; i < 5; i++ {
@@ -262,12 +266,12 @@ func TestBlacklist_RecordViolation_NeverBansTrustedProxyAddr(t *testing.T) {
 func TestBlacklist_Reference(t *testing.T) {
 	rdb := testutil.RedisClient(t)
 
-	withoutSecret := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	withoutSecret := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	if _, ok := withoutSecret.Reference("1.2.3.4"); ok {
 		t.Fatal("Reference should be disabled with no BAN_REFERENCE_SECRET configured")
 	}
 
-	withSecret := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"))
+	withSecret := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"), nil)
 	ref1, ok := withSecret.Reference("1.2.3.4")
 	if !ok || ref1 == "" {
 		t.Fatal("Reference should be enabled with a secret configured")
@@ -287,7 +291,7 @@ func TestBlacklist_Reference(t *testing.T) {
 // at the same time) must be completely invisible and un-liftable.
 func TestBlacklist_ListOwnedAndUnbanOwned_ScopedToOwner(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"))
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, []byte("test-secret"), nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "198.51.100.1", "tenant-a"); err != nil {
@@ -356,7 +360,7 @@ func TestBlacklist_ListOwnedAndUnbanOwned_ScopedToOwner(t *testing.T) {
 // tenant's own listing, and no tenant can lift it via UnbanOwned.
 func TestBlacklist_OwnerlessBan_InvisibleToSystemAdmins(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "203.0.113.77", ""); err != nil {
@@ -389,7 +393,7 @@ func TestBlacklist_OwnerlessBan_InvisibleToSystemAdmins(t *testing.T) {
 // a separate Unban call.
 func TestBlacklist_AllowlistAdd_ExemptsFromStrikesAndLiftsExistingBan(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "192.0.2.50", "tenant-a"); err != nil {
@@ -422,7 +426,7 @@ func TestBlacklist_AllowlistAdd_ExemptsFromStrikesAndLiftsExistingBan(t *testing
 // shared state" reality as a ban itself.
 func TestBlacklist_AllowlistAdd_IsGlobalAcrossTenants(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.AllowlistAdd(ctx, "tenant-a", "192.0.2.60"); err != nil {
@@ -442,7 +446,7 @@ func TestBlacklist_AllowlistAdd_IsGlobalAcrossTenants(t *testing.T) {
 // system itself added — same isolation rule as bans.
 func TestBlacklist_AllowlistRemoveAndList_ScopedToOwner(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.AllowlistAdd(ctx, "tenant-a", "192.0.2.70"); err != nil {
@@ -504,7 +508,7 @@ func TestBlacklist_AllowlistRemoveAndList_ScopedToOwner(t *testing.T) {
 // /system-admin/blacklist listing until detailsKey's TTL caught up.
 func TestBlacklist_Unban_RemovesFromOwnersListingImmediately(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "198.51.100.9", "tenant-a"); err != nil {
@@ -539,7 +543,7 @@ func TestBlacklist_Unban_RemovesFromOwnersListingImmediately(t *testing.T) {
 // from its owning tenant's listing right away.
 func TestBlacklist_AllowlistAdd_RemovesLiftedBanFromOwnersListingImmediately(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ctx := t.Context()
 
 	if err := bl.RecordViolation(ctx, "198.51.100.10", "tenant-a"); err != nil {
@@ -570,7 +574,7 @@ func TestBlacklist_AllowlistAdd_RemovesLiftedBanFromOwnersListingImmediately(t *
 // this is the integration point router.go relies on.
 func TestRateLimiter_DenialFeedsAttachedBlacklist(t *testing.T) {
 	rdb := testutil.RedisClient(t)
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	rl := middleware.NewRateLimiter(rdb, "test", 1, time.Minute).AttachBlacklist(bl)
 
 	handler := rl.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -600,5 +604,63 @@ func TestRateLimiter_DenialFeedsAttachedBlacklist(t *testing.T) {
 	}
 	if !banned {
 		t.Fatal("want the IP banned after a rate-limit denial fed the attached blacklist, got not banned")
+	}
+}
+
+// TestBlacklist_BanCrossingThreshold_LogsAutomaticIPBanEvent confirms the
+// ban that actually crosses strikeThreshold writes an auth_events row
+// (kind ip_ban, origin automatic, no actor — see
+// authevents.BanOriginAutomatic's own doc comment), and that the strikes
+// below threshold do NOT each log their own ban event.
+func TestBlacklist_BanCrossingThreshold_LogsAutomaticIPBanEvent(t *testing.T) {
+	rdb := testutil.RedisClient(t)
+	pool := testutil.PostgresPool(t)
+	apiClient, _ := testutil.NewAPIClient(t, pool)
+	authEvents := authevents.NewService(authevents.NewRepository(pool), 90*24*time.Hour, nil, noop.NewMeterProvider().Meter("test"), nil)
+
+	bl := middleware.NewBlacklist(rdb, 2, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, authEvents)
+	ip := "198.51.100.44"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM auth_events WHERE api_client_id = $1`, apiClient.ID)
+	})
+
+	if err := bl.RecordViolation(t.Context(), ip, apiClient.ID); err != nil {
+		t.Fatalf("RecordViolation #1: %v", err)
+	}
+	var countAfterFirst int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM auth_events WHERE api_client_id = $1 AND kind = $2`,
+		apiClient.ID, authevents.KindIPBan).Scan(&countAfterFirst); err != nil {
+		t.Fatalf("counting auth_events after strike 1: %v", err)
+	}
+	if countAfterFirst != 0 {
+		t.Fatalf("ip_ban rows after 1 of 2 strikes = %d, want 0 (not banned yet)", countAfterFirst)
+	}
+
+	if err := bl.RecordViolation(t.Context(), ip, apiClient.ID); err != nil {
+		t.Fatalf("RecordViolation #2: %v", err)
+	}
+
+	var row struct {
+		Result, BanOrigin, IP string
+		ActorEmail            string
+	}
+	err := pool.QueryRow(context.Background(), `
+		SELECT result, ban_origin, host(ip), COALESCE(actor_email, '')
+		FROM auth_events WHERE api_client_id = $1 AND kind = $2 ORDER BY id DESC LIMIT 1`,
+		apiClient.ID, authevents.KindIPBan).Scan(&row.Result, &row.BanOrigin, &row.IP, &row.ActorEmail)
+	if err != nil {
+		t.Fatalf("querying ip_ban row: %v", err)
+	}
+	if row.Result != authevents.ResultBanned {
+		t.Fatalf("result = %q, want %q", row.Result, authevents.ResultBanned)
+	}
+	if row.BanOrigin != authevents.BanOriginAutomatic {
+		t.Fatalf("ban_origin = %q, want %q", row.BanOrigin, authevents.BanOriginAutomatic)
+	}
+	if row.IP != ip {
+		t.Fatalf("ip = %q, want %q", row.IP, ip)
+	}
+	if row.ActorEmail != "" {
+		t.Fatalf("actor_email = %q, want empty for an automatic ban", row.ActorEmail)
 	}
 }

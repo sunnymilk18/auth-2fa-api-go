@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net/http"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"auth-2fa-api/internal/authevents"
 )
 
 // ErrPushNotConfigured is returned by every push-approval method when this
@@ -204,7 +207,7 @@ func randInt(n int) (int, error) {
 // impersonating "the PC" necessarily already has that token (they're the
 // one who triggered the login), and still can't act on it without the real
 // phone owner independently choosing the same number on their own device.
-func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status string, displayNumber int, result LoginResult, err error) {
+func (s *Service) PollPushLogin(ctx context.Context, loginToken string, r *http.Request) (status string, displayNumber int, result LoginResult, err error) {
 	if s.pushLogin == nil {
 		return "", 0, LoginResult{}, ErrPushNotConfigured
 	}
@@ -224,7 +227,10 @@ func (s *Service) PollPushLogin(ctx context.Context, loginToken string) (status 
 	if err := s.pushLogin.Consume(ctx, loginToken); err != nil {
 		return "", 0, LoginResult{}, err
 	}
-	result, err = s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email)
+	// IP/user-agent come from this poll request (the PC side, which is
+	// what's actually completing the login right now), not the phone's
+	// own AnswerPushLogin call — see PushLoginStatus's own doc comment.
+	result, err = s.finishLogin(ctx, sess.UserID, sess.APIClientID, sess.Email, authevents.MethodPush, r)
 	if err != nil {
 		return "", 0, LoginResult{}, err
 	}

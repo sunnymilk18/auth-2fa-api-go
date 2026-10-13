@@ -162,7 +162,7 @@ func (h *Handlers) ConfirmTOTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "no autorizado")
 		return
 	}
-	result, err := h.svc.ConfirmTOTPEnrollmentAndLogin(r.Context(), req.LoginToken, req.Code)
+	result, err := h.svc.ConfirmTOTPEnrollmentAndLogin(r.Context(), req.LoginToken, req.Code, r)
 	if err != nil {
 		if errors.Is(err, ErrLoginSessionNotFound) {
 			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")

@@ -37,10 +37,10 @@ func TestChangeEmail_FullFlow(t *testing.T) {
 	}
 
 	// The account logs in with the new email now; the old one is free.
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("LoginStep1 with the new email: unexpected error %v", err)
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != user.ErrInvalidCredentials {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery", nil); err != user.ErrInvalidCredentials {
 		t.Fatalf("LoginStep1 with the old email: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
 
@@ -82,12 +82,12 @@ func TestChangeEmail_MailerFailure(t *testing.T) {
 func TestChangeEmail_MarksEmailVerified(t *testing.T) {
 	svc, _, mailer, apiClientID := newTestService(t)
 	oldEmail := "typo-" + testutil.UniqueSuffix(t) + "@example.com"
-	u, err := svc.Register(t.Context(), apiClientID, oldEmail, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t))
+	u, err := svc.Register(t.Context(), apiClientID, oldEmail, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t), nil)
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Deliberately never verified — that's the scenario this flow exists for.
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery"); err != auth.ErrEmailNotVerified {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery", nil); err != auth.ErrEmailNotVerified {
 		t.Fatalf("sanity check, LoginStep1 before any fix: err = %v, want %v", err, auth.ErrEmailNotVerified)
 	}
 
@@ -101,7 +101,7 @@ func TestChangeEmail_MarksEmailVerified(t *testing.T) {
 		t.Fatalf("ConfirmChangeEmail: %v", err)
 	}
 
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, newEmail, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("LoginStep1 after the fix: unexpected error %v (email_verified should now be true)", err)
 	}
 }
@@ -112,7 +112,7 @@ func TestChangeEmail_RevokesExistingSessionsDevicesAndAccessTokens(t *testing.T)
 	userID := mustRegisterAndLogin(t, svc, tokens, mailer, apiClientID, oldEmail, "correcthorsebattery")
 
 	// A session + trusted device from before the change.
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, oldEmail, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestChangeEmail_RevokesExistingSessionsDevicesAndAccessTokens(t *testing.T)
 	if _, _, err := svc.Refresh(t.Context(), refreshTok); err != auth.ErrRefreshTokenInvalid {
 		t.Fatalf("Refresh with a pre-change refresh token: err = %v, want %v", err, auth.ErrRefreshTokenInvalid)
 	}
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != device.ErrDeviceNotTrusted {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("DeviceLogin with a pre-change device token: err = %v, want %v", err, device.ErrDeviceNotTrusted)
 	}
 	// Instant access-token revocation (AccessRevocationStore) is exercised

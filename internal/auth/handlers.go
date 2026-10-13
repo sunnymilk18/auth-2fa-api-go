@@ -102,7 +102,7 @@ func (h *Handlers) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password, req.Username, req.RUT)
+	u, err := h.svc.Register(r.Context(), apiClientID, req.Email, req.Password, req.Username, req.RUT, r)
 	if err != nil {
 		var usernameTaken *user.UsernameTakenError
 		switch {
@@ -274,7 +274,7 @@ func (h *Handlers) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	loginToken, needsSetup, pushOffered, method, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password)
+	loginToken, needsSetup, pushOffered, method, err := h.svc.LoginStep1(r.Context(), apiClientID, req.Identifier, req.Password, r)
 	if err != nil {
 		var lockedErr *LockedOutError
 		switch {
@@ -355,7 +355,7 @@ func (h *Handlers) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.svc.LoginStep2(r.Context(), req.LoginToken, req.Code)
+	result, err := h.svc.LoginStep2(r.Context(), req.LoginToken, req.Code, r)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrLoginSessionNotFound):
@@ -401,7 +401,7 @@ func (h *Handlers) LoginPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.svc.LoginPinStep(r.Context(), req.PinToken, req.Pin, req.Create)
+	result, err := h.svc.LoginPinStep(r.Context(), req.PinToken, req.Pin, req.Create, r)
 	if err != nil {
 		if errors.Is(err, ErrLoginSessionNotFound) {
 			writeError(w, http.StatusUnauthorized, "la sesión de login no existe o expiró, vuelve a iniciar sesión")
@@ -493,7 +493,7 @@ func (h *Handlers) RequestPasswordReset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.svc.RequestPasswordReset(r.Context(), apiClientID, req.Email); err != nil {
+	if err := h.svc.RequestPasswordReset(r.Context(), apiClientID, req.Email, r); err != nil {
 		log.Printf("request password reset error: %v", err)
 		writeError(w, http.StatusInternalServerError, "no se pudo procesar la solicitud")
 		return
@@ -529,7 +529,7 @@ func (h *Handlers) ConfirmPasswordReset(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := h.svc.ResetPassword(r.Context(), apiClientID, req.Email, req.Code, req.NewPassword); err != nil {
+	if err := h.svc.ResetPassword(r.Context(), apiClientID, req.Email, req.Code, req.NewPassword, r); err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidPassword):
 			writeError(w, http.StatusBadRequest, "la contraseña debe tener al menos 8 caracteres")
@@ -670,7 +670,7 @@ func (h *Handlers) DeviceLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	access, refresh, newDeviceToken, err := h.svc.DeviceLogin(r.Context(), req.DeviceID, req.DeviceToken, req.Pin)
+	access, refresh, newDeviceToken, err := h.svc.DeviceLogin(r.Context(), req.DeviceID, req.DeviceToken, req.Pin, r)
 	if err != nil {
 		if errors.Is(err, ErrAccountBanned) {
 			writeError(w, http.StatusForbidden, "esta cuenta está bloqueada")
@@ -966,7 +966,7 @@ func (h *Handlers) PushLoginStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, number, result, err := h.svc.PollPushLogin(r.Context(), loginToken)
+	status, number, result, err := h.svc.PollPushLogin(r.Context(), loginToken, r)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrPushNotConfigured):

@@ -87,17 +87,37 @@ Si `<ip>` no tiene un formato válido, `400`. Si no estaba en la lista, `404`.
 
 ## Estadísticas
 
-Números de solo lectura para el panel (sin tablas nuevas: todo se calcula al vuelo sobre `users` y `admin_audit_log`). Mismo acceso que `GET /admin/users` — cualquier administrador, no solo superadmin — y, al ser de solo lectura, no exige el PIN de operador. Deliberadamente tampoco está en `/docs` ni en `openapi.yaml`, mismo criterio que el resto de `/admin/*`.
+Números de solo lectura para el panel. Mismo acceso que `GET /admin/users` — cualquier administrador, no solo superadmin — y, al ser de solo lectura, no exige el PIN de operador. Deliberadamente tampoco está en `/docs` ni en `openapi.yaml`, mismo criterio que el resto de `/admin/*`.
 
 ```bash
 curl "https://tu-api/admin/stats?range=7d&tz=America/Santiago" -H "X-Admin-Token: $ADMIN_API_TOKEN"
 ```
 
 - `range` es obligatorio: `7d` o `30d` (cualquier otro valor, `400`). Son días calendario, hoy incluido.
-- `tz` es opcional (`America/Santiago`, `UTC`, cualquier nombre IANA real) y define en qué zona horaria se cortan los días de `users_per_day`/`operator_actions_per_day` — sin especificarla, UTC. Un valor inválido, incluido `Local` (Go lo acepta como "la hora del servidor", pero acá se rechaza a propósito para que el resultado no dependa de dónde corre el contenedor), responde `400`.
-- `users_per_day` y `operator_actions_per_day` siempre traen un elemento por cada día del rango, con `count: 0` donde no hubo datos — nunca hay huecos para el gráfico.
-- `users_per_tenant` es un top 50 por cantidad total de usuarios (no el listado completo de sistemas — para eso está `GET /admin/clients`), de mayor a menor; empates se ordenan por nombre y después por id.
-- `operator_actions_per_day` y `operator_actions_by_type` solo aparecen en la respuesta si quien llama es superadmin — mismo nivel que `GET /admin/audit`. Para un administrador regular, esos dos campos no vienen (ni siquiera vacíos).
+- `tz` es opcional (`America/Santiago`, `UTC`, cualquier nombre IANA real) y define en qué zona horaria se cortan los días de los bloques por día — sin especificarla, UTC. Un valor inválido, incluido `Local` (Go lo acepta como "la hora del servidor", pero acá se rechaza a propósito para que el resultado no dependa de dónde corre el contenedor), responde `400`.
+- Todos los bloques por día siempre traen un elemento por cada día del rango, con `0` donde no hubo datos — nunca hay huecos para el gráfico.
+
+**Usuarios** (sin tablas nuevas: se calcula al vuelo sobre `users`):
+
+- `users_per_day` y `users_per_tenant` como antes — `users_per_tenant` es un top 50 por cantidad total de usuarios (no el listado completo de sistemas — para eso está `GET /admin/clients`), de mayor a menor; empates se ordenan por nombre y después por id.
+
+**Actividad de operadores** (sobre `admin_audit_log`) — `operator_actions_per_day` y `operator_actions_by_type` solo aparecen en la respuesta si quien llama es superadmin — mismo nivel que `GET /admin/audit`. Para un administrador regular, esos dos campos no vienen (ni siquiera vacíos).
+
+**Actividad de usuarios finales** ("tanda 2", sobre `auth_events` — ver "Eventos de autenticación de usuarios finales" más abajo) — visibles para administrador y superadmin por igual, nunca detrás de la condición anterior:
+
+- `logins_by_day`: `[{day, success, failed}]` — intentos de login (`auth_events.kind = login`), contados por resultado.
+- `failures_by_tenant`: `[{api_client_id, name, success, failed}]`, top 50 por fallos, de mayor a menor.
+- `top_failing_ips`: `[{ip, failed, last_at}]`, top 10 por intentos fallidos, de mayor a menor.
+- `bans_by_day`: `[{day, bans}]` — baneos de IP creados ese día (`auth_events.kind = ip_ban`), de cualquier origen.
+
+## Eventos de autenticación de usuarios finales (`auth_events`)
+
+Tabla append-only (migración `0020_auth_events.sql`) que registra cada intento de login, solicitud/confirmación de recuperación de contraseña y registro de usuarios finales, además del historial de baneos/desbaneos de IP — la base de la sección Estadísticas de arriba y, más adelante, de un Centro de Seguridad. No tiene endpoint de lectura propio todavía (llegará en una entrega futura, `GET /admin/security/events`) — hoy solo se consume agregada vía `GET /admin/stats`.
+
+- Nunca guarda contraseñas, códigos, PIN ni tokens, ni el correo en claro — cuando el identificador de un intento no resuelve a una cuenta real, se guarda `email_hash` (HMAC-SHA256, ver `AUTH_EVENTS_EMAIL_HASH_SECRET` abajo) en vez de `user_id`.
+- Escribir un evento nunca bloquea ni hace fallar la acción real (login, registro, etc.) — un error de escritura solo se registra en el log del servidor y en una métrica (`auth.events.write_failures`), igual que `admin_audit_log`.
+- Retención configurable con `AUTH_EVENTS_RETENTION_DAYS` (90 días por defecto) — limpieza periódica cada 24h, igual que `AUDIT_RETENTION_DAYS`.
+- `AUTH_EVENTS_EMAIL_HASH_SECRET` es opcional: sin configurar, el servidor arranca igual (con una advertencia en el log) y `email_hash` queda `NULL` para esos intentos — nunca se usa un hash sin clave (SHA-256 simple) como respaldo, porque eso permitiría adivinar correos por diccionario.
 
 ## Administración por sistema (credencial scoped)
 

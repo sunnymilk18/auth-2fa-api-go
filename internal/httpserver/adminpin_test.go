@@ -212,7 +212,7 @@ func TestAdminPin_UnbanAndLockoutRoutesAreNotGated(t *testing.T) {
 		t.Fatalf("revoke sessions: status = %d, body = %s, want 204 (not PIN-gated)", rec.Code, rec.Body.String())
 	}
 
-	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil)
+	bl := middleware.NewBlacklist(rdb, 1, time.Hour, []time.Duration{time.Hour}, 30*24*time.Hour, nil, nil)
 	ip := "203.0.113.40"
 	if err := bl.RecordViolation(t.Context(), ip, targetClient.ID); err != nil {
 		t.Fatalf("RecordViolation: %v", err)

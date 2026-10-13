@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"auth-2fa-api/internal/authevents"
 )
 
 // Blacklist escalates repeat rate-limit offenders (by IP) from a temporary
@@ -47,9 +49,19 @@ type Blacklist struct {
 	// kind of thing that turns into a real problem the day either one
 	// needs to rotate independently of the other.
 	banReferenceSecret []byte
+
+	// authEvents records every automatic ban as an auth_events row (kind
+	// ip_ban, origin automatic — see authevents.BanOriginAutomatic's doc
+	// comment) — nilable the same way audit.Service's callers leave it:
+	// Log is a no-op on a nil *authevents.Service, so a test that doesn't
+	// care about this can leave it unset. Manual unban logging (operator
+	// or tenant) happens at the HTTP handler layer instead — see
+	// httpserver.blacklistHandlers, which has the actor/tenant context
+	// this package deliberately never does.
+	authEvents *authevents.Service
 }
 
-func NewBlacklist(rdb *redis.Client, strikeThreshold int64, strikeWindow time.Duration, banDurations []time.Duration, levelMemory time.Duration, banReferenceSecret []byte) *Blacklist {
+func NewBlacklist(rdb *redis.Client, strikeThreshold int64, strikeWindow time.Duration, banDurations []time.Duration, levelMemory time.Duration, banReferenceSecret []byte, authEvents *authevents.Service) *Blacklist {
 	return &Blacklist{
 		rdb:                rdb,
 		strikeThreshold:    strikeThreshold,
@@ -57,6 +69,7 @@ func NewBlacklist(rdb *redis.Client, strikeThreshold int64, strikeWindow time.Du
 		banDurations:       banDurations,
 		levelMemory:        levelMemory,
 		banReferenceSecret: banReferenceSecret,
+		authEvents:         authEvents,
 	}
 }
 
@@ -315,6 +328,14 @@ func (bl *Blacklist) RecordViolation(ctx context.Context, ip, ownerAPIClientID s
 			return fmt.Errorf("indexing blacklist ban by owner: %w", err)
 		}
 	}
+
+	bl.authEvents.Log(ctx, authevents.Entry{
+		APIClientID: ownerAPIClientID,
+		Kind:        authevents.KindIPBan,
+		Result:      authevents.ResultBanned,
+		BanOrigin:   authevents.BanOriginAutomatic,
+		IP:          authevents.ParseIP(ip),
+	})
 	return nil
 }
 

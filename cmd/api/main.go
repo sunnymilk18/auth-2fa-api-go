@@ -26,6 +26,7 @@ import (
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/config"
 	"auth-2fa-api/internal/db"
 	"auth-2fa-api/internal/device"
@@ -144,9 +145,6 @@ func run(logger *slog.Logger) error {
 
 	loginPinStore := auth.NewPinLoginStore(rdb, cfg.LoginPinTTL)
 
-	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, changeEmailStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, cfg.ChangeEmailTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation, apiClientSvc, cfg.PanelBaseURL, loginPinStore)
-	authHandlers := auth.NewHandlers(authSvc)
-
 	// OTEL_EXPORTER_OTLP_ENDPOINT unset -> SetupMetrics returns a no-op
 	// shutdown and the meter stays a no-op too; metrics are an optional
 	// extra, not something that should block startup or need its own
@@ -167,6 +165,22 @@ func run(logger *slog.Logger) error {
 	// path, which exists independently of whether the panel's own login
 	// (TOTP) is configured at all.
 	auditSvc := audit.NewService(audit.NewRepository(pgPool), time.Duration(cfg.AuditRetentionDays)*24*time.Hour, meter, logger)
+
+	// Always constructed, same as auditSvc — see authevents.Service.Log's
+	// own doc comment for why a nil-safe, best-effort write never needs a
+	// feature flag the way TOTP/push do.
+	if cfg.AuthEventsEmailHashSecret == "" {
+		logger.Warn("AUTH_EVENTS_EMAIL_HASH_SECRET not set — auth_events.email_hash will be empty for every attempt against an unknown identifier")
+	}
+	authEventsSvc := authevents.NewService(
+		authevents.NewRepository(pgPool),
+		time.Duration(cfg.AuthEventsRetentionDays)*24*time.Hour,
+		[]byte(cfg.AuthEventsEmailHashSecret),
+		meter, logger,
+	)
+
+	authSvc := auth.NewService(userSvc, otpStore, tokenMgr, refreshRepo, deviceSvc, passwordResetStore, emailVerificationStore, changeEmailStore, loginAttempts, resendMailer, cfg.OTPTTL, cfg.RefreshTokenTTL, cfg.PasswordResetTTL, cfg.EmailVerificationTTL, cfg.ChangeEmailTTL, totpManager, totpLoginStore, twoFactorSetupStore, pushClient, pushLoginStore, pushRequestLimiter, logger, accessRevocation, apiClientSvc, cfg.PanelBaseURL, loginPinStore, authEventsSvc, trustedProxyCIDRs)
+	authHandlers := auth.NewHandlers(authSvc)
 
 	// nil when TOTP isn't configured server-wide (TOTPEncryptionKeyBase64
 	// unset) — an admin account's TOTP secret can't be encrypted at rest
@@ -189,7 +203,7 @@ func run(logger *slog.Logger) error {
 		)
 	}
 
-	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), adminAccounts, cfg.AdminPanelOrigin, cfg.AdminSessionCrossSite, cfg.AdminSessionTTL, auditSvc, logger)
+	router := httpserver.NewRouter(authHandlers, authSvc, tokenMgr, accessRevocation, userSvc, pgPool, rdb, apiClientSvc, meter, cfg.AdminAPIToken, totpManager != nil, pushClient != nil, trustedProxyCIDRs, []byte(cfg.BanReferenceSecret), adminAccounts, cfg.AdminPanelOrigin, cfg.AdminSessionCrossSite, cfg.AdminSessionTTL, auditSvc, authEventsSvc, logger)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
@@ -212,6 +226,7 @@ func run(logger *slog.Logger) error {
 		go cleanupExpiredAdminSessions(ctx, adminSessions, logger)
 	}
 	go cleanupExpiredAuditLog(ctx, auditSvc, logger)
+	go cleanupExpiredAuthEvents(ctx, authEventsSvc, logger)
 
 	<-ctx.Done()
 	logger.Info("shutting down...")
@@ -268,6 +283,36 @@ func cleanupExpiredAuditLog(ctx context.Context, auditSvc *audit.Service, logger
 		}
 		if n > 0 {
 			logger.Info("audit log cleanup", "deleted", n)
+		}
+	}
+
+	sweep()
+
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sweep()
+		}
+	}
+}
+
+// cleanupExpiredAuthEvents is cleanupExpiredAuditLog's exact counterpart
+// for auth_events — same once-at-startup-then-every-24h cadence, removing
+// entries older than AUTH_EVENTS_RETENTION_DAYS (see authevents.Service.
+// DeleteExpired).
+func cleanupExpiredAuthEvents(ctx context.Context, authEventsSvc *authevents.Service, logger *slog.Logger) {
+	sweep := func() {
+		n, err := authEventsSvc.DeleteExpired(ctx)
+		if err != nil {
+			logger.Error("auth events cleanup failed", "error", err)
+			return
+		}
+		if n > 0 {
+			logger.Info("auth events cleanup", "deleted", n)
 		}
 	}
 

@@ -2,6 +2,8 @@ package stats_test
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -481,5 +483,199 @@ func TestService_Overview_IncludesOperatorStatsWhenRequested(t *testing.T) {
 	}
 	if overview.OperatorActionsByType == nil {
 		t.Fatal("OperatorActionsByType = nil, want non-nil (even if empty) when includeOperatorStats=true")
+	}
+}
+
+// insertAuthEvent is insertAuditRow's counterpart for auth_events — same
+// delta-based-testing reasoning (the shared test database accumulates
+// rows across this whole suite's history, so tests assert on the change a
+// fresh insert causes, not on an absolute count).
+func insertAuthEvent(t *testing.T, pool *pgxpool.Pool, apiClientID, kind, result, ip string, createdAt time.Time) {
+	t.Helper()
+	const q = `
+		INSERT INTO auth_events (api_client_id, kind, result, ip, user_agent, created_at)
+		VALUES ($1, $2, $3, NULLIF($4, '')::inet, '', $5)
+		RETURNING id`
+	var id string
+	if err := pool.QueryRow(context.Background(), q, apiClientID, kind, result, ip, createdAt).Scan(&id); err != nil {
+		t.Fatalf("inserting test auth_events row: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), `DELETE FROM auth_events WHERE id = $1`, id)
+	})
+}
+
+func TestRepository_LoginsByDay_SplitsSuccessAndFailed(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	ctx := context.Background()
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	loc := time.UTC
+	now := time.Now().In(loc)
+	targetDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -2)
+	targetLabel := targetDay.Format("2006-01-02")
+	rng := stats.ResolveRange(7, loc, now)
+
+	insertAuthEvent(t, pool, client.ID, "login", "success", "", targetDay.Add(time.Hour))
+	insertAuthEvent(t, pool, client.ID, "login", "success", "", targetDay.Add(2*time.Hour))
+	insertAuthEvent(t, pool, client.ID, "login", "bad_credentials", "", targetDay.Add(3*time.Hour))
+	// A different kind on the same day must not count toward either
+	// bucket — confirms the WHERE kind = 'login' filter is actually
+	// applied, not just the result split.
+	insertAuthEvent(t, pool, client.ID, "register", "success", "", targetDay.Add(4*time.Hour))
+
+	rows, err := repo.LoginsByDay(ctx, rng)
+	if err != nil {
+		t.Fatalf("LoginsByDay: %v", err)
+	}
+	var found *stats.LoginDayCount
+	for i := range rows {
+		if rows[i].Day == targetLabel {
+			found = &rows[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no LoginsByDay row for %s in %+v", targetLabel, rows)
+	}
+	if found.Success < 2 || found.Failed < 1 {
+		t.Fatalf("LoginsByDay[%s] = %+v, want at least Success=2 Failed=1", targetLabel, found)
+	}
+}
+
+func TestRepository_FailuresByTenant_CountsPerTenant(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	ctx := context.Background()
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	loc := time.UTC
+	rng := stats.ResolveRange(7, loc, time.Now())
+
+	insertAuthEvent(t, pool, client.ID, "login", "success", "", time.Now())
+	insertAuthEvent(t, pool, client.ID, "login", "bad_credentials", "", time.Now())
+	insertAuthEvent(t, pool, client.ID, "login", "bad_credentials", "", time.Now())
+
+	// Same large-limit reasoning as TestRepository_UsersPerTenant_TiesBreakByNameThenID
+	// — the shared test database has far more than maxTenants tenants by now.
+	rows, err := repo.FailuresByTenant(ctx, rng, 1_000_000)
+	if err != nil {
+		t.Fatalf("FailuresByTenant: %v", err)
+	}
+	var found *stats.TenantLoginCount
+	for i := range rows {
+		if rows[i].APIClientID == client.ID {
+			found = &rows[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no FailuresByTenant row for tenant %s", client.ID)
+	}
+	if found.Success != 1 || found.Failed != 2 {
+		t.Fatalf("FailuresByTenant[%s] = %+v, want Success=1 Failed=2", client.ID, found)
+	}
+}
+
+func TestRepository_TopFailingIPs_OrderedByFailedDesc(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	ctx := context.Background()
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	loc := time.UTC
+	rng := stats.ResolveRange(7, loc, time.Now())
+
+	// A unique, unroutable test IP (TEST-NET-1, RFC 5737) per test run so
+	// this doesn't collide with a leftover row from a previous run — the
+	// last octet is UniqueSuffix's first byte, parsed as hex into 0-255
+	// (UniqueSuffix itself is hex text, not valid as a decimal octet
+	// as-is).
+	lastOctet, err := strconv.ParseUint(testutil.UniqueSuffix(t)[:2], 16, 8)
+	if err != nil {
+		t.Fatalf("parsing unique suffix as hex: %v", err)
+	}
+	ip := fmt.Sprintf("203.0.113.%d", lastOctet)
+	insertAuthEvent(t, pool, client.ID, "login", "bad_credentials", ip, time.Now())
+	insertAuthEvent(t, pool, client.ID, "login", "bad_credentials", ip, time.Now())
+	insertAuthEvent(t, pool, client.ID, "login", "success", ip, time.Now()) // must not count toward Failed
+
+	rows, err := repo.TopFailingIPs(ctx, rng, 1_000_000)
+	if err != nil {
+		t.Fatalf("TopFailingIPs: %v", err)
+	}
+	var found *stats.IPFailureCount
+	for i := range rows {
+		if rows[i].IP == ip {
+			found = &rows[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no TopFailingIPs row for %s in %d rows", ip, len(rows))
+	}
+	if found.Failed != 2 {
+		t.Fatalf("TopFailingIPs[%s].Failed = %d, want 2", ip, found.Failed)
+	}
+	if found.LastAt.IsZero() {
+		t.Fatalf("TopFailingIPs[%s].LastAt is zero, want the last failed attempt's time", ip)
+	}
+}
+
+func TestRepository_BansByDay_CountsIPBanEvents(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	ctx := context.Background()
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	loc := time.UTC
+	now := time.Now().In(loc)
+	targetDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -1)
+	targetLabel := targetDay.Format("2006-01-02")
+	rng := stats.ResolveRange(7, loc, now)
+
+	insertAuthEvent(t, pool, client.ID, "ip_ban", "banned", "203.0.113.9", targetDay.Add(time.Hour))
+	insertAuthEvent(t, pool, client.ID, "ip_unban", "unbanned", "203.0.113.9", targetDay.Add(2*time.Hour)) // must not count
+
+	rows, err := repo.BansByDay(ctx, rng)
+	if err != nil {
+		t.Fatalf("BansByDay: %v", err)
+	}
+	var found *stats.DayCount
+	for i := range rows {
+		if rows[i].Day == targetLabel {
+			found = &rows[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("no BansByDay row for %s in %+v", targetLabel, rows)
+	}
+	if found.Count < 1 {
+		t.Fatalf("BansByDay[%s].Count = %d, want at least 1", targetLabel, found.Count)
+	}
+}
+
+// Overview must always include tanda-2 blocks, for a regular admin too —
+// unlike OperatorActionsPerDay/OperatorActionsByType, these are never
+// gated behind includeOperatorStats.
+func TestService_Overview_AlwaysIncludesLoginStatsRegardlessOfRole(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	svc := stats.NewService(stats.NewRepository(pool))
+	ctx := context.Background()
+	rng := stats.ResolveRange(7, time.UTC, time.Now())
+
+	overview, err := svc.Overview(ctx, "7d", rng, false, nil)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(overview.LoginsByDay) != 7 {
+		t.Fatalf("len(LoginsByDay) = %d, want 7 (zero-filled) even with includeOperatorStats=false", len(overview.LoginsByDay))
+	}
+	if len(overview.BansByDay) != 7 {
+		t.Fatalf("len(BansByDay) = %d, want 7 (zero-filled) even with includeOperatorStats=false", len(overview.BansByDay))
+	}
+	if overview.FailuresByTenant == nil {
+		t.Fatal("FailuresByTenant = nil, want non-nil (even if empty)")
+	}
+	if overview.TopFailingIPs == nil {
+		t.Fatal("TopFailingIPs = nil, want non-nil (even if empty)")
 	}
 }

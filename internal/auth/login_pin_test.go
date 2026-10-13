@@ -40,7 +40,7 @@ func newTestServiceWithLoginPin(t *testing.T, pinMaxFailedTries int, pinLockDura
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 	loginPin := auth.NewPinLoginStore(rdb, time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil, nil, "", loginPin)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil, nil, "", loginPin, nil, nil)
 	return svc, tokens, mailer, client.ID
 }
 
@@ -62,7 +62,7 @@ func TestLoginPinStep_FullFlow(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestLoginPinStep_FullFlow(t *testing.T) {
 	}
 	code := testutil.ExtractOTPCode(sent.Body)
 
-	result, err := svc.LoginStep2(t.Context(), loginToken, code)
+	result, err := svc.LoginStep2(t.Context(), loginToken, code, nil)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestLoginPinStep_FullFlow(t *testing.T) {
 		t.Fatal("LoginStep2: PinToken is empty")
 	}
 
-	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false)
+	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false, nil)
 	if err != nil {
 		t.Fatalf("LoginPinStep: %v", err)
 	}
@@ -116,14 +116,14 @@ func TestLoginPinStep_CreatesPinWhenNotSet(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	sent, _ := mailer.Last()
 	code := testutil.ExtractOTPCode(sent.Body)
 
-	result, err := svc.LoginStep2(t.Context(), loginToken, code)
+	result, err := svc.LoginStep2(t.Context(), loginToken, code, nil)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestLoginPinStep_CreatesPinWhenNotSet(t *testing.T) {
 		t.Fatal("LoginStep2: PinSet = true, want false (the account has no pin yet)")
 	}
 
-	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "654321", true)
+	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "654321", true, nil)
 	if err != nil {
 		t.Fatalf("LoginPinStep with create=true: %v", err)
 	}
@@ -144,20 +144,20 @@ func TestLoginPinStep_CreatesPinWhenNotSet(t *testing.T) {
 
 	// The PIN really was created — a second login now requires IT, not a
 	// fresh create.
-	loginToken2, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken2, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("second LoginStep1: %v", err)
 	}
 	sent2, _ := mailer.Last()
 	code2 := testutil.ExtractOTPCode(sent2.Body)
-	result2, err := svc.LoginStep2(t.Context(), loginToken2, code2)
+	result2, err := svc.LoginStep2(t.Context(), loginToken2, code2, nil)
 	if err != nil {
 		t.Fatalf("second LoginStep2: %v", err)
 	}
 	if !result2.PinSet {
 		t.Fatal("second LoginStep2: PinSet = false, want true (the pin was created by the previous step)")
 	}
-	if _, err := svc.LoginPinStep(t.Context(), result2.PinToken, "654321", false); err != nil {
+	if _, err := svc.LoginPinStep(t.Context(), result2.PinToken, "654321", false, nil); err != nil {
 		t.Fatalf("second LoginPinStep with the newly created pin: %v", err)
 	}
 }
@@ -181,29 +181,29 @@ func TestLoginPinStep_WrongPinLocksOut(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	sent, _ := mailer.Last()
 	code := testutil.ExtractOTPCode(sent.Body)
-	result, err := svc.LoginStep2(t.Context(), loginToken, code)
+	result, err := svc.LoginStep2(t.Context(), loginToken, code, nil)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
 
-	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "000000", false); !errors.As(err, new(*user.PinInvalidError)) {
+	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "000000", false, nil); !errors.As(err, new(*user.PinInvalidError)) {
 		t.Fatalf("1st wrong pin: err = %v, want a *user.PinInvalidError", err)
 	}
 
 	var locked *user.PinLockedError
-	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "000000", false); !errors.As(err, &locked) {
+	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "000000", false, nil); !errors.As(err, &locked) {
 		t.Fatalf("2nd wrong pin (crosses threshold): err = %v, want a *user.PinLockedError", err)
 	}
 
 	// Still locked — even the correct PIN, with the SAME pin_token, is
 	// refused, proving the token itself was never consumed by the failures.
-	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false); !errors.As(err, new(*user.PinLockedError)) {
+	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false, nil); !errors.As(err, new(*user.PinLockedError)) {
 		t.Fatalf("correct pin while locked: err = %v, want a *user.PinLockedError", err)
 	}
 }
@@ -224,26 +224,26 @@ func TestLoginPinStep_ReusedOrExpiredToken(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	if _, err := svc.LoginPinStep(t.Context(), "does-not-exist", "123456", false); err != auth.ErrLoginSessionNotFound {
+	if _, err := svc.LoginPinStep(t.Context(), "does-not-exist", "123456", false, nil); err != auth.ErrLoginSessionNotFound {
 		t.Fatalf("unknown pin_token: err = %v, want %v", err, auth.ErrLoginSessionNotFound)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	sent, _ := mailer.Last()
 	code := testutil.ExtractOTPCode(sent.Body)
-	result, err := svc.LoginStep2(t.Context(), loginToken, code)
+	result, err := svc.LoginStep2(t.Context(), loginToken, code, nil)
 	if err != nil {
 		t.Fatalf("LoginStep2: %v", err)
 	}
 
-	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false); err != nil {
+	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false, nil); err != nil {
 		t.Fatalf("LoginPinStep: %v", err)
 	}
 	// Reused — the session was consumed by the call above.
-	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false); err != auth.ErrLoginSessionNotFound {
+	if _, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false, nil); err != auth.ErrLoginSessionNotFound {
 		t.Fatalf("reused pin_token: err = %v, want %v", err, auth.ErrLoginSessionNotFound)
 	}
 }
@@ -270,11 +270,11 @@ func TestVerifyTOTPLogin_RequiresPinStep(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
-	result, err := svc.LoginStep2(t.Context(), loginToken, totpCodeFromOTPAuthURL(t, otpauthURL))
+	result, err := svc.LoginStep2(t.Context(), loginToken, totpCodeFromOTPAuthURL(t, otpauthURL), nil)
 	if err != nil {
 		t.Fatalf("LoginStep2 with a TOTP code: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestVerifyTOTPLogin_RequiresPinStep(t *testing.T) {
 		t.Fatalf("LoginStep2 (TOTP path): PinRequired = %v, AccessToken = %q, want PinRequired=true and no tokens", result.PinRequired, result.AccessToken)
 	}
 
-	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false)
+	final, err := svc.LoginPinStep(t.Context(), result.PinToken, "123456", false, nil)
 	if err != nil {
 		t.Fatalf("LoginPinStep: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestDeviceLogin_RequiresFullLoginWhenPinRequired(t *testing.T) {
 
 	// Works before the switch is on — the baseline this test's real
 	// assertion (right below) is contrasted against.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != nil {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); err != nil {
 		t.Fatalf("DeviceLogin before PinRequiredAtLogin: %v", err)
 	}
 	// DeviceLogin rotates the token on every call — re-register fresh so the
@@ -324,7 +324,7 @@ func TestDeviceLogin_RequiresFullLoginWhenPinRequired(t *testing.T) {
 		t.Fatalf("AdminSetLoginPinRequired: %v", err)
 	}
 
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != auth.ErrLoginPinStepRequired {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); err != auth.ErrLoginPinStepRequired {
 		t.Fatalf("DeviceLogin with PinRequiredAtLogin set: err = %v, want %v", err, auth.ErrLoginPinStepRequired)
 	}
 }

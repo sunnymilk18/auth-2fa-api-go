@@ -18,6 +18,7 @@ import (
 	"auth-2fa-api/internal/apiclient"
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/stats"
 	"auth-2fa-api/internal/user"
@@ -58,7 +59,7 @@ import (
 // wildcard, no-credentials CORS they always had — see config.Config.
 // AdminPanelOrigin's doc comment. adminSessionCrossSite/adminSessionTTL
 // configure the panel session cookie — see config.Config's own fields.
-func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, adminAccounts *adminauth.Service, adminPanelOrigin string, adminSessionCrossSite bool, adminSessionTTL time.Duration, auditSvc *audit.Service, logger *slog.Logger) http.Handler {
+func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.TokenManager, accessRevocation *auth.AccessRevocationStore, users *user.Service, pgPool *pgxpool.Pool, rdb *redis.Client, apiClients *apiclient.Service, meter metric.Meter, adminToken string, totpEnabled bool, pushEnabled bool, trustedProxyCIDRs []string, banReferenceSecret []byte, adminAccounts *adminauth.Service, adminPanelOrigin string, adminSessionCrossSite bool, adminSessionTTL time.Duration, auditSvc *audit.Service, authEventsSvc *authevents.Service, logger *slog.Logger) http.Handler {
 	r := chi.NewRouter()
 
 	// Any origin, no credentials: this is a header/token API (X-API-Key,
@@ -108,9 +109,10 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		[]time.Duration{24 * time.Hour, 72 * time.Hour, 7 * 24 * time.Hour},
 		30*24*time.Hour,
 		banReferenceSecret,
+		authEventsSvc,
 	)
 	r.Use(blacklist.Middleware)
-	blHandlers := &blacklistHandlers{bl: blacklist, apiClients: apiClients, audit: auditSvc, logger: logger}
+	blHandlers := &blacklistHandlers{bl: blacklist, apiClients: apiClients, audit: auditSvc, authEvents: authEventsSvc, logger: logger}
 
 	// Actually checks both dependencies rather than always claiming "ok" —
 	// an orchestrator (k8s liveness/readiness, a load balancer's health
@@ -465,15 +467,15 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 			r.Post("/{id}/clear-lockouts", adminUserHandlers.ClearLockouts)
 		})
 
-		// Read-only numbers for the panel's dashboard, computed from data
-		// that already exists (no new tables — see internal/stats' own
-		// doc comment). Same access level as GET /admin/users right above
-		// (any admin or superadmin, no PIN — nothing here mutates
-		// anything): OperatorActionsPerDay/OperatorActionsByType inside
-		// the response are the only superadmin-only part, gated inside
-		// statsHandlers.Overview itself rather than by a route-level
-		// RequireSuperAdmin, since the rest of the response is still
-		// meant for a regular admin too.
+		// Read-only numbers for the panel's dashboard (users, operator
+		// activity, and end-user auth activity — see internal/stats' own
+		// doc comment for the tables each block reads from). Same access
+		// level as GET /admin/users right above (any admin or superadmin,
+		// no PIN — nothing here mutates anything): OperatorActionsPerDay/
+		// OperatorActionsByType inside the response are the only
+		// superadmin-only part, gated inside statsHandlers.Overview itself
+		// rather than by a route-level RequireSuperAdmin, since the rest
+		// of the response is still meant for a regular admin too.
 		sHandlers := &statsHandlers{svc: stats.NewService(stats.NewRepository(pgPool))}
 		adminRouter.Route("/stats", func(r chi.Router) {
 			r.Use(adminAccess)

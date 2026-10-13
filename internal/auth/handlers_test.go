@@ -236,7 +236,7 @@ func TestHandler_Login_BlockedUntilEmailVerified(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	// Register only — not mustRegister, which also confirms the email.
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t), nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	_, _ = mailer.Last() // drain the verification email, not asserted on here
@@ -255,7 +255,7 @@ func TestHandler_Login_BlockedUntilEmailVerified(t *testing.T) {
 func TestHandler_ConfirmEmailVerification_FullFlow(t *testing.T) {
 	h, svc, _, mailer, apiClientID := newTestHandlers(t)
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
-	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t)); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, "correcthorsebattery", "user-"+testutil.UniqueSuffix(t), testutil.UniqueRUT(t), nil); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	sent, ok := mailer.Last()
@@ -529,7 +529,7 @@ func TestHandler_VerifyOTP_Success(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestHandler_DeviceLogin_And_List_And_Revoke(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -1115,7 +1115,7 @@ func verifyPin(t *testing.T, h *auth.Handlers, userID, email, pin string) *httpt
 func mustRegisterAndLogin(t *testing.T, svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID, email, password string) string {
 	t.Helper()
 	mustRegister(t, svc, mailer, apiClientID, email, password)
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password, nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}

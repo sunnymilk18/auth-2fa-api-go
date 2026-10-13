@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 
 	"auth-2fa-api/internal/apiclient"
+	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/mailer"
 	"auth-2fa-api/internal/push"
@@ -103,6 +106,16 @@ type Service struct {
 	// guards with a nil check); a real deployment (cmd/api/main.go) always
 	// sets it, unlike totp/push, which are genuinely optional features.
 	accessRevocation *AccessRevocationStore
+
+	// authEvents records every end-user authentication attempt — nilable
+	// the same way accessRevocation is: every call site below guards with
+	// authEvents.Log's own nil-safety (see authevents.Service.Log's doc
+	// comment), so a test that doesn't care about this can leave it nil.
+	authEvents *authevents.Service
+	// trustedProxyPrefixes backs clientIP — see clientip.go's own doc
+	// comment for why this is parsed here rather than imported from
+	// internal/middleware.
+	trustedProxyPrefixes []netip.Prefix
 }
 
 func NewService(
@@ -132,6 +145,8 @@ func NewService(
 	apiClients *apiclient.Service,
 	panelBaseURL string,
 	loginPin *PinLoginStore,
+	authEvents *authevents.Service,
+	trustedProxyCIDRs []string,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -163,7 +178,28 @@ func NewService(
 		apiClients:           apiClients,
 		panelBaseURL:         panelBaseURL,
 		loginPin:             loginPin,
+		authEvents:           authEvents,
+		trustedProxyPrefixes: parseTrustedProxyCIDRs(trustedProxyCIDRs),
 	}
+}
+
+// clientIP resolves r's real client IP for an auth_events entry — see
+// clientip.go's own doc comment for the full trusted-proxy reasoning.
+func (s *Service) clientIP(r *http.Request) string {
+	return authevents.ParseIP(clientIP(r, s.trustedProxyPrefixes))
+}
+
+// logAuthEvent is a thin wrapper around authEvents.Log that fills IP/
+// UserAgent from r — every call site below uses this instead of calling
+// authEvents.Log directly, so the IP resolution and user-agent truncation
+// only need to be written once.
+func (s *Service) logAuthEvent(ctx context.Context, r *http.Request, apiClientID string, e authevents.Entry) {
+	e.APIClientID = apiClientID
+	if r != nil {
+		e.IP = s.clientIP(r)
+		e.UserAgent = authevents.TruncateUserAgent(r.UserAgent())
+	}
+	s.authEvents.Log(ctx, e)
 }
 
 // markAccessTokensRevoked is a nil-safe passthrough to
@@ -202,17 +238,52 @@ var ErrEmailSendFailed = errors.New("sending email failed")
 // stranger's real email without their consent, and every login attempt
 // against that account would keep emailing OTP codes to an inbox that
 // person never agreed to receive them in.
-func (s *Service) Register(ctx context.Context, apiClientID, email, password, username, rut string) (*user.User, error) {
+func (s *Service) Register(ctx context.Context, apiClientID, email, password, username, rut string, r *http.Request) (*user.User, error) {
 	u, err := s.users.Register(ctx, apiClientID, email, password, username, rut)
 	if err != nil {
+		// No enumeration concern here, unlike login/password-reset —
+		// registration itself already reveals existence on purpose (see
+		// this method's own doc comment), so the EmailHash/plain-"error"
+		// split those paths need doesn't apply: the real register error
+		// is recorded as-is.
+		s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindRegister, Result: registerErrorResult(err)})
 		return nil, err
 	}
+
+	// Logged right here, not after sendVerificationEmail — the account
+	// already exists in the database at this point (see this method's own
+	// doc comment), so "register" succeeded regardless of whether the
+	// confirmation email itself goes out. Logging only after a successful
+	// send would silently lose this event entirely for a real,
+	// successfully-created account whenever the mail provider has a
+	// hiccup, which is exactly the kind of gap auth_events exists to not
+	// have — the row count should stay exhaustive.
+	s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindRegister, Result: authevents.ResultSuccess, UserID: u.ID})
 
 	if err := s.sendVerificationEmail(ctx, u); err != nil {
 		return nil, err
 	}
 
 	return u, nil
+}
+
+// registerErrorResult maps user.Service.Register's error values to the
+// authevents.Result* Register logs as.
+func registerErrorResult(err error) string {
+	var usernameTaken *user.UsernameTakenError
+	switch {
+	case errors.Is(err, user.ErrEmailTaken):
+		return authevents.ResultEmailTaken
+	case errors.Is(err, user.ErrRUTTaken):
+		return authevents.ResultRUTTaken
+	case errors.As(err, &usernameTaken):
+		return authevents.ResultUsernameTaken
+	case errors.Is(err, user.ErrInvalidUsername), errors.Is(err, user.ErrInvalidRUT),
+		errors.Is(err, user.ErrInvalidEmail), errors.Is(err, user.ErrInvalidPassword):
+		return authevents.ResultInvalidInput
+	default:
+		return authevents.ResultError
+	}
 }
 
 func (s *Service) sendVerificationEmail(ctx context.Context, u *user.User) error {
@@ -320,10 +391,31 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 // accounts aren't affected by this either way — that code was never
 // server-sent to begin with, it comes from the account's own authenticator
 // app.
-func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string) (loginToken string, needsSetup bool, pushOffered bool, method string, err error) {
+func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string, r *http.Request) (loginToken string, needsSetup bool, pushOffered bool, method string, err error) {
 	lockoutKey := identifier
+	var resolvedID string
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
 		lockoutKey = resolved.ID
+		resolvedID = resolved.ID
+	}
+
+	// logFailure records a failed login attempt — never a success: an
+	// account whose password just checked out but is still waiting on a
+	// second factor hasn't actually logged in yet (see finishLogin's own
+	// doc comment on why ResultSuccess is only ever written there). Only
+	// one of UserID/EmailHash is ever set: UserID when identifier resolved
+	// to a real account (even for ResultBadCredentials — see
+	// authevents.ResultBadCredentials' own doc comment for why that's safe
+	// despite the HTTP response staying generic), EmailHash (hashed,
+	// never the raw identifier) when it didn't.
+	logFailure := func(result string) {
+		entry := authevents.Entry{Kind: authevents.KindLogin, Method: authevents.MethodPassword, Result: result}
+		if resolvedID != "" {
+			entry.UserID = resolvedID
+		} else if hash, ok := s.authEvents.HashEmail(identifier); ok {
+			entry.EmailHash = hash
+		}
+		s.logAuthEvent(ctx, r, apiClientID, entry)
 	}
 
 	locked, retryAfter, err := s.loginAttempts.IsLocked(ctx, apiClientID, lockoutKey)
@@ -331,6 +423,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 		return "", false, false, "", err
 	}
 	if locked {
+		logFailure(authevents.ResultLockedOut)
 		return "", false, false, "", &LockedOutError{RetryAfter: retryAfter}
 	}
 
@@ -340,6 +433,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 			// Best-effort: a Redis hiccup here shouldn't turn a legitimate
 			// wrong-password response into a 500.
 			_ = s.loginAttempts.RecordFailure(ctx, apiClientID, lockoutKey)
+			logFailure(authevents.ResultBadCredentials)
 		}
 		return "", false, false, "", err
 	}
@@ -356,6 +450,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	// otherwise logs in exactly as normal, emailing that real owner an OTP
 	// code on every attempt they never asked for.
 	if !u.EmailVerified {
+		logFailure(authevents.ResultEmailNotVerified)
 		return "", false, false, "", ErrEmailNotVerified
 	}
 
@@ -454,22 +549,41 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 // either way; which verification path applies is decided here, by which
 // store recognizes loginToken (see LoginStep1), not by anything the client
 // has to specify.
-func (s *Service) LoginStep2(ctx context.Context, loginToken, code string) (LoginResult, error) {
+func (s *Service) LoginStep2(ctx context.Context, loginToken, code string, r *http.Request) (LoginResult, error) {
 	if s.totpLogin != nil {
 		sess, found, err := s.totpLogin.Peek(ctx, loginToken)
 		if err != nil {
 			return LoginResult{}, err
 		}
 		if found {
-			return s.verifyTOTPLogin(ctx, loginToken, sess, code)
+			return s.verifyTOTPLogin(ctx, loginToken, sess, code, r)
 		}
 	}
 
 	userID, apiClientID, email, err := s.otp.VerifyCode(ctx, loginToken, code)
 	if err != nil {
+		s.logAuthEvent(ctx, r, "", authevents.Entry{Kind: authevents.KindLogin, Method: authevents.MethodEmailCode, Result: loginStep2ErrorResult(err)})
 		return LoginResult{}, err
 	}
-	return s.finishLogin(ctx, userID, apiClientID, email)
+	return s.finishLogin(ctx, userID, apiClientID, email, authevents.MethodEmailCode, r)
+}
+
+// loginStep2ErrorResult maps an email-OTP verification error to the
+// authevents.Result* it logs as — shared result values with
+// password_reset_confirm (ResultInvalidCode) and locked_out-style limits
+// (ResultTooManyAttempts) where the underlying meaning is the same, rather
+// than inventing a parallel set of near-identical names.
+func loginStep2ErrorResult(err error) string {
+	switch {
+	case errors.Is(err, ErrTooManyAttempts):
+		return authevents.ResultTooManyAttempts
+	case errors.Is(err, ErrLoginSessionNotFound):
+		return authevents.ResultSessionExpired
+	case errors.Is(err, ErrInvalidCode):
+		return authevents.ResultInvalidCode
+	default:
+		return authevents.ResultError
+	}
 }
 
 // ResendLoginOTP re-issues a fresh code under the same login_token for a
@@ -557,7 +671,7 @@ type LoginResult struct {
 // LoginResult's doc comment for the two shapes this can resolve to. Reads
 // the account fresh (never from a cached pendingLoginSession, which never
 // carries PinRequiredAtLogin) specifically to make this decision.
-func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email string) (LoginResult, error) {
+func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email, method string, r *http.Request) (LoginResult, error) {
 	u, err := s.users.FindByID(ctx, userID)
 	if err != nil {
 		return LoginResult{}, err
@@ -571,6 +685,10 @@ func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email st
 		if err != nil {
 			return LoginResult{}, err
 		}
+		// Deliberately NOT a success event — a login that still needs the
+		// PIN step hasn't completed yet (see LoginPinStep's own success
+		// logging, which is where ResultSuccess for this account actually
+		// gets written).
 		return LoginResult{PinRequired: true, PinToken: pinToken, PinSet: hasPin}, nil
 	}
 
@@ -578,6 +696,7 @@ func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email st
 	if err != nil {
 		return LoginResult{}, err
 	}
+	s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindLogin, Method: method, Result: authevents.ResultSuccess, UserID: userID})
 	return LoginResult{AccessToken: accessToken, RefreshToken: refreshToken}, nil
 }
 
@@ -598,7 +717,7 @@ func (s *Service) finishLogin(ctx context.Context, userID, apiClientID, email st
 // every other PIN creation. Passing create: true for an account that
 // already has a PIN just verifies against it instead, same dual-meaning
 // reuse EnsurePin already has.
-func (s *Service) LoginPinStep(ctx context.Context, pinToken, pin string, create bool) (LoginResult, error) {
+func (s *Service) LoginPinStep(ctx context.Context, pinToken, pin string, create bool, r *http.Request) (LoginResult, error) {
 	sess, found, err := s.loginPin.Peek(ctx, pinToken)
 	if err != nil {
 		return LoginResult{}, err
@@ -615,6 +734,9 @@ func (s *Service) LoginPinStep(ctx context.Context, pinToken, pin string, create
 	}
 	if pinErr != nil {
 		s.logger.Warn("login pin step failed", "user_id", sess.UserID, "error", pinErr)
+		s.logAuthEvent(ctx, r, sess.APIClientID, authevents.Entry{
+			Kind: authevents.KindLogin, Method: authevents.MethodDevicePin, Result: authevents.ResultBadPin, UserID: sess.UserID,
+		})
 		return LoginResult{}, pinErr
 	}
 
@@ -626,6 +748,9 @@ func (s *Service) LoginPinStep(ctx context.Context, pinToken, pin string, create
 		return LoginResult{}, err
 	}
 	s.logger.Info("login pin step succeeded", "user_id", sess.UserID)
+	s.logAuthEvent(ctx, r, sess.APIClientID, authevents.Entry{
+		Kind: authevents.KindLogin, Method: authevents.MethodDevicePin, Result: authevents.ResultSuccess, UserID: sess.UserID,
+	})
 	return LoginResult{AccessToken: accessToken, RefreshToken: refreshToken}, nil
 }
 
@@ -789,10 +914,23 @@ func (s *Service) Logout(ctx context.Context, refreshToken string) error {
 // whether the account exists — same reasoning as VerifyPassword returning
 // one error for both "no such user" and "wrong password": the response
 // must not leak which emails are registered.
-func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email string) error {
+func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email string, r *http.Request) error {
 	u, err := s.users.FindByEmail(ctx, apiClientID, email)
 	if err != nil {
 		if errors.Is(err, user.ErrNotFound) {
+			// Logged with EmailHash, never the raw address — the HTTP
+			// response stays identical to the found case either way (see
+			// this method's own doc comment), only the audit trail is
+			// more honest. No extra work done on this branch beyond the
+			// lookup that already happened (same StartReset/mailer.Send
+			// skip as before this field existed) — an authEvents write is
+			// the same cost on both branches, so it doesn't widen the
+			// existing timing gap between them.
+			entry := authevents.Entry{Kind: authevents.KindPasswordResetRequest, Result: authevents.ResultAccountNotFound}
+			if hash, ok := s.authEvents.HashEmail(email); ok {
+				entry.EmailHash = hash
+			}
+			s.logAuthEvent(ctx, r, apiClientID, entry)
 			return nil
 		}
 		return err
@@ -816,8 +954,16 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 		code, how, humanDuration(s.passwordResetTTL),
 	)
 	if err := s.mailer.Send(ctx, u.Email, "Restablece tu contraseña", body); err != nil {
+		// Still logged — the account was found and a code was generated
+		// (StartReset above already succeeded), only the email delivery
+		// itself failed. Leaving this attempt out of auth_events entirely
+		// would be exactly the kind of silent gap the "row count stays
+		// exhaustive" reasoning (see authevents.ResultError's own doc
+		// comment) exists to avoid.
+		s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindPasswordResetRequest, Result: authevents.ResultError, UserID: u.ID})
 		return fmt.Errorf("sending password reset email: %w", err)
 	}
+	s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindPasswordResetRequest, Result: authevents.ResultCodeSent, UserID: u.ID})
 	return nil
 }
 
@@ -837,7 +983,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 // afterward (as user.Service.UpdatePassword itself also does, as a
 // backstop) would burn a legitimate reset attempt on a too-short password
 // and force requesting a whole new code just for that.
-func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, newPassword string) error {
+func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, newPassword string, r *http.Request) error {
 	if !user.ValidatePassword(newPassword) {
 		return user.ErrInvalidPassword
 	}
@@ -849,6 +995,20 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 	email = user.NormalizeEmail(email)
 	userID, err := s.passwordReset.ConsumeCode(ctx, apiClientID, email, code)
 	if err != nil {
+		result := authevents.ResultError
+		switch {
+		case errors.Is(err, ErrPasswordResetNotFound):
+			result = authevents.ResultNotFound
+		case errors.Is(err, ErrPasswordResetInvalidCode):
+			result = authevents.ResultInvalidCode
+		case errors.Is(err, ErrPasswordResetTooManyTries):
+			result = authevents.ResultTooManyTries
+		}
+		entry := authevents.Entry{Kind: authevents.KindPasswordResetConfirm, Result: result}
+		if hash, ok := s.authEvents.HashEmail(email); ok {
+			entry.EmailHash = hash
+		}
+		s.logAuthEvent(ctx, r, apiClientID, entry)
 		return err
 	}
 	if err := s.users.UpdatePassword(ctx, userID, newPassword); err != nil {
@@ -860,6 +1020,7 @@ func (s *Service) ResetPassword(ctx context.Context, apiClientID, email, code, n
 	if err := s.devices.RevokeAllForUser(ctx, userID); err != nil {
 		return err
 	}
+	s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindPasswordResetConfirm, Result: authevents.ResultSuccess, UserID: userID})
 	return s.markAccessTokensRevoked(ctx, userID)
 }
 
@@ -1009,13 +1170,27 @@ func (s *Service) RegisterDevice(ctx context.Context, userID, deviceID, deviceNa
 // device — it counts against the account's shared PIN lockout instead (see
 // user.Service.VerifyPin), since the PIN is the account's now, not this
 // device's alone.
-func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin string) (accessToken, refreshToken, newDeviceToken string, err error) {
+func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin string, r *http.Request) (accessToken, refreshToken, newDeviceToken string, err error) {
+	logFailure := func(apiClientID, userID, result string) {
+		s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{
+			Kind: authevents.KindLogin, Method: authevents.MethodDeviceTrusted, Result: result, UserID: userID,
+		})
+	}
+
 	d, err := s.devices.VerifyToken(ctx, deviceID, deviceToken)
 	if err != nil {
+		// No api_client_id/user_id resolvable yet — an unrecognized or
+		// expired device_token doesn't identify an account at all, unlike
+		// every other DeviceLogin failure below.
+		logFailure("", "", authevents.ResultBadDeviceToken)
 		return "", "", "", err
 	}
 
 	if err := s.users.VerifyPin(ctx, d.UserID, pin); err != nil {
+		// device.Device carries no api_client_id of its own (it's keyed
+		// off UserID only) — left "" here rather than an extra lookup
+		// just for this event's attribution.
+		logFailure("", d.UserID, authevents.ResultBadPin)
 		return "", "", "", err
 	}
 
@@ -1029,6 +1204,7 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 		return "", "", "", err
 	}
 	if !u.IsActive {
+		logFailure(u.APIClientID, u.ID, authevents.ResultAccountBanned)
 		return "", "", "", ErrAccountBanned
 	}
 	// The trusted-device shortcut replaces password+second-factor entirely
@@ -1039,6 +1215,7 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 	// client has to fall back to the regular /auth/login flow, which does
 	// enforce the step (see LoginResult).
 	if u.PinRequiredAtLogin {
+		logFailure(u.APIClientID, u.ID, authevents.ResultPinStepRequired)
 		return "", "", "", ErrLoginPinStepRequired
 	}
 
@@ -1046,6 +1223,9 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 	if err != nil {
 		return "", "", "", err
 	}
+	s.logAuthEvent(ctx, r, u.APIClientID, authevents.Entry{
+		Kind: authevents.KindLogin, Method: authevents.MethodDeviceTrusted, Result: authevents.ResultSuccess, UserID: u.ID,
+	})
 	return accessToken, refreshToken, newDeviceToken, nil
 }
 

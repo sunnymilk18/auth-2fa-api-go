@@ -52,7 +52,7 @@ func newTestService(t *testing.T) (svc *auth.Service, tokens *auth.TokenManager,
 	// account, which is exactly the condition that flips LoginStep1's
 	// behavior. See newTestServiceWithChoice for the few tests that
 	// actually exercise this flow.
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, changeEmail, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil, nil, "", nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, changeEmail, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, nil, nil, nil, nil, nil, nil, nil, "", nil, nil, nil)
 	return svc, tokens, mailer, client.ID
 }
 
@@ -84,7 +84,7 @@ func newTestServiceWithChoice(t *testing.T) (svc *auth.Service, tokens *auth.Tok
 	totpLogin := auth.NewTOTPLoginStore(rdb, 5*time.Minute)
 	twoFactorSetup := auth.NewTwoFactorSetupStore(rdb, 5*time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, nil, nil, nil, "", nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, totpManager, totpLogin, twoFactorSetup, nil, nil, nil, nil, nil, nil, "", nil, nil, nil)
 	return svc, tokens, mailer, client.ID
 }
 
@@ -116,7 +116,7 @@ func mustRegisterWithUsername(t *testing.T, svc *auth.Service, mailer *testutil.
 // rut too — for tests asserting login by one of those identifiers.
 func mustRegisterFull(t *testing.T, svc *auth.Service, mailer *testutil.FakeMailer, apiClientID, email, password, username, rut string) {
 	t.Helper()
-	if _, err := svc.Register(t.Context(), apiClientID, email, password, username, rut); err != nil {
+	if _, err := svc.Register(t.Context(), apiClientID, email, password, username, rut, nil); err != nil {
 		t.Fatalf("Register(%q): %v", email, err)
 	}
 	sent, ok := mailer.Last()
@@ -137,7 +137,7 @@ func TestLoginFlow_PasswordPlusOTP(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestLoginStep1_WrongPassword(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 	sentBeforeLogin := len(mailer.Sent()) // mustRegister itself already sent a verification email
 
-	_, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong-password")
+	_, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong-password", nil)
 	if err != user.ErrInvalidCredentials {
 		t.Fatalf("LoginStep1 with wrong password: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
@@ -200,16 +200,16 @@ func TestLoginStep1_LocksOutAfterTooManyFailures(t *testing.T) {
 
 	// newTestService builds the limiter with maxFails=3.
 	for i := 1; i <= 2; i++ {
-		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong", nil); err != user.ErrInvalidCredentials {
 			t.Fatalf("wrong password attempt %d: err = %v, want %v", i, err, user.ErrInvalidCredentials)
 		}
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong", nil); err != user.ErrInvalidCredentials {
 		t.Fatalf("wrong password attempt 3: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
 
 	// Locked out now — even the CORRECT password is rejected.
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("correct password after lockout: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }
@@ -227,7 +227,7 @@ func TestLoginStep1_LockoutSharedAcrossIdentifiers(t *testing.T) {
 	// newTestService builds the limiter with maxFails=3. One failure each
 	// via email, username and rut — three total, the shared limit.
 	for _, identifier := range []string{email, username, rut} {
-		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, identifier, "wrong"); err != user.ErrInvalidCredentials {
+		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, identifier, "wrong", nil); err != user.ErrInvalidCredentials {
 			t.Fatalf("wrong password via %q: err = %v, want %v", identifier, err, user.ErrInvalidCredentials)
 		}
 	}
@@ -235,7 +235,7 @@ func TestLoginStep1_LockoutSharedAcrossIdentifiers(t *testing.T) {
 	// Locked out now, even via a fourth identifier (email again) with the
 	// CORRECT password — if this were still three separate counters, each
 	// would only be at 1 failure and none would be locked.
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("correct password after 3 failures spread across identifiers: err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }
@@ -249,11 +249,11 @@ func TestLoginStep1_LockoutAppliesEvenToUnknownAccounts(t *testing.T) {
 	email := "nobody-" + testutil.UniqueSuffix(t) + "@example.com"
 
 	for i := 1; i <= 3; i++ {
-		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); err != user.ErrInvalidCredentials {
+		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever", nil); err != user.ErrInvalidCredentials {
 			t.Fatalf("attempt %d against unknown account: err = %v, want %v", i, err, user.ErrInvalidCredentials)
 		}
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever"); !errors.Is(err, auth.ErrTooManyFailedLogins) {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "whatever", nil); !errors.Is(err, auth.ErrTooManyFailedLogins) {
 		t.Fatalf("err = %v, want %v", err, auth.ErrTooManyFailedLogins)
 	}
 }
@@ -264,10 +264,10 @@ func TestLoginStep1_SuccessResetsFailureCount(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong", nil); err != user.ErrInvalidCredentials {
 		t.Fatalf("wrong password attempt: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("correct password: unexpected error %v", err)
 	}
 	_, _ = mailer.Last() // drain, not asserted on here
@@ -275,11 +275,11 @@ func TestLoginStep1_SuccessResetsFailureCount(t *testing.T) {
 	// Two more wrong guesses shouldn't be attempt 2-and-3-of-3 against the
 	// pre-reset count — they're 1-and-2 of a fresh window.
 	for i := 1; i <= 2; i++ {
-		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong"); err != user.ErrInvalidCredentials {
+		if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "wrong", nil); err != user.ErrInvalidCredentials {
 			t.Fatalf("post-reset wrong attempt %d: err = %v, want %v", i, err, user.ErrInvalidCredentials)
 		}
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("correct password (should not be locked out yet): unexpected error %v", err)
 	}
 }
@@ -289,7 +289,7 @@ func TestLoginStep2_WrongCodeExhaustsAttempts(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -335,10 +335,10 @@ func TestMultiTenant_SameEmailDifferentClients(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientA, email, "passwordA123")
 	mustRegister(t, svc, mailer, clientB.ID, email, "passwordB456")
 
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientA, email, "passwordB456"); err != user.ErrInvalidCredentials {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientA, email, "passwordB456", nil); err != user.ErrInvalidCredentials {
 		t.Fatalf("tenant A login with tenant B's password: err = %v, want %v", err, user.ErrInvalidCredentials)
 	}
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientA, email, "passwordA123"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientA, email, "passwordA123", nil); err != nil {
 		t.Fatalf("tenant A login with its own password: unexpected error %v", err)
 	}
 }
@@ -348,7 +348,7 @@ func TestRefreshAndLogout(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestRefresh_BannedAccountIsRefused(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAdminBanUser_RevokesSessions(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestAdminRevokeAllSessions_ScopedToOwnTenant(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -566,7 +566,7 @@ func TestDeviceLoginFlow(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	// Full password+OTP login first, as the real flow requires.
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -590,12 +590,12 @@ func TestDeviceLoginFlow(t *testing.T) {
 	}
 
 	// Wrong PIN doesn't authenticate.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000", nil); !errors.As(err, new(*user.PinInvalidError)) {
 		t.Fatalf("DeviceLogin with wrong pin: err = %v, want a *user.PinInvalidError", err)
 	}
 
 	// Right device token + PIN logs in and rotates the device token.
-	newAccess, newRefresh, rotatedToken, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456")
+	newAccess, newRefresh, rotatedToken, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil)
 	if err != nil {
 		t.Fatalf("DeviceLogin: %v", err)
 	}
@@ -604,12 +604,12 @@ func TestDeviceLoginFlow(t *testing.T) {
 	}
 
 	// The old (pre-rotation) device token no longer works.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != device.ErrDeviceNotTrusted {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); err != device.ErrDeviceNotTrusted {
 		t.Fatalf("DeviceLogin with stale (rotated-out) device token: err = %v, want %v", err, device.ErrDeviceNotTrusted)
 	}
 
 	// The rotated token works.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, rotatedToken, "123456"); err != nil {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, rotatedToken, "123456", nil); err != nil {
 		t.Fatalf("DeviceLogin with rotated device token: unexpected error %v", err)
 	}
 }
@@ -634,12 +634,12 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer := testutil.NewFakeMailer()
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil, nil, nil)
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -667,7 +667,7 @@ func TestDeviceLogin_BannedAccountIsRefused(t *testing.T) {
 		t.Fatalf("Ban: %v", err)
 	}
 
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); err != auth.ErrAccountBanned {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); err != auth.ErrAccountBanned {
 		t.Fatalf("DeviceLogin for a banned account: err = %v, want %v", err, auth.ErrAccountBanned)
 	}
 
@@ -695,7 +695,7 @@ func TestDeviceLogin_TooManyFailedPinsLocksAccountPinButKeepsDeviceTrusted(t *te
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -718,16 +718,16 @@ func TestDeviceLogin_TooManyFailedPinsLocksAccountPinButKeepsDeviceTrusted(t *te
 
 	// newTestService's user.Service allows 5 failed PIN attempts before locking.
 	for i := 1; i <= 4; i++ {
-		if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinInvalidError)) {
+		if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000", nil); !errors.As(err, new(*user.PinInvalidError)) {
 			t.Fatalf("failed pin attempt %d: err = %v, want a *user.PinInvalidError", i, err)
 		}
 	}
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000"); !errors.As(err, new(*user.PinLockedError)) {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "000000", nil); !errors.As(err, new(*user.PinLockedError)) {
 		t.Fatalf("failed pin attempt 5: err = %v, want a *user.PinLockedError", err)
 	}
 	// Locked — even the correct PIN is rejected now, but as a *user.PinLockedError,
 	// not device.ErrDeviceNotTrusted: the device itself was never revoked.
-	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456"); !errors.As(err, new(*user.PinLockedError)) {
+	if _, _, _, err := svc.DeviceLogin(t.Context(), deviceID, deviceToken, "123456", nil); !errors.As(err, new(*user.PinLockedError)) {
 		t.Fatalf("correct pin while locked: err = %v, want a *user.PinLockedError", err)
 	}
 }
@@ -739,7 +739,7 @@ func TestDeviceLogin_TooManyFailedPinsLocksAccountPinButKeepsDeviceTrusted(t *te
 // LoginResult directly for a case none of them exercise.
 func loginStep2Tokens(t *testing.T, svc *auth.Service, loginToken, code string) (access, refresh string, err error) {
 	t.Helper()
-	result, err := svc.LoginStep2(t.Context(), loginToken, code)
+	result, err := svc.LoginStep2(t.Context(), loginToken, code, nil)
 	return result.AccessToken, result.RefreshToken, err
 }
 
@@ -747,7 +747,7 @@ func loginStep2Tokens(t *testing.T, svc *auth.Service, loginToken, code string) 
 // unwraps LoginResult — see loginStep2Tokens' doc comment.
 func confirmTOTPEnrollmentAndLoginTokens(t *testing.T, svc *auth.Service, loginToken, code string) (access, refresh string, err error) {
 	t.Helper()
-	result, err := svc.ConfirmTOTPEnrollmentAndLogin(t.Context(), loginToken, code)
+	result, err := svc.ConfirmTOTPEnrollmentAndLogin(t.Context(), loginToken, code, nil)
 	return result.AccessToken, result.RefreshToken, err
 }
 
@@ -760,7 +760,7 @@ func confirmTOTPEnrollmentAndLoginTokens(t *testing.T, svc *auth.Service, loginT
 // already-authenticated session).
 func mustLoginFull(t *testing.T, svc *auth.Service, tokens *auth.TokenManager, mailer *testutil.FakeMailer, apiClientID, email, password string) (userID, access, refresh string) {
 	t.Helper()
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password)
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, password, nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -818,7 +818,7 @@ func TestTOTPEnrollment_ThenLoginUsesTOTPInsteadOfEmail(t *testing.T) {
 	}
 
 	sentBefore := len(mailer.Sent())
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1 after enabling TOTP: %v", err)
 	}
@@ -859,7 +859,7 @@ func TestConfirmTOTPEnrollment_WrongCodeDoesNotEnable(t *testing.T) {
 
 	// Never confirmed — login must still go through the email path.
 	sentBefore := len(mailer.Sent())
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
 	if len(mailer.Sent()) != sentBefore+1 {
@@ -881,7 +881,7 @@ func TestLoginStep2_TOTP_WrongCodeExhaustsAttempts(t *testing.T) {
 		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
 	}
 
-	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -927,7 +927,7 @@ func TestDisableTOTP_LoginFallsBackToEmail(t *testing.T) {
 	}
 
 	sentBefore := len(mailer.Sent())
-	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery"); err != nil {
+	if _, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil); err != nil {
 		t.Fatalf("LoginStep1 after DisableTOTP: %v", err)
 	}
 	if len(mailer.Sent()) != sentBefore+1 {
@@ -954,7 +954,7 @@ func TestStartTOTPEnrollment_NotConfigured(t *testing.T) {
 	emailVerification := auth.NewEmailVerificationStore(rdb, 24*time.Hour, 3, 6)
 	loginAttempts := auth.NewLoginAttemptLimiter(rdb, 3, 15*time.Minute)
 	mailer := testutil.NewFakeMailer()
-	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil)
+	svc := auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, nil, nil, "", nil, nil, nil)
 
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
@@ -977,7 +977,7 @@ func TestLoginStep1_NoChoiceWhenTOTPNotConfigured(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	_, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	_, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -995,7 +995,7 @@ func TestLoginStep1_FirstLogin_NeedsSetup_NoEmailSentYet(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 	sentBefore := len(mailer.Sent()) // mustRegister itself already sent a verification email
 
-	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1: %v", err)
 	}
@@ -1015,7 +1015,7 @@ func TestSendLoginEmailCode_CompletesFirstLoginAndLocksInEmail(t *testing.T) {
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil || !needsSetup {
 		t.Fatalf("LoginStep1: needsSetup=%v err=%v, want true, nil", needsSetup, err)
 	}
@@ -1045,7 +1045,7 @@ func TestSendLoginEmailCode_CompletesFirstLoginAndLocksInEmail(t *testing.T) {
 	// goes straight to email, exactly like every account that predates
 	// this feature.
 	sentBefore := len(mailer.Sent())
-	_, needsSetup2, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	_, needsSetup2, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1 (second login): %v", err)
 	}
@@ -1071,7 +1071,7 @@ func TestFirstLogin_TOTPBranch_EnrollAndConfirmCompletesLoginAndLocksInTOTP(t *t
 	email := "user-" + testutil.UniqueSuffix(t) + "@example.com"
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
-	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken, needsSetup, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil || !needsSetup {
 		t.Fatalf("LoginStep1: needsSetup=%v err=%v, want true, nil", needsSetup, err)
 	}
@@ -1116,7 +1116,7 @@ func TestFirstLogin_TOTPBranch_EnrollAndConfirmCompletesLoginAndLocksInTOTP(t *t
 	// Locked in — next login skips the setup screen and goes straight to
 	// TOTP, no email at all.
 	sentBefore := len(mailer.Sent())
-	loginToken2, needsSetup2, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+	loginToken2, needsSetup2, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 	if err != nil {
 		t.Fatalf("LoginStep1 (second login): %v", err)
 	}
@@ -1155,7 +1155,7 @@ func newTestServiceWithAccessRevocation(t *testing.T) (svc *auth.Service, tokens
 	mailer = testutil.NewFakeMailer()
 	accessRevocation = auth.NewAccessRevocationStore(rdb, 15*time.Minute)
 
-	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, accessRevocation, nil, "", nil)
+	svc = auth.NewService(users, otpStore, tokens, refresh, devices, passwordReset, emailVerification, nil, loginAttempts, mailer, 5*time.Minute, 7*24*time.Hour, time.Hour, 24*time.Hour, time.Hour, nil, nil, nil, nil, nil, nil, nil, accessRevocation, nil, "", nil, nil, nil)
 	return svc, tokens, pool, accessRevocation, mailer, client.ID
 }
 
@@ -1173,7 +1173,7 @@ func TestRefresh_SuspiciousReuse_RevokesEverySession(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	login := func() (access, refresh string) {
-		loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+		loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 		if err != nil {
 			t.Fatalf("LoginStep1: %v", err)
 		}
@@ -1250,7 +1250,7 @@ func TestRefresh_BenignRace_DoesNotAffectOtherSessions(t *testing.T) {
 	mustRegister(t, svc, mailer, apiClientID, email, "correcthorsebattery")
 
 	login := func() (access, refresh string) {
-		loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery")
+		loginToken, _, _, _, err := svc.LoginStep1(t.Context(), apiClientID, email, "correcthorsebattery", nil)
 		if err != nil {
 			t.Fatalf("LoginStep1: %v", err)
 		}
