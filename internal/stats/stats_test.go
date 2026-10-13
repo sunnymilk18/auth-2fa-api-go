@@ -543,6 +543,59 @@ func TestRepository_LoginsByDay_SplitsSuccessAndFailed(t *testing.T) {
 	}
 }
 
+// Confirms loginFailureResults, not "anything that isn't success", is
+// what LoginsByDay/FailuresByTenant/TopFailingIPs count as a failure —
+// pin_step_required, session_expired and email_not_verified are real
+// auth_events.result values under kind = 'login' that are NOT attacks
+// (see loginFailureResults' own doc comment) and must not inflate any of
+// the three.
+func TestRepository_LoginStats_ExcludeNonAttackResults(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	ctx := context.Background()
+	client, _ := testutil.NewAPIClient(t, pool)
+
+	loc := time.UTC
+	now := time.Now().In(loc)
+	rng := stats.ResolveRange(7, loc, now)
+
+	ip := "203.0.113." + strconv.Itoa(100+int(now.UnixNano()%50))
+	insertAuthEvent(t, pool, client.ID, "login", "pin_step_required", ip, now)
+	insertAuthEvent(t, pool, client.ID, "login", "session_expired", ip, now)
+	insertAuthEvent(t, pool, client.ID, "login", "email_not_verified", ip, now)
+
+	dayRows, err := repo.LoginsByDay(ctx, rng)
+	if err != nil {
+		t.Fatalf("LoginsByDay: %v", err)
+	}
+	targetLabel := now.Format("2006-01-02")
+	for _, row := range dayRows {
+		if row.Day == targetLabel && row.Failed != 0 {
+			t.Fatalf("LoginsByDay[%s].Failed = %d, want 0 (pin_step_required/session_expired/email_not_verified aren't attacks)", targetLabel, row.Failed)
+		}
+	}
+
+	tenantRows, err := repo.FailuresByTenant(ctx, rng, 1_000_000)
+	if err != nil {
+		t.Fatalf("FailuresByTenant: %v", err)
+	}
+	for _, row := range tenantRows {
+		if row.APIClientID == client.ID && row.Failed != 0 {
+			t.Fatalf("FailuresByTenant[%s].Failed = %d, want 0", client.ID, row.Failed)
+		}
+	}
+
+	ipRows, err := repo.TopFailingIPs(ctx, rng, 1_000_000)
+	if err != nil {
+		t.Fatalf("TopFailingIPs: %v", err)
+	}
+	for _, row := range ipRows {
+		if row.IP == ip {
+			t.Fatalf("TopFailingIPs contains %s with Failed=%d, want it absent entirely", ip, row.Failed)
+		}
+	}
+}
+
 func TestRepository_FailuresByTenant_CountsPerTenant(t *testing.T) {
 	pool := testutil.PostgresPool(t)
 	repo := stats.NewRepository(pool)

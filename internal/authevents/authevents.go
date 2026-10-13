@@ -211,6 +211,11 @@ func (r *Repository) Insert(ctx context.Context, e Entry) error {
 	return nil
 }
 
+// writeTimeout bounds Log's own insert once it's detached from the
+// caller's context (see Log) — long enough for a normal write, short
+// enough that a stuck connection can't hang around indefinitely.
+const writeTimeout = 3 * time.Second
+
 // DeleteOlderThan removes every entry created before cutoff — the
 // retention sweep (see Service.DeleteExpired), same periodic-job pattern
 // as audit.Repository.DeleteOlderThan/RefreshRepository.DeleteExpired.
@@ -271,7 +276,14 @@ func (s *Service) Log(ctx context.Context, e Entry) {
 	if s == nil {
 		return
 	}
-	if err := s.repo.Insert(ctx, e); err != nil {
+	// Detached from the caller's own cancellation (context.WithoutCancel
+	// keeps its values, e.g. trace info, but drops its Done channel) and
+	// given its own short deadline instead — otherwise a client that
+	// disconnects mid-request cancels ctx before the insert reaches
+	// Postgres, silently losing the very event the request was about.
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), writeTimeout)
+	defer cancel()
+	if err := s.repo.Insert(writeCtx, e); err != nil {
 		s.logger.Error("writing auth event failed", "kind", e.Kind, "result", e.Result, "error", err)
 		s.writeFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("kind", e.Kind)))
 	}

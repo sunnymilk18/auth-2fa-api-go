@@ -279,6 +279,29 @@ func (r *Repository) OperatorActionsByType(ctx context.Context, rng Range, limit
 	return out, rows.Err()
 }
 
+// loginFailureResults is which auth_events.result values under kind =
+// 'login' count as a failed login attempt for LoginsByDay/
+// FailuresByTenant/TopFailingIPs — deliberately NOT "anything that isn't
+// success": pin_step_required (the account just needs its extra PIN
+// step, not an attack), session_expired (a stale verification session)
+// and email_not_verified (the password was actually correct) aren't
+// failed credential attempts, and counting them as such would inflate
+// these three charts with rows that look like an attack but aren't. A
+// result left out of both this list and ResultSuccess simply isn't
+// counted in either column — it isn't what these charts are for; the
+// per-result breakdown is what GET /admin/security/events (a later
+// entry) is for.
+var loginFailureResults = []string{
+	authevents.ResultBadCredentials,
+	authevents.ResultBadTOTP,
+	authevents.ResultInvalidCode,
+	authevents.ResultBadPin,
+	authevents.ResultBadDeviceToken,
+	authevents.ResultTooManyAttempts,
+	authevents.ResultLockedOut,
+	authevents.ResultAccountBanned,
+}
+
 // LoginDayCount is one bucket of LoginsByDay — Success/Failed are end-user
 // login attempts (auth_events.kind = 'login'), not operator actions (see
 // DayActionCount for that, a separate thing).
@@ -289,22 +312,20 @@ type LoginDayCount struct {
 }
 
 // LoginsByDay returns end-user login attempt counts bucketed by day in
-// rng.TZName, same zero-fill contract as UsersPerDay. Success/Failed
-// split on auth_events.result = 'success' vs anything else — see
-// authevents.Result*'s own doc comment for why "anything else" is safe to
-// collapse into one bucket here (the per-result breakdown isn't what this
-// chart is for; GET /admin/security/events, a later entry, is where that
-// detail will live).
+// rng.TZName, same zero-fill contract as UsersPerDay. Success counts
+// auth_events.result = 'success'; Failed counts only loginFailureResults
+// — see that variable's own doc comment for why it's not simply "every
+// other result".
 func (r *Repository) LoginsByDay(ctx context.Context, rng Range) ([]LoginDayCount, error) {
 	const q = `
 		SELECT (created_at AT TIME ZONE $1)::date AS day,
 			count(*) FILTER (WHERE result = $2) AS success,
-			count(*) FILTER (WHERE result <> $2) AS failed
+			count(*) FILTER (WHERE result = ANY($3)) AS failed
 		FROM auth_events
-		WHERE kind = $3 AND created_at >= $4 AND created_at < $5
+		WHERE kind = $4 AND created_at >= $5 AND created_at < $6
 		GROUP BY day
 		ORDER BY day`
-	rows, err := r.pool.Query(ctx, q, rng.TZName, authevents.ResultSuccess, authevents.KindLogin, rng.Start, rng.End)
+	rows, err := r.pool.Query(ctx, q, rng.TZName, authevents.ResultSuccess, loginFailureResults, authevents.KindLogin, rng.Start, rng.End)
 	if err != nil {
 		return nil, fmt.Errorf("counting logins per day: %w", err)
 	}
@@ -339,14 +360,14 @@ func (r *Repository) FailuresByTenant(ctx context.Context, rng Range, limit int)
 	const q = `
 		SELECT COALESCE(auth_events.api_client_id::text, ''), COALESCE(api_clients.name, ''),
 			count(*) FILTER (WHERE auth_events.result = $1) AS success,
-			count(*) FILTER (WHERE auth_events.result <> $1) AS failed
+			count(*) FILTER (WHERE auth_events.result = ANY($2)) AS failed
 		FROM auth_events
 		LEFT JOIN api_clients ON api_clients.id = auth_events.api_client_id
-		WHERE auth_events.kind = $2 AND auth_events.created_at >= $3 AND auth_events.created_at < $4
+		WHERE auth_events.kind = $3 AND auth_events.created_at >= $4 AND auth_events.created_at < $5
 		GROUP BY auth_events.api_client_id, api_clients.name
 		ORDER BY failed DESC, api_clients.name ASC, auth_events.api_client_id ASC
-		LIMIT $5`
-	rows, err := r.pool.Query(ctx, q, authevents.ResultSuccess, authevents.KindLogin, rng.Start, rng.End, limit)
+		LIMIT $6`
+	rows, err := r.pool.Query(ctx, q, authevents.ResultSuccess, loginFailureResults, authevents.KindLogin, rng.Start, rng.End, limit)
 	if err != nil {
 		return nil, fmt.Errorf("counting login failures per tenant: %w", err)
 	}
@@ -379,11 +400,11 @@ func (r *Repository) TopFailingIPs(ctx context.Context, rng Range, limit int) ([
 	const q = `
 		SELECT host(ip), count(*) AS failed, max(created_at) AS last_at
 		FROM auth_events
-		WHERE kind = $1 AND result <> $2 AND ip IS NOT NULL AND created_at >= $3 AND created_at < $4
+		WHERE kind = $1 AND result = ANY($2) AND ip IS NOT NULL AND created_at >= $3 AND created_at < $4
 		GROUP BY ip
 		ORDER BY failed DESC, ip ASC
 		LIMIT $5`
-	rows, err := r.pool.Query(ctx, q, authevents.KindLogin, authevents.ResultSuccess, rng.Start, rng.End, limit)
+	rows, err := r.pool.Query(ctx, q, authevents.KindLogin, loginFailureResults, rng.Start, rng.End, limit)
 	if err != nil {
 		return nil, fmt.Errorf("counting top failing ips: %w", err)
 	}

@@ -1186,21 +1186,21 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 		return "", "", "", err
 	}
 
-	if err := s.users.VerifyPin(ctx, d.UserID, pin); err != nil {
-		// device.Device carries no api_client_id of its own (it's keyed
-		// off UserID only) — left "" here rather than an extra lookup
-		// just for this event's attribution.
-		logFailure("", d.UserID, authevents.ResultBadPin)
-		return "", "", "", err
-	}
-
-	newDeviceToken, err = s.devices.RotateToken(ctx, d.ID)
-	if err != nil {
-		return "", "", "", err
-	}
-
+	// Resolved before VerifyPin/RotateToken, for two reasons: every later
+	// failure branch can attribute its auth_events row to the account's
+	// tenant (rather than leaving api_client_id NULL just to avoid this
+	// lookup), and the account-level checks below (IsActive/
+	// PinRequiredAtLogin) run before RotateToken ever invalidates the
+	// caller's current device token — otherwise a banned or
+	// pin-step-required account would lose its working token without
+	// getting a replacement back.
 	u, err := s.users.FindByID(ctx, d.UserID)
 	if err != nil {
+		return "", "", "", err
+	}
+
+	if err := s.users.VerifyPin(ctx, u.ID, pin); err != nil {
+		logFailure(u.APIClientID, u.ID, authevents.ResultBadPin)
 		return "", "", "", err
 	}
 	if !u.IsActive {
@@ -1217,6 +1217,11 @@ func (s *Service) DeviceLogin(ctx context.Context, deviceID, deviceToken, pin st
 	if u.PinRequiredAtLogin {
 		logFailure(u.APIClientID, u.ID, authevents.ResultPinStepRequired)
 		return "", "", "", ErrLoginPinStepRequired
+	}
+
+	newDeviceToken, err = s.devices.RotateToken(ctx, d.ID)
+	if err != nil {
+		return "", "", "", err
 	}
 
 	accessToken, refreshToken, err = s.issueTokenPair(ctx, u.ID, u.APIClientID, u.Email)
