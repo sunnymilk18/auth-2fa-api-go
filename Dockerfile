@@ -2,7 +2,7 @@
 
 # ---- build stage ------------------------------------------------------
 # Matches go.mod's `go 1.26.0` — bump both together.
-FROM golang:1.26-alpine AS builder
+FROM golang:1.26.10-alpine AS builder
 
 WORKDIR /src
 
