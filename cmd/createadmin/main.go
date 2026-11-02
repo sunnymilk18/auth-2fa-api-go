@@ -42,7 +42,7 @@ func main() {
 func usage() {
 	fmt.Println(`Usage:
   createadmin create -email <email> -password <password> [-role admin|superadmin]
-      Provision a new admin account, printing its TOTP enrollment QR URL once.
+      Provision a new admin account, printing its TOTP enrollment QR code and secret once.
       -role defaults to superadmin — the very first account has to be one
       (only a superadmin can create further accounts from the panel), and
       this CLI is also the "break glass" path for an emergency account, so
@@ -99,12 +99,10 @@ func runCreate(args []string) error {
 		return err
 	}
 
-	fmt.Println("Admin account created:")
+	fmt.Println("Cuenta de administración creada:")
 	fmt.Printf("  id:    %s\n", account.ID)
 	fmt.Printf("  email: %s\n", account.Email)
-	fmt.Printf("  role:  %s\n", account.Role)
+	fmt.Printf("  rol:   %s\n", account.Role)
 	fmt.Println()
-	fmt.Println("TOTP enrollment (shown once — scan this into an authenticator app now):")
-	fmt.Printf("  %s\n", otpauthURL)
-	return nil
+	return printEnrollment(os.Stdout, otpauthURL)
 }
