@@ -7,10 +7,12 @@
 # "run Resend locally" container, and internal/mailer/resend.go always
 # talks to the real api.resend.com. A fake local SMTP/catch-all server
 # (Mailpit, MailHog, etc.) wouldn't actually be exercised by this code
-# without changing it. So: just supply a real RESEND_API_KEY below (the
-# free sandbox key from .env already works — it's an outbound HTTPS call,
-# same from inside a container as from your host) and codes really arrive
-# by email, same as running the API without Docker.
+# without changing it. So: just supply a real RESEND_API_KEY (and RESEND_FROM)
+# in .env — it's an outbound HTTPS call, same from inside a container as from
+# your host — and codes really arrive by email, same as running the API
+# without Docker. Con un dominio propio verificado en Resend, los correos
+# llegan a cualquier destinatario; con el remitente de prueba por defecto
+# (onboarding@resend.dev) solo llegan al correo de tu cuenta de Resend.
 #
 # Metrics + logs for now, no traces yet — see internal/telemetry (both
 # SetupMetrics and SetupLogging) and internal/middleware/metrics.go for

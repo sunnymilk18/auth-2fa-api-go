@@ -153,7 +153,7 @@ Para crear un cliente (API key) sin salir del compose:
 docker compose run --rm api ./createclient create -name "mi-app"
 ```
 
-No incluye un servidor de correo local a propósito: Resend es una API HTTP hacia la nube de Resend, no algo autoalojable — simplemente usa tu `RESEND_API_KEY` real (la de sandbox alcanza), es una llamada saliente igual desde un contenedor que desde tu máquina.
+No incluye un servidor de correo local a propósito: Resend es una API HTTP hacia la nube de Resend, no algo autoalojable — simplemente usa tu `RESEND_API_KEY` real, es una llamada saliente igual desde un contenedor que desde tu máquina. Con un dominio propio verificado en Resend y `RESEND_FROM` apuntando a una dirección de ese dominio, los correos llegan a cualquier destinatario; con el remitente de prueba por defecto (`onboarding@resend.dev`) solo llegan al correo de tu propia cuenta de Resend. Ojo al probar en local con un `.env` que ya tenga un dominio propio: los correos que dispares serán reales.
 
 ## Tests
 
