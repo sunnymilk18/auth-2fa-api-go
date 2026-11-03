@@ -11,6 +11,7 @@ import (
 
 	"auth-2fa-api/internal/stats"
 	"auth-2fa-api/internal/testutil"
+	"auth-2fa-api/internal/user"
 )
 
 func TestParseRangeDays(t *testing.T) {
@@ -118,44 +119,73 @@ func TestResolveRange_UTCDefault(t *testing.T) {
 // TestRepository_UsersTotalAndBanned_ReflectsChanges checks relative
 // deltas, not absolute counts — users is a shared, persistent table
 // across every test in this suite (see testutil.PostgresPool's doc
-// comment), so an exact total would be flaky by construction; the delta
-// a single test itself causes is always exact.
+// comment), so an exact total would be flaky by construction.
+//
+// Ni siquiera el delta es exacto por sí solo: `go test ./...` corre los
+// paquetes como procesos separados y en paralelo, y los de auth, user,
+// httpserver, etc. crean y borran usuarios todo el tiempo contra esta misma
+// base. UsersTotal/UsersBanned cuentan toda la tabla (no tienen filtro por
+// cliente, es lo que muestra el panel), así que cualquier usuario ajeno que
+// aparezca o desaparezca entre la lectura "antes" y la "después" cambia el
+// delta y la prueba falla sin que haya ningún error en el código.
+//
+// Se reduce de dos formas. Primero, la ventana entre ambas lecturas es de
+// milisegundos: los usuarios se insertan con user.Repository.Create (el hash
+// ya viene calculado) y no con el registro completo, que gasta cientos de
+// milisegundos en bcrypt. Segundo, si aun así un proceso ajeno cayó justo en
+// esa ventana, se repite la medición: un conteo realmente incorrecto falla
+// en todos los intentos; una interferencia pasajera, no.
 func TestRepository_UsersTotalAndBanned_ReflectsChanges(t *testing.T) {
 	pool := testutil.PostgresPool(t)
 	repo := stats.NewRepository(pool)
+	users := user.NewRepository(pool)
 	ctx := context.Background()
 
-	totalBefore, err := repo.UsersTotal(ctx)
-	if err != nil {
-		t.Fatalf("UsersTotal (before): %v", err)
-	}
-	bannedBefore, err := repo.UsersBanned(ctx)
-	if err != nil {
-		t.Fatalf("UsersBanned (before): %v", err)
-	}
-
+	// NewAPIClient borra al terminar todos los usuarios de este cliente, así
+	// que no hace falta limpiar uno por uno los de cada intento.
 	client, _ := testutil.NewAPIClient(t, pool)
-	_ = testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
-	u2 := testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
-	if _, err := pool.Exec(ctx, `UPDATE users SET is_active = FALSE WHERE id = $1`, u2.ID); err != nil {
-		t.Fatalf("banning u2: %v", err)
-	}
 
-	totalAfter, err := repo.UsersTotal(ctx)
-	if err != nil {
-		t.Fatalf("UsersTotal (after): %v", err)
-	}
-	bannedAfter, err := repo.UsersBanned(ctx)
-	if err != nil {
-		t.Fatalf("UsersBanned (after): %v", err)
-	}
+	const attempts = 5
+	var totalDelta, bannedDelta int
+	for attempt := 1; attempt <= attempts; attempt++ {
+		totalBefore, err := repo.UsersTotal(ctx)
+		if err != nil {
+			t.Fatalf("UsersTotal (before): %v", err)
+		}
+		bannedBefore, err := repo.UsersBanned(ctx)
+		if err != nil {
+			t.Fatalf("UsersBanned (before): %v", err)
+		}
 
-	if totalAfter-totalBefore != 2 {
-		t.Fatalf("UsersTotal delta = %d, want 2", totalAfter-totalBefore)
+		var ids []string
+		for i := 0; i < 2; i++ {
+			suffix := testutil.UniqueSuffix(t)
+			u, err := users.Create(ctx, client.ID, "count-"+suffix+"@example.com", "not-a-real-hash", "count-"+suffix, testutil.UniqueRUT(t))
+			if err != nil {
+				t.Fatalf("creating user %d: %v", i+1, err)
+			}
+			ids = append(ids, u.ID)
+		}
+		if err := users.SetActive(ctx, ids[1], false); err != nil {
+			t.Fatalf("banning the second user: %v", err)
+		}
+
+		totalAfter, err := repo.UsersTotal(ctx)
+		if err != nil {
+			t.Fatalf("UsersTotal (after): %v", err)
+		}
+		bannedAfter, err := repo.UsersBanned(ctx)
+		if err != nil {
+			t.Fatalf("UsersBanned (after): %v", err)
+		}
+
+		totalDelta, bannedDelta = totalAfter-totalBefore, bannedAfter-bannedBefore
+		if totalDelta == 2 && bannedDelta == 1 {
+			return
+		}
+		t.Logf("attempt %d/%d: deltas total=%d banned=%d (want 2 and 1) — other tests may have touched users in between, retrying", attempt, attempts, totalDelta, bannedDelta)
 	}
-	if bannedAfter-bannedBefore != 1 {
-		t.Fatalf("UsersBanned delta = %d, want 1", bannedAfter-bannedBefore)
-	}
+	t.Fatalf("after %d attempts: UsersTotal delta = %d (want 2), UsersBanned delta = %d (want 1)", attempts, totalDelta, bannedDelta)
 }
 
 // backdateUserCreatedAt directly rewrites a test user's created_at — the
