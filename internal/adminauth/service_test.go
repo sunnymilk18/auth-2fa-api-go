@@ -440,6 +440,9 @@ func TestAccountRepository_Reprovision_RejectsSecondConcurrentCall(t *testing.T)
 	svc, pool := newTestService(t)
 	ctx := t.Context()
 
+	// Otro superadmin activo, para que revocar esta cuenta no sea revocar "la
+	// última": sin él la prueba solo pasa si la base ya tenía uno de antes.
+	createTestAccount(t, svc, pool, "correct-horse-battery")
 	account, _ := createTestAccount(t, svc, pool, "correct-horse-battery")
 	if err := svc.RevokeAccount(ctx, "", account.ID); err != nil {
 		t.Fatalf("RevokeAccount: %v", err)

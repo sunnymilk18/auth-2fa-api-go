@@ -230,6 +230,9 @@ func TestService_ReactivateAccount_ClearsPin(t *testing.T) {
 	svc, pool := newTestService(t)
 	ctx := t.Context()
 
+	// Otro superadmin activo, para que revocar esta cuenta no sea revocar "la
+	// última": sin él la prueba solo pasa si la base ya tenía uno de antes.
+	createTestAccount(t, svc, pool, "keeper-password-1")
 	account, _ := createTestAccount(t, svc, pool, "old-password-1")
 	if _, err := svc.SetPin(ctx, account.Email, "old-password-1", "", "123456"); err != nil {
 		t.Fatalf("SetPin (create): %v", err)
