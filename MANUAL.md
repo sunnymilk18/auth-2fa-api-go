@@ -487,7 +487,7 @@ go run ./cmd/train -meta experimento/meta.json -prefijo-tenant sim- -salida expe
 go run ./cmd/evaluate -meta experimento/meta.json -etiquetas experimento/ground_truth.json -modelo experimento/modelo.json -prefijo-tenant sim- -salida experimento
 ```
 
-Escribe en `experimento/` (que está en `.gitignore`): `ground_truth.json`, `meta.json`, `modelo.json`, `resultados.md` (las tablas, listas para pegar en el informe) y cuatro CSV (`resultados_metricas.csv`, `resultados_escenarios.csv`, `resultados_senuelos.csv`, `resultados_umbral.csv`).
+Escribe en `experimento/` (que está en `.gitignore`): `ground_truth.json`, `meta.json`, `modelo.json`, `resultados.md` (las tablas, listas para pegar en el informe) y cinco CSV (`resultados_metricas.csv`, `resultados_escenarios.csv`, `resultados_senuelos.csv`, `resultados_umbral.csv` y `resultados_tiempos.csv`).
 
 **Es reproducible**: con la misma semilla, la simulación, el modelo y los resultados salen idénticos byte a byte (no se escribe ninguna fecha de ejecución). Los identificadores también salen de la semilla, y las fechas de la simulación son fijas (del 5 al 16 de octubre de 2026: siete días de entrenamiento sin ataques y cuatro de evaluación con ataques).
 
@@ -561,3 +561,28 @@ Cómo leer estas cifras:
 - **El bosque falla donde las reglas aciertan:** en fuerza bruta y en ataque distribuido su detección cambia mucho de una semilla a otra (de 0 a 100 %), porque el puntaje de un valor fuera del rango visto casi no sube más que el de los valores más extremos del entrenamiento (sección 3.2). Los resultados de la semilla 42 de esos dos escenarios son de los más favorables al bosque, no representativos.
 - **Los F1 de `actual` y `lento` no se comparan entre sí sin cuidado:** con `lento` hay entre 2 y 3 veces más unidades positivas (muchas ventanas por incidente), y precisión y F1 dependen de la proporción de positivos.
 - **`lento` está diseñado para quedar bajo los umbrales de las reglas por defecto:** es una prueba de sigilo, no una estimación de qué tan frecuente es un ataque así.
+
+### Tiempo de detección
+
+`cmd/evaluate` también mide qué tan rápido detecta cada método. Para cada incidente detectado calcula el **retraso en ventanas**: la distancia entre la primera ventana atacada del incidente y la primera en que ese método alertó (0 = detectado en la primera ventana). Lo reporta por método y por escenario: promedio, mediana y máximo, y cuántos incidentes quedaron **sin detectar** (esos no entran en el promedio y se muestran aparte).
+
+Para pasarlo a tiempo real con el detector actual, calcula el **peor caso en minutos**: el fin de la ventana detectada, más el intervalo de la tarea (`DETECTOR_INTERVAL`, 5 min por defecto), menos el inicio de la primera ventana atacada. Un incidente detectado en su primera ventana tiene entonces un peor caso de 15 minutos: el detector solo mira ventanas ya completas (10 min) y la pasada que la recoge puede tardar hasta un intervalo más.
+
+Está en la última sección de `resultados.md` y en `resultados_tiempos.csv`. Para agregarlo por semilla e intensidad, junto con el resto de las métricas, corre las carpetas por semilla e intensidad (`experimento`, `experimento_s<semilla>`, `experimento_lento_s<semilla>`) y después:
+
+```powershell
+python scripts/resumen_experimento.py
+```
+
+El resumen queda en `experimento_resumen/resumen.md` (ignorado por git).
+
+Con las cuatro semillas y el intervalo por defecto:
+
+- **Intensidad `actual`:** todo lo que se detecta se detecta en la primera ventana (peor caso de 15 minutos). La única excepción son algunos incidentes de pulverizado que las reglas detectan en la segunda ventana (peor caso de 25 minutos). El combinado detecta todos los incidentes, siempre en la primera ventana.
+- **Intensidad `lento`:** las reglas detectan 8 de 32 incidentes de relleno y 7 de 32 de pulverizado, y los que detectan los ven con retraso: 1,3 ventanas en promedio en el relleno y 3,75 en el pulverizado (peor caso promedio de 28 y 52,5 minutos; máximo de 105). El bosque los detecta todos en la primera ventana. El combinado sigue detectando todos los incidentes en la primera ventana.
+
+Cómo leer estas cifras:
+
+- **El retraso solo cuenta los incidentes detectados.** El bosque aparece siempre con retraso 0, pero no detecta la mitad de las fuerzas brutas ni entre el 69 y el 75 % de los ataques distribuidos: un promedio sin mirar los "sin detectar" engaña.
+- **La simulación no tiene escalada:** cada ataque arranca a plena intensidad en el comienzo de una ventana, así que un retraso 0 es en buena parte consecuencia de cómo se simuló. Los retrasos mayores que 0 (las reglas con ataques lentos) son lo más informativo de esta métrica.
+- **El inicio del ataque se toma como el comienzo de su primera ventana**, por lo que el peor caso es conservador: un ataque real que empieza a mitad de ventana se detecta en menos tiempo.
