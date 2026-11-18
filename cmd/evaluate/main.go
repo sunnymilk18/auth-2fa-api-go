@@ -101,7 +101,7 @@ func run() error {
 
 	report := evaluation.Evaluate(analyses, truth.Labels)
 	header := evaluation.Header{
-		Seed: truth.Seed, EvalFrom: from, EvalTo: to, TrainingFrom: meta.TrainingFrom, TrainingTo: meta.TrainingTo,
+		Seed: truth.Seed, Intensity: truth.Intensity, EvalFrom: from, EvalTo: to, TrainingFrom: meta.TrainingFrom, TrainingTo: meta.TrainingTo,
 		Rules: cfg.Rules, Trees: model.Trees, SampleSize: model.SampleSize, ModelSeed: model.Seed,
 		IFThresholds: map[string]float64{}, IFThresholdFixed: cfg.IFThreshold > 0, TrainingUnits: map[string]int{},
 	}

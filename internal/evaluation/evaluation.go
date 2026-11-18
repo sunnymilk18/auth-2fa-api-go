@@ -426,6 +426,9 @@ func countAndPercent(num, den int) string {
 
 // Header describe el experimento: parámetros que van arriba de las tablas.
 type Header struct {
+	// Intensity: nivel de intensidad de los ataques; vacío (la simulación
+	// original) no agrega ninguna línea.
+	Intensity    string
 	Seed         uint64
 	EvalFrom     time.Time
 	EvalTo       time.Time
@@ -454,6 +457,9 @@ func (h Header) lines() []string {
 			h.Rules.Fallos, h.Rules.Cuentas, h.Rules.IPsConFallos, h.Rules.Inexistentes),
 		fmt.Sprintf("Isolation Forest: t = %d árboles, ψ = %d, semilla %d. Ventanas de entrenamiento: %d por tenant, %d por IP.",
 			h.Trees, h.SampleSize, h.ModelSeed, h.TrainingUnits[detector.KeyTenant], h.TrainingUnits[detector.KeyIP]),
+	}
+	if h.Intensity != "" {
+		out = append(out[:1], append([]string{fmt.Sprintf("Intensidad de los ataques: %s.", h.Intensity)}, out[1:]...)...)
 	}
 	origin := fmt.Sprintf("calibrado con el cuantil %s de los puntajes del entrenamiento", comma(h.ThresholdQuantile, 3))
 	if h.IFThresholdFixed {

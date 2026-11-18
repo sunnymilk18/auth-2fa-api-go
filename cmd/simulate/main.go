@@ -32,9 +32,13 @@ func main() {
 func run() error {
 	seed := flag.Uint64("semilla", 42, "semilla de la simulación (misma semilla, mismos datos)")
 	out := flag.String("salida", "experimento", "carpeta donde se escriben ground_truth.json y meta.json")
+	intensity := flag.String("intensidad", simulate.IntensityActual, "intensidad de los ataques: actual (la original) o lento (relleno y pulverizado más sigilosos)")
 	clean := flag.Bool("limpiar", false, "solo borrar la simulación anterior de la base, sin generar otra")
 	flag.Parse()
 
+	if !simulate.ValidIntensity(*intensity) {
+		return fmt.Errorf("intensidad desconocida %q: usa %s o %s", *intensity, simulate.IntensityActual, simulate.IntensityLento)
+	}
 	if err := experiment.RequireConfirmation(); err != nil {
 		return err
 	}
@@ -53,7 +57,9 @@ func run() error {
 		return nil
 	}
 
-	res := simulate.Generate(simulate.DefaultConfig(*seed))
+	cfg := simulate.DefaultConfig(*seed)
+	cfg.Intensity = *intensity
+	res := simulate.Generate(cfg)
 	if err := simulate.Write(ctx, pool, res); err != nil {
 		return err
 	}
@@ -77,7 +83,7 @@ func run() error {
 			perScenario[l.Scenario]++
 		}
 	}
-	fmt.Printf("Simulación escrita en la base local (semilla %d).\n", *seed)
+	fmt.Printf("Simulación escrita en la base local (semilla %d, intensidad %s).\n", *seed, *intensity)
 	fmt.Printf("  tenants: %d, cuentas: %d (incluye señuelos), eventos: %d\n", len(res.Tenants), users, len(res.Rows))
 	fmt.Printf("  entrenamiento: %s a %s (solo tráfico normal)\n", res.Meta.TrainingFrom.Format("2006-01-02"), res.Meta.TrainingTo.Format("2006-01-02"))
 	fmt.Printf("  evaluación:    %s a %s (con ataques)\n", res.Meta.EvalFrom.Format("2006-01-02"), res.Meta.EvalTo.Format("2006-01-02"))

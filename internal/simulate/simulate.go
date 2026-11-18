@@ -56,6 +56,22 @@ const TenantPrefix = "sim-"
 
 const window = 10 * time.Minute
 
+// Intensidad de los ataques. "actual" es la simulación original y no cambia
+// nunca (hay una prueba con su huella): los resultados de la semilla 42 del
+// informe tienen que seguir siendo comparables. "lento" vuelve más sigilosos
+// el relleno de credenciales y el pulverizado: ver stuffingSlow y sprayingSlow.
+const (
+	IntensityActual = "actual"
+	IntensityLento  = "lento"
+)
+
+// Intensities son los niveles válidos, en el orden en que se reportan.
+var Intensities = []string{IntensityActual, IntensityLento}
+
+// ValidIntensity reporta si s es un nivel conocido; la cadena vacía cuenta
+// como "actual".
+func ValidIntensity(s string) bool { return s == "" || s == IntensityActual || s == IntensityLento }
+
 // Config define el tamaño y la forma de la simulación.
 type Config struct {
 	Seed uint64
@@ -68,8 +84,13 @@ type Config struct {
 	// TenantSizes: un tenant por elemento, con esa cantidad de usuarios.
 	TenantSizes []int
 	// Incidents: cuántos incidentes de cada escenario hay en el período de
-	// evaluación (un incidente dura entre 1 y 4 ventanas seguidas).
+	// evaluación (un incidente dura entre 1 y 4 ventanas seguidas; en
+	// intensidad "lento", el relleno y el pulverizado duran de 6 a 12).
 	Incidents map[string]int
+	// Intensity: IntensityActual (o vacío) o IntensityLento. Solo cambia el
+	// relleno de credenciales y el pulverizado de contraseñas; el tráfico
+	// normal es idéntico para una misma semilla.
+	Intensity string
 }
 
 // DefaultConfig es la configuración del experimento documentado en MANUAL.md.
@@ -149,7 +170,10 @@ type Label struct {
 // Meta describe los rangos de la simulación. NO son etiquetas: es lo que
 // train y evaluate necesitan para saber qué rango de fechas usar.
 type Meta struct {
-	Seed         uint64    `json:"seed"`
+	Seed uint64 `json:"seed"`
+	// Intensity va solo cuando no es "actual", para que los archivos de la
+	// simulación original sigan saliendo idénticos.
+	Intensity    string    `json:"intensity,omitempty"`
 	TrainingFrom time.Time `json:"training_from"`
 	TrainingTo   time.Time `json:"training_to"`
 	EvalFrom     time.Time `json:"eval_from"`
@@ -188,7 +212,7 @@ func Generate(cfg Config) *Result {
 		Rows:    g.rows,
 		Labels:  g.labels,
 		Meta: Meta{
-			Seed: cfg.Seed, TrainingFrom: g.start, TrainingTo: g.trainEnd, EvalFrom: g.trainEnd, EvalTo: g.evalEnd,
+			Seed: cfg.Seed, Intensity: g.slowOnly(), TrainingFrom: g.start, TrainingTo: g.trainEnd, EvalFrom: g.trainEnd, EvalTo: g.evalEnd,
 		},
 	}
 }
@@ -483,11 +507,26 @@ func (g *gen) pickUsers(t *Tenant, n int) []*Account {
 	return out
 }
 
+// slow reporta si la simulación corre en intensidad "lento".
+func (g *gen) slow() bool { return g.cfg.Intensity == IntensityLento }
+
+// slowOnly devuelve la intensidad para los archivos: vacía si es la original.
+func (g *gen) slowOnly() string {
+	if g.slow() {
+		return IntensityLento
+	}
+	return ""
+}
+
 // Relleno de credenciales: una IP prueba pares usuario/contraseña de una
 // filtración contra muchas cuentas, una vez cada una. Algunas cuentas ni
 // existen en este tenant; otras pasan la contraseña y tropiezan con el
 // segundo factor.
 func (g *gen) stuffing() {
+	if g.slow() {
+		g.stuffingSlow()
+		return
+	}
 	length := 1 + g.rng.IntN(3)
 	t, first := g.planLen(length)
 	ip := g.attackerIP()
@@ -511,11 +550,63 @@ func (g *gen) stuffing() {
 // Pulverizado de contraseñas: pocas contraseñas comunes probadas contra
 // muchas cuentas, despacio, para quedar bajo los umbrales de cada ventana.
 func (g *gen) spraying() {
+	if g.slow() {
+		g.sprayingSlow()
+		return
+	}
 	length := 2 + g.rng.IntN(3)
 	t, first := g.planLen(length)
 	ip := g.attackerIP()
 	for w := first; w < first+length; w++ {
 		n := 8 + g.rng.IntN(21)
+		existing := g.pickUsers(t, n*85/100)
+		for _, a := range existing {
+			g.fail(g.moment(w), t.ID, a.ID, authevents.MethodPassword, authevents.ResultBadCredentials, "", ip)
+		}
+		for i := len(existing); i < n; i++ {
+			g.fail(g.moment(w), t.ID, "", authevents.MethodPassword, authevents.ResultBadCredentials, g.ghostHash(), ip)
+		}
+		g.label(ScenarioSpraying, w, t, ip)
+	}
+}
+
+// stuffingSlow es el relleno de credenciales en intensidad "lento": en vez de
+// 25 a 70 intentos en una o tres ventanas, de 5 a 9 por ventana durante 6 a 12
+// ventanas seguidas. Cada ventana, vista sola, queda bajo todos los umbrales de
+// las reglas por defecto (menos de 20 fallos, de 10 cuentas y de 10 intentos
+// contra cuentas inexistentes); lo anómalo es la combinación: varias cuentas
+// distintas, ningún inicio de sesión correcto y una parte contra cuentas que no
+// existen, ventana tras ventana desde la misma IP.
+func (g *gen) stuffingSlow() {
+	length := 6 + g.rng.IntN(7)
+	t, first := g.planLen(length)
+	ip := g.attackerIP()
+	for w := first; w < first+length; w++ {
+		n := 5 + g.rng.IntN(5)
+		existing := g.pickUsers(t, n*55/100)
+		for _, a := range existing {
+			if g.rng.Float64() < 0.05 {
+				g.fail(g.moment(w), t.ID, a.ID, authevents.MethodTOTP, authevents.ResultBadTOTP, "", ip)
+			} else {
+				g.fail(g.moment(w), t.ID, a.ID, authevents.MethodPassword, authevents.ResultBadCredentials, "", ip)
+			}
+		}
+		for i := len(existing); i < n; i++ {
+			g.fail(g.moment(w), t.ID, "", authevents.MethodPassword, authevents.ResultBadCredentials, g.ghostHash(), ip)
+		}
+		g.label(ScenarioStuffing, w, t, ip)
+	}
+}
+
+// sprayingSlow es el pulverizado en intensidad "lento": de 6 a 9 cuentas por
+// ventana (en vez de 8 a 28) durante 6 a 12 ventanas. Igual que el relleno
+// lento, ninguna ventana pasa un umbral de las reglas por defecto.
+func (g *gen) sprayingSlow() {
+	length := 6 + g.rng.IntN(7)
+	t, first := g.planLen(length)
+	ip := g.attackerIP()
+	for w := first; w < first+length; w++ {
+		n := 6 + g.rng.IntN(4)
 		existing := g.pickUsers(t, n*85/100)
 		for _, a := range existing {
 			g.fail(g.moment(w), t.ID, a.ID, authevents.MethodPassword, authevents.ResultBadCredentials, "", ip)

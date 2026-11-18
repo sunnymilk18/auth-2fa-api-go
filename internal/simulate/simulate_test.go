@@ -1,7 +1,10 @@
 package simulate_test
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -245,5 +248,163 @@ func TestGenerate_ElRuidoNormalExiste(t *testing.T) {
 	}
 	if maxForgotten < 3 {
 		t.Fatalf("no hay ninguna ventana normal con varios fallos (máximo %d)", maxForgotten)
+	}
+}
+
+// huellaSemilla42 es el SHA-256 del JSON completo (eventos, etiquetas, cuentas
+// y rangos) de simulate.Generate(DefaultConfig(42)). Existe para que agregar
+// niveles de intensidad nunca altere la simulación original: los resultados de
+// la semilla 42 del informe deben seguir siendo comparables. Si cambias a
+// propósito la simulación original, actualiza este valor y los números del
+// MANUAL.
+const huellaSemilla42 = "cbc62d22aaea780a572c125d7bd212977457215305733c37dfd3c50a7e78f372"
+
+func TestGenerate_Semilla42NoCambia(t *testing.T) {
+	sum := sha256.Sum256([]byte(asJSON(t, simulate.Generate(simulate.DefaultConfig(42)))))
+	if got := hex.EncodeToString(sum[:]); got != huellaSemilla42 {
+		t.Fatalf("la simulación de la semilla 42 cambió: huella %s, esperada %s", got, huellaSemilla42)
+	}
+}
+
+func slowConfig(seed uint64) simulate.Config {
+	cfg := smallConfig(seed)
+	cfg.TrainingDays, cfg.EvalDays = 3, 4
+	cfg.Intensity = simulate.IntensityLento
+	return cfg
+}
+
+func eventsOf(res *simulate.Result) []detector.Event {
+	var events []detector.Event
+	for _, r := range res.Rows {
+		events = append(events, detector.Event{At: r.At, Kind: r.Kind, TenantID: r.TenantID, UserID: r.UserID, EmailHash: r.EmailHash, IP: r.IP, Result: r.Result, IsDecoy: r.IsDecoy})
+	}
+	return events
+}
+
+func TestValidIntensity(t *testing.T) {
+	for _, ok := range []string{"", simulate.IntensityActual, simulate.IntensityLento} {
+		if !simulate.ValidIntensity(ok) {
+			t.Errorf("%q debe ser válida", ok)
+		}
+	}
+	for _, bad := range []string{"rapido", "Lento", "slow"} {
+		if simulate.ValidIntensity(bad) {
+			t.Errorf("%q no debe ser válida", bad)
+		}
+	}
+}
+
+// En intensidad "lento", ninguna ventana de relleno ni de pulverizado pasa un
+// umbral de las reglas por defecto: solo la combinación es anómala.
+func TestGenerate_LentoQuedaBajoLosUmbrales(t *testing.T) {
+	res := simulate.Generate(slowConfig(42))
+	rules := detector.DefaultRules()
+	units := detector.Aggregate(eventsOf(res))
+	ipUnit := func(l simulate.Label) detector.Unit {
+		for _, u := range units {
+			if u.WindowStart.Equal(l.WindowStart) && u.KeyType == detector.KeyIP && u.IP == l.Key.IP {
+				return u
+			}
+		}
+		t.Fatalf("no hay unidad de IP para %+v", l)
+		return detector.Unit{}
+	}
+
+	windows := map[int]int{}
+	checked := 0
+	for _, l := range res.Labels {
+		if l.Scenario != simulate.ScenarioStuffing && l.Scenario != simulate.ScenarioSpraying {
+			continue
+		}
+		windows[l.Incident]++
+		f := ipUnit(l).Features
+		if got := rules.Evaluate(f); len(got) != 0 {
+			t.Fatalf("una ventana lenta de %s dispara las reglas (%v): %+v", l.Scenario, got, f)
+		}
+		// Pero sigue siendo una combinación rara: varias cuentas distintas desde
+		// una IP, todas fallidas y sin ningún inicio de sesión correcto.
+		if f.CuentasDistintasAtacadas < 5 || f.Fallos < 5 || f.Correctos != 0 || f.IPsDistintasConFallos != 1 {
+			t.Fatalf("una ventana lenta de %s perdió su huella: %+v", l.Scenario, f)
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no se verificó ninguna ventana")
+	}
+	for incident, n := range windows {
+		if n < 6 || n > 12 {
+			t.Fatalf("el incidente %d dura %d ventanas, want de 6 a 12", incident, n)
+		}
+	}
+}
+
+func TestGenerate_LentoEsDeterministaYNoTocaElTraficoNormal(t *testing.T) {
+	a, b := simulate.Generate(slowConfig(5)), simulate.Generate(slowConfig(5))
+	if asJSON(t, a) != asJSON(t, b) {
+		t.Fatal("la misma semilla e intensidad produjeron simulaciones distintas")
+	}
+
+	cfg := slowConfig(5)
+	cfg.Intensity = simulate.IntensityActual
+	actual := simulate.Generate(cfg)
+	if asJSON(t, actual.Labels) == asJSON(t, a.Labels) {
+		t.Fatal("lento y actual produjeron las mismas etiquetas")
+	}
+	// Cuentas y todo el período de entrenamiento (sin ataques) son idénticos.
+	if asJSON(t, actual.Tenants) != asJSON(t, a.Tenants) {
+		t.Fatal("la intensidad cambió las cuentas simuladas")
+	}
+	before := func(res *simulate.Result) []simulate.Row {
+		var rows []simulate.Row
+		for _, r := range res.Rows {
+			if r.At.Before(res.Meta.TrainingTo) {
+				rows = append(rows, r)
+			}
+		}
+		return rows
+	}
+	if asJSON(t, before(actual)) != asJSON(t, before(a)) {
+		t.Fatal("la intensidad cambió el tráfico del período de entrenamiento")
+	}
+
+	// Los otros tres escenarios conservan su forma y la cantidad de incidentes.
+	count := func(res *simulate.Result) map[string]int {
+		seen, out := map[int]bool{}, map[string]int{}
+		for _, l := range res.Labels {
+			if !seen[l.Incident] {
+				seen[l.Incident] = true
+				out[l.Scenario]++
+			}
+		}
+		return out
+	}
+	if fmt := asJSON(t, count(actual)); fmt != asJSON(t, count(a)) {
+		t.Fatalf("la cantidad de incidentes por escenario cambió: %s vs %s", fmt, asJSON(t, count(a)))
+	}
+}
+
+// La intensidad solo aparece en los archivos cuando no es la original, para que
+// los de la semilla 42 sigan saliendo idénticos.
+func TestWriteMetaYTruth_IntensidadSoloSiNoEsActual(t *testing.T) {
+	dir := t.TempDir()
+	write := func(cfg simulate.Config) (meta, truth string) {
+		res := simulate.Generate(cfg)
+		if err := simulate.WriteMeta(dir+"/meta.json", res); err != nil {
+			t.Fatal(err)
+		}
+		if err := simulate.WriteTruth(dir+"/truth.json", res); err != nil {
+			t.Fatal(err)
+		}
+		m, _ := os.ReadFile(dir + "/meta.json")
+		g, _ := os.ReadFile(dir + "/truth.json")
+		return string(m), string(g)
+	}
+	meta, truth := write(smallConfig(1))
+	if strings.Contains(meta, "intensity") || strings.Contains(truth, "intensity") {
+		t.Fatal("la intensidad original no debe aparecer en los archivos")
+	}
+	meta, truth = write(slowConfig(1))
+	if !strings.Contains(meta, `"intensity": "lento"`) || !strings.Contains(truth, `"intensity": "lento"`) {
+		t.Fatalf("la intensidad lenta debe quedar en los archivos:\n%s\n%.200s", meta, truth)
 	}
 }

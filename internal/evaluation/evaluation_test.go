@@ -285,3 +285,16 @@ func TestEvaluate_AUCYSensibilidadAlUmbral(t *testing.T) {
 		t.Fatalf("el CSV del umbral debe traer el AUC:\n%s", r.SweepCSV())
 	}
 }
+
+func TestMarkdown_IntensidadSoloSiSeIndica(t *testing.T) {
+	r := evaluation.Evaluate(nil, nil)
+	h := evaluation.Header{Seed: 42, IFThresholds: map[string]float64{}}
+	if md := r.Markdown(h); strings.Contains(md, "Intensidad") {
+		t.Fatal("sin intensidad no debe haber ninguna línea de intensidad (la salida original no cambia)")
+	}
+	h.Intensity = "lento"
+	md := r.Markdown(h)
+	if !strings.Contains(md, "- Intensidad de los ataques: lento.\n") || strings.Index(md, "Intensidad") > strings.Index(md, "Entrenamiento:") {
+		t.Fatalf("la línea de intensidad debe ir justo después de la semilla:\n%.400s", md)
+	}
+}

@@ -4,6 +4,7 @@
 #
 #   sh scripts/experimento.sh            # semilla 42, salida en ./experimento
 #   sh scripts/experimento.sh 7 salida7  # semilla y carpeta de salida
+#   sh scripts/experimento.sh 42 salida_lento lento  # intensidad: actual (por defecto) o lento
 #
 # Con la misma semilla, los tres pasos dan exactamente los mismos archivos.
 # Se niega a correr si la base no es local (ver internal/experiment). La
@@ -13,11 +14,12 @@ set -eu
 cd "$(dirname "$0")/.."
 SEMILLA="${1:-42}"
 SALIDA="${2:-experimento}"
+INTENSIDAD="${3:-actual}"
 
 export SIMULATE_CONFIRM_LOCAL=yes
 
 echo "== 1/3 Simular datos =="
-go run ./cmd/simulate -semilla "$SEMILLA" -salida "$SALIDA"
+go run ./cmd/simulate -semilla "$SEMILLA" -intensidad "$INTENSIDAD" -salida "$SALIDA"
 
 echo
 echo "== 2/3 Entrenar el Isolation Forest =="

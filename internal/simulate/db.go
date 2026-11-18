@@ -111,7 +111,9 @@ func wipe(ctx context.Context, tx pgx.Tx) error {
 
 // TruthFile es el contenido de ground_truth.json.
 type TruthFile struct {
-	Seed          uint64  `json:"seed"`
+	Seed uint64 `json:"seed"`
+	// Intensity va solo cuando no es "actual" (ver Meta.Intensity).
+	Intensity     string  `json:"intensity,omitempty"`
 	WindowMinutes int     `json:"window_minutes"`
 	Labels        []Label `json:"labels"`
 }
@@ -120,7 +122,7 @@ type TruthFile struct {
 // lee. JSON con sangría y sin fechas de generación: misma semilla, mismo
 // archivo, byte a byte.
 func WriteTruth(path string, res *Result) error {
-	return writeJSON(path, TruthFile{Seed: res.Meta.Seed, WindowMinutes: int(window / time.Minute), Labels: res.Labels})
+	return writeJSON(path, TruthFile{Seed: res.Meta.Seed, Intensity: res.Meta.Intensity, WindowMinutes: int(window / time.Minute), Labels: res.Labels})
 }
 
 // WriteMeta escribe los rangos de fechas. No son etiquetas.

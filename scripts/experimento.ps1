@@ -8,6 +8,7 @@
 
     pwsh scripts/experimento.ps1
     pwsh scripts/experimento.ps1 -Semilla 7 -Salida experimento-7
+    pwsh scripts/experimento.ps1 -Intensidad lento -Salida experimento_lento
 
   Con la misma semilla, los tres pasos dan exactamente los mismos archivos.
   Escribe en la carpeta de salida: ground_truth.json (etiquetas reales),
@@ -20,7 +21,8 @@
 #>
 param(
     [UInt64]$Semilla = 42,
-    [string]$Salida = "experimento"
+    [string]$Salida = "experimento",
+    [ValidateSet("actual", "lento")][string]$Intensidad = "actual"
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,7 +37,7 @@ function Invoke-Paso([string]$Titulo, [string[]]$Argumentos) {
 
 $env:SIMULATE_CONFIRM_LOCAL = "yes"
 try {
-    Invoke-Paso "1/3 Simular datos" @("./cmd/simulate", "-semilla", "$Semilla", "-salida", $Salida)
+    Invoke-Paso "1/3 Simular datos" @("./cmd/simulate", "-semilla", "$Semilla", "-intensidad", $Intensidad, "-salida", $Salida)
     Invoke-Paso "2/3 Entrenar el Isolation Forest" @("./cmd/train", "-meta", "$Salida/meta.json", "-prefijo-tenant", "sim-", "-salida", "$Salida/modelo.json")
     Invoke-Paso "3/3 Evaluar" @("./cmd/evaluate", "-meta", "$Salida/meta.json", "-etiquetas", "$Salida/ground_truth.json", "-modelo", "$Salida/modelo.json", "-prefijo-tenant", "sim-", "-salida", $Salida)
 }
