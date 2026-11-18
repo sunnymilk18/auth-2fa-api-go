@@ -97,6 +97,10 @@ func wipe(ctx context.Context, tx pgx.Tx) error {
 	// los usuarios con ON DELETE SET NULL, o sea que borrar al tenant antes
 	// los dejaría huérfanos en vez de eliminarlos), luego usuarios y tenants.
 	for _, q := range []string{
+		// Lo que cmd/seedalerts dejó en el registro de actividad al cerrar
+		// alertas: va antes que las alertas, porque se busca por su id.
+		`DELETE FROM admin_audit_log WHERE target_type = 'alert' AND target_id IN
+			(SELECT a.id::text FROM alerts a JOIN api_clients c ON c.id = a.tenant_id WHERE starts_with(c.name, $1))`,
 		`DELETE FROM alerts WHERE tenant_id IN (SELECT id FROM api_clients WHERE starts_with(name, $1))`,
 		`DELETE FROM auth_events WHERE api_client_id IN (SELECT id FROM api_clients WHERE starts_with(name, $1))`,
 		`DELETE FROM users WHERE api_client_id IN (SELECT id FROM api_clients WHERE starts_with(name, $1))`,
