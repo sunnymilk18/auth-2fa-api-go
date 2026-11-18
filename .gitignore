@@ -26,3 +26,7 @@ Thumbs.db
 # Local-only manual testing console — never meant to ship, see its own
 # header comment.
 /testconsole/
+
+# Experimento del detector de accesos anomalos: datos y modelos generados
+/experimento*/
+/models/
