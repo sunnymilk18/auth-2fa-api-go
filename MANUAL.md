@@ -478,7 +478,7 @@ Desde la raíz del proyecto, con PostgreSQL local encendido:
 pwsh scripts/experimento.ps1
 ```
 
-o, en Linux y macOS, `sh scripts/experimento.sh`. Los dos aceptan una semilla y una carpeta de salida (`-Semilla 7 -Salida experimento-7` en PowerShell; `sh scripts/experimento.sh 7 experimento-7` en shell). Esto equivale a:
+o, en Linux y macOS, `sh scripts/experimento.sh`. Los dos aceptan una semilla, una carpeta de salida y una intensidad de los ataques (`-Semilla 7 -Salida experimento-7 -Intensidad lento` en PowerShell; `sh scripts/experimento.sh 7 experimento-7 lento` en shell; ver la sección 3.7). Esto equivale a:
 
 ```powershell
 $env:SIMULATE_CONFIRM_LOCAL = "yes"
@@ -512,3 +512,52 @@ Si cambias el código de la simulación o del detector, estas cifras cambian; ac
 ## 3.6 Entrenar con datos propios
 
 `cmd/train` no necesita la simulación: acepta `-desde` y `-hasta` (`AAAA-MM-DD`) para entrenar con un rango de la base local y `-salida` para elegir el archivo (por defecto `DETECTOR_MODEL_PATH`). El rango debe ser tráfico normal: si hay ataques mezclados, el bosque los aprende como normales (el comando avisa cuántas ventanas del entrenamiento ya disparan las reglas). Como solo lee de la base local, para entrenar con datos de producción hay que traer antes una copia a una base local. Copia el archivo resultante al servidor y apunta `DETECTOR_MODEL_PATH` a él; la API lo carga al arrancar.
+
+## 3.7 Varias semillas e intensidad de los ataques
+
+Para comprobar que los resultados no dependen de una sola semilla ni de un único nivel de dificultad, el experimento se puede correr con otras semillas y con una segunda intensidad.
+
+**Intensidad `actual`** (la de siempre): es la simulación original y no cambia. Una prueba automática guarda la huella de la simulación de la semilla 42, para que sus resultados sigan siendo comparables con los del informe.
+
+**Intensidad `lento`**: vuelve más sigilosos el relleno de credenciales y el pulverizado de contraseñas. En vez de 25 a 70 intentos (relleno) o de 8 a 28 cuentas (pulverizado) en una a cuatro ventanas, hacen 5 a 9 intentos (relleno) o 6 a 9 cuentas (pulverizado) por ventana, durante 6 a 12 ventanas seguidas desde la misma IP. Cada ventana, vista sola, queda bajo **todos** los umbrales de las reglas por defecto (menos de 20 fallos, de 10 cuentas y de 10 intentos contra cuentas inexistentes); lo anómalo es la combinación. Los otros tres escenarios y todo el tráfico normal quedan idénticos para una misma semilla, así que el modelo entrenado también es el mismo. Los umbrales de las reglas y el cuantil del bosque no se tocan: el umbral sigue saliendo solo del entrenamiento.
+
+```powershell
+pwsh scripts/experimento.ps1 -Semilla 42 -Intensidad lento -Salida experimento_lento_s42
+```
+
+o `go run ./cmd/simulate -semilla 42 -intensidad lento ...` si corres los tres comandos por separado. Cuando la intensidad no es `actual`, queda anotada en `meta.json`, en `ground_truth.json` y en la cabecera de `resultados.md`; con `actual` esos archivos no cambian.
+
+Para varias semillas, corre el script una vez por semilla con una carpeta de salida distinta. `cmd/simulate` reemplaza la simulación anterior en cada corrida (solo los tenants `sim-`); si quieres partir de cero, corre antes `go run ./cmd/simulate -limpiar` con `SIMULATE_CONFIRM_LOCAL=yes`.
+
+### Cifras de referencia (semillas 42, 7, 123 y 2026)
+
+Promedio y rango del F1 entre las cuatro semillas, matriz sobre todas las unidades (ver la sección 3.5 para qué es una unidad):
+
+| Método | Intensidad `actual` | Intensidad `lento` |
+|---|---|---|
+| Reglas (umbrales) | 0,900 [0,878–0,917] | 0,260 [0,204–0,306] |
+| Señuelos (regla) | 0,241 [0,212–0,269] | 0,106 [0,098–0,111] |
+| Reglas + señuelos (línea base) | 0,977 [0,968–0,983] | 0,340 [0,283–0,384] |
+| Isolation Forest | 0,629 [0,578–0,674] | 0,698 [0,533–0,824] |
+| Combinado | 0,854 [0,826–0,879] | 0,804 [0,704–0,911] |
+
+AUC-ROC del bosque (tenant / IP): 0,971 / 0,993 con `actual` y 0,984 / 0,997 con `lento`.
+
+Detección de incidentes por escenario, promedio entre semillas (el rango completo está en las carpetas de resultados):
+
+| Escenario | Intensidad | Línea base | Isolation Forest | Combinado |
+|---|---|---:|---:|---:|
+| Relleno de credenciales | actual | 100 % | 100 % | 100 % |
+| Relleno de credenciales | lento | 25 % | 100 % | 100 % |
+| Pulverizado | actual | 100 % | 100 % | 100 % |
+| Pulverizado | lento | 22 % | 100 % | 100 % |
+| Fuerza bruta | ambas | 100 % | 50 % (0–100 %) | 100 % |
+| Distribuido | ambas | 100 % | 25–31 % (0–100 %) | 100 % |
+| Señuelos | ambas | 100 % | 2,5 % | 100 % |
+
+Cómo leer estas cifras:
+
+- **Con `lento`, las reglas dejan de servir y el bosque no:** detectan solo el 3 al 4 % de las ventanas de relleno y de pulverizado, mientras el bosque detecta todas. El combinado supera ampliamente a la línea base.
+- **El bosque falla donde las reglas aciertan:** en fuerza bruta y en ataque distribuido su detección cambia mucho de una semilla a otra (de 0 a 100 %), porque el puntaje de un valor fuera del rango visto casi no sube más que el de los valores más extremos del entrenamiento (sección 3.2). Los resultados de la semilla 42 de esos dos escenarios son de los más favorables al bosque, no representativos.
+- **Los F1 de `actual` y `lento` no se comparan entre sí sin cuidado:** con `lento` hay entre 2 y 3 veces más unidades positivas (muchas ventanas por incidente), y precisión y F1 dependen de la proporción de positivos.
+- **`lento` está diseñado para quedar bajo los umbrales de las reglas por defecto:** es una prueba de sigilo, no una estimación de qué tan frecuente es un ataque así.
