@@ -1,9 +1,10 @@
 # Manual de la API de autenticación (auth-2fa-api-go)
 
-Este manual tiene dos partes:
+Este manual tiene tres partes:
 
 1. **Cómo usar la API**: para quien va a conectar un sistema (un sitio web, una aplicación móvil, un backend) a la API.
 2. **Cómo implementarla en otro lugar**: para quien va a instalarla en un servidor o en otra organización.
+3. **Detector de accesos anómalos y experimento**: las alertas, las cuentas señuelo y cómo reproducir el experimento con datos simulados.
 
 Es un resumen ordenado. Los detalles finos están en otros documentos del repositorio:
 
@@ -196,6 +197,7 @@ Para compilar desde el código fuente hace falta **Go 1.26.10 o superior de la r
 | `TRUSTED_PROXY_CIDRS` | Redes de proxies propios que pueden indicar la IP real del cliente |
 | `BAN_REFERENCE_SECRET` | Código de referencia de los baneos, sin exponer la IP |
 | `AUTH_EVENTS_EMAIL_HASH_SECRET` | Evita guardar correos en claro en los eventos de autenticación |
+| `DETECTOR_ENABLED` | Detector de accesos anómalos (apagado por defecto). Todas sus variables están en la Parte 3 |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Exportar métricas y logs. Debe incluir el esquema (`http://...`) |
 | `PANEL_BASE_URL` | Enlace de respaldo para el correo de cambio de correo |
 
@@ -301,6 +303,7 @@ Todo esto está detallado en [`DEPLOY.md`](DEPLOY.md). Lo esencial:
 | Levantar el baneo de una IP | `/admin/blacklist` |
 | Ver estadísticas y eventos de seguridad | `GET /admin/stats` y `GET /admin/security/events` |
 | Ver la actividad de los operadores | `GET /admin/audit` |
+| Revisar y cerrar las alertas de accesos anómalos | `GET /admin/alerts`, `POST /admin/alerts/{id}/dismiss` y `/resolve` (ver la Parte 3) |
 | Rotar la clave de firma del JWT | Procedimiento de dos despliegues en `DEPLOY.md`, sección "Rotación de claves JWT" |
 
 Si una API key se filtra, `rotate` emite una nueva e invalida la anterior sin perder a los usuarios del sistema.
@@ -338,3 +341,174 @@ Si una API key se filtra, `rotate` emite una nueva e invalida la anterior sin pe
 | Una ruta (`/admin/*`, `/auth/totp/*`, rutas de push) responde `404` | La variable que la habilita no está configurada. Es lo esperado |
 | Todos los usuarios aparecen con la misma IP | Falta `TRUSTED_PROXY_CIDRS`, o no incluye todas las redes de proxies delante de la API |
 | El despliegue falla al construir la imagen | Revisa que la versión de Go del `Dockerfile` exista en Docker Hub |
+
+---
+
+# Parte 3. Detector de accesos anómalos y experimento
+
+Esta parte describe el módulo que revisa la actividad de autenticación en busca de accesos anómalos y deja alertas que un operador puede leer y cerrar, y cómo reproducir el experimento con datos simulados que lo evalúa.
+
+## 3.1 Qué hace
+
+El detector mira los eventos de inicio de sesión (`auth_events`) en **ventanas de 10 minutos** alineadas al reloj (UTC), una por **tenant** y otra por **IP**. De cada ventana calcula seis características:
+
+| Característica | Qué cuenta |
+|---|---|
+| `fallos` | Intentos con credenciales o códigos malos. Es la misma definición que usa Estadísticas: no cuenta `pin_step_required`, `session_expired` ni `email_not_verified` |
+| `correctos` | Inicios de sesión completados |
+| `ips_distintas_con_fallos` | IPs distintas entre los intentos fallidos |
+| `cuentas_distintas_atacadas` | Cuentas distintas entre los intentos fallidos (una cuenta que no existe cuenta por el hash de su correo) |
+| `intentos_cuenta_inexistente` | Fallos cuyo identificador no corresponde a ninguna cuenta |
+| `intentos_contra_senuelos` | Intentos, de inicio de sesión o de recuperación de contraseña, contra una cuenta señuelo |
+
+Con eso hay tres fuentes de alerta (el campo `source`):
+
+- **`regla`**: umbrales fijos y configurables. Una ventana alerta si alcanza o supera cualquiera de ellos (tabla de la sección 3.2).
+- **`senuelo`**: cualquier intento contra una cuenta señuelo, sin umbral.
+- **`isolation_forest`**: un bosque de aislamiento propio, escrito con la biblioteca estándar de Go (sin dependencias nuevas). Se entrena **fuera de línea** con tráfico normal (`cmd/train`) y la API solo carga el archivo del modelo al arrancar. El puntaje es `s = 2^(-E(h)/c(ψ))`: cerca de 1 significa más aislado, es decir, más raro. Hay un bosque para tenants y otro para IPs, porque lo normal en una ventana que junta a muchas personas no lo es en una de una sola IP.
+
+**Sin modelo, la API funciona solo con las reglas y los señuelos.** Si el archivo no existe o no se puede leer, lo registra en el log y sigue.
+
+Cada alerta explica por qué saltó (`motives`, en español). Las del bosque listan las características que más se alejan de lo normal en el entrenamiento, usando la mediana y la desviación absoluta mediana (MAD), por ejemplo: `"42 fallos en 10 min (lo normal es 3)"`. Ojo: "lo normal" es la mediana de **todas** las ventanas de entrenamiento, también las de madrugada, así que a las horas de más actividad puede quedar por debajo de lo que de verdad es normal a esa hora.
+
+## 3.2 Activarlo
+
+Está **apagado por defecto**. Para encenderlo:
+
+```text
+DETECTOR_ENABLED=true
+```
+
+| Variable | Por defecto | Qué es |
+|---|---|---|
+| `DETECTOR_ENABLED` | `false` | Arranca la tarea en segundo plano |
+| `DETECTOR_INTERVAL` | `5m` | Cada cuánto corre |
+| `DETECTOR_LOOKBACK` | `1h` | Cuánto hacia atrás revisa en cada pasada (mínimo, dos ventanas). Volver a mirar ventanas ya revisadas no duplica alertas |
+| `DETECTOR_MODEL_PATH` | `models/iforest.json` | Archivo del modelo |
+| `DETECTOR_RULE_FALLOS` | `20` | Umbral de `fallos` |
+| `DETECTOR_RULE_CUENTAS` | `10` | Umbral de `cuentas_distintas_atacadas` |
+| `DETECTOR_RULE_IPS` | `10` | Umbral de `ips_distintas_con_fallos` |
+| `DETECTOR_RULE_INEXISTENTES` | `10` | Umbral de `intentos_cuenta_inexistente` |
+| `DETECTOR_IF_TREES` | `100` | Árboles (t). Solo lo usa `cmd/train` |
+| `DETECTOR_IF_SUBSAMPLE` | `256` | Submuestra por árbol (ψ). Solo `cmd/train` |
+| `DETECTOR_IF_SEED` | `42` | Semilla del bosque. Solo `cmd/train` |
+| `DETECTOR_IF_QUANTILE` | `0.995` | Cuantil de los puntajes de entrenamiento con que `cmd/train` calibra el umbral guardado en el modelo |
+| `DETECTOR_IF_THRESHOLD` | sin definir | Umbral de puntaje (entre 0 y 1). Sin definir, cada bosque usa el umbral calibrado de su modelo; definido, vale para los dos |
+
+Un umbral de regla en `0` desactiva esa regla. Los umbrales por defecto son razonables, pero **no están calibrados** contra datos reales: ajústalos a la actividad normal de tus sistemas.
+
+**Por qué el umbral del bosque se calibra y no es un valor fijo.** Con conteos tan repetidos (la mayoría de las ventanas son "un inicio de sesión correcto y nada más") el puntaje de lo normal no se queda en 0,5: en el entrenamiento de la simulación, el 10 % de las ventanas por IP ya puntúa sobre 0,58. Por eso `cmd/train` guarda, para cada bosque, el primer valor por encima del cuantil 0,995 de sus propios puntajes: se espera alertar a lo más un 0,5 % del tráfico normal. Una limitación conocida del método: un valor fuera del rango visto en el entrenamiento puntúa más o menos como el más extremo que sí se vio, no mucho más. El AUC y la tabla de sensibilidad de `cmd/evaluate` ayudan a verlo.
+
+## 3.3 Rutas de alertas
+
+Mismo acceso que `GET /admin/security/events`: administrador o superadmin con sesión del panel (o el `X-Admin-Token`). Ninguna lleva PIN: cerrar una alerta no le quita acceso a nadie. Como el resto de `/admin/*`, no están en `openapi.yaml`.
+
+| Ruta | Qué hace |
+|---|---|
+| `GET /admin/alerts` | Lista paginada, la más reciente primero |
+| `GET /admin/alerts/{id}` | Una alerta |
+| `POST /admin/alerts/{id}/dismiss` | La marca como `descartada` (falsa alarma) |
+| `POST /admin/alerts/{id}/resolve` | La marca como `resuelta` (era real y ya se atendió) |
+
+**Filtros de `GET /admin/alerts`**: `state` (`abierta`, `descartada` o `resuelta`), `tenant` (UUID), `from` y `to` (`AAAA-MM-DD`, en UTC; el día de `to` entra completo), `page` y `page_size` (por defecto 50, máximo 100). Sin fechas se muestran los últimos 7 días; el rango no puede pasar de 90 días. Un filtro mal formado responde `400`. Las fechas se comparan con el **inicio de la ventana** de la alerta, no con el momento en que el detector la generó.
+
+La respuesta es `{ "items": [...], "total": n, "page": n, "page_size": n }`. Cada alerta tiene esta forma:
+
+```json
+{
+  "id": "256dc433-bd76-4f9d-98d3-731dfca9fb5f",
+  "tenant": { "id": "21b1ee80-9c67-4062-bd93-67cb831e3b15", "name": "sim-hospital" },
+  "ip": null,
+  "window_start": "2026-10-13T23:40:00Z",
+  "window_end": "2026-10-13T23:50:00Z",
+  "source": "isolation_forest",
+  "score": 0.802606636526959,
+  "features": {
+    "fallos": 73, "correctos": 1, "ips_distintas_con_fallos": 52,
+    "cuentas_distintas_atacadas": 4, "intentos_cuenta_inexistente": 0, "intentos_contra_senuelos": 0
+  },
+  "motives": [
+    "52 IPs distintas con fallos en 10 min (lo normal es 0)",
+    "73 fallos en 10 min (lo normal es 0)",
+    "4 cuentas distintas atacadas en 10 min (lo normal es 0)"
+  ],
+  "state": "abierta",
+  "created_at": "2026-11-18T14:00:29Z",
+  "resolved_at": null,
+  "resolved_by": null,
+  "note": null
+}
+```
+
+- `tenant` llega como `{}` si la alerta no tiene tenant (por ejemplo, una IP que tocó a varios sistemas en la misma ventana).
+- `ip` es `null` en las alertas por tenant. `score` es `null` salvo en las del bosque.
+- `resolved_by` es el **correo de la cuenta de operador** que cerró la alerta, o `null` si sigue abierta o la cerró la credencial compartida `X-Admin-Token` (que no tiene cuenta individual).
+
+`dismiss` y `resolve` aceptan un cuerpo opcional `{ "note": "..." }` (hasta 1000 caracteres) y responden con la alerta ya cerrada. Si la alerta ya no está abierta responden `409`; si no existe, `404`. Quedan en el registro de actividad (`GET /admin/audit`) con los códigos `alert_dismissed` y `alert_resolved`.
+
+## 3.4 Cuentas señuelo
+
+Una cuenta señuelo (`users.is_decoy = TRUE`) es una trampa: ninguna persona real tiene motivo para usarla, así que cualquier intento contra ella delata a quien anda probando cuentas.
+
+- **Nunca inicia sesión con éxito**, ni con la contraseña correcta. Responde exactamente igual que unas credenciales incorrectas, sin pistas de que existe. El intento queda en `auth_events` con `is_decoy = TRUE`.
+- Una solicitud de recuperación de contraseña sobre un señuelo responde lo mismo que para cualquier cuenta, pero no manda ningún correo y también queda marcada.
+- **No cuentan como usuarios reales**: quedan fuera de `users_per_tenant` y de los demás números de usuarios de Estadísticas, y fuera de `GET /admin/users` salvo que se pida con `include_decoys=true`. Cada elemento de ese listado trae ahora el campo `is_decoy`.
+
+Todavía no hay un comando para crear señuelos (los de la simulación los crea `cmd/simulate` directamente). Mientras tanto, se registra una cuenta con un correo que controles, se confirma, y se marca en la base: `UPDATE users SET is_decoy = TRUE WHERE id = '...'`. Conviene que el nombre se parezca a una cuenta valiosa (`respaldo.sistemas`, `admin.soporte`).
+
+## 3.5 El experimento: simular, entrenar y evaluar
+
+Tres comandos, **solo contra la base de datos local**:
+
+| Comando | Qué hace |
+|---|---|
+| `cmd/simulate` | Genera datos **simulados** con semilla fija: tráfico normal (con su ruido: contraseñas olvidadas, oficinas enteras tras una misma IP) y cinco escenarios de ataque: relleno de credenciales, pulverizado de contraseñas, fuerza bruta a una cuenta, ataque distribuido y toque a señuelos. Escribe las etiquetas reales en `ground_truth.json` y los rangos de fechas en `meta.json` |
+| `cmd/train` | Entrena el Isolation Forest con el tráfico normal del primer período y escribe el modelo en JSON (árboles y estadísticas de normalidad por característica) |
+| `cmd/evaluate` | Corre reglas y bosque sobre el segundo período y los compara con las etiquetas: matriz de confusión, precisión, exhaustividad y F1 por método, detección por escenario y detección de señuelos. Escribe CSV y tablas en Markdown |
+
+El detector **nunca lee** `ground_truth.json`: solo `cmd/evaluate` lo usa, para calificar. Los tres comandos se niegan a correr si el servidor de la base no es local (`localhost`, `127.0.0.1`, `::1` o un socket Unix), y `cmd/simulate` además exige la variable de confirmación `SIMULATE_CONFIRM_LOCAL=yes`. Ninguno carga el `.env` de la API, porque ese archivo podría apuntar a producción: la base sale de `EXPERIMENT_POSTGRES_DSN`, `TEST_POSTGRES_DSN` o `POSTGRES_DSN` del entorno del proceso, y si no hay ninguna, de la base local por defecto (`postgres://postgres:postgres@localhost:5432/auth2fa`).
+
+Los datos simulados viven en tenants cuyo nombre empieza con `sim-`. Cada corrida de `cmd/simulate` borra antes la simulación anterior (solo esos tenants) y la reemplaza; `cmd/simulate -limpiar` solo borra. Las migraciones tienen que estar aplicadas (`go run ./cmd/migrate`).
+
+### Con un solo comando
+
+Desde la raíz del proyecto, con PostgreSQL local encendido:
+
+```powershell
+pwsh scripts/experimento.ps1
+```
+
+o, en Linux y macOS, `sh scripts/experimento.sh`. Los dos aceptan una semilla y una carpeta de salida (`-Semilla 7 -Salida experimento-7` en PowerShell; `sh scripts/experimento.sh 7 experimento-7` en shell). Esto equivale a:
+
+```powershell
+$env:SIMULATE_CONFIRM_LOCAL = "yes"
+go run ./cmd/simulate -semilla 42 -salida experimento
+go run ./cmd/train -meta experimento/meta.json -prefijo-tenant sim- -salida experimento/modelo.json
+go run ./cmd/evaluate -meta experimento/meta.json -etiquetas experimento/ground_truth.json -modelo experimento/modelo.json -prefijo-tenant sim- -salida experimento
+```
+
+Escribe en `experimento/` (que está en `.gitignore`): `ground_truth.json`, `meta.json`, `modelo.json`, `resultados.md` (las tablas, listas para pegar en el informe) y cuatro CSV (`resultados_metricas.csv`, `resultados_escenarios.csv`, `resultados_senuelos.csv`, `resultados_umbral.csv`).
+
+**Es reproducible**: con la misma semilla, la simulación, el modelo y los resultados salen idénticos byte a byte (no se escribe ninguna fecha de ejecución). Los identificadores también salen de la semilla, y las fechas de la simulación son fijas (del 5 al 16 de octubre de 2026: siete días de entrenamiento sin ataques y cuatro de evaluación con ataques).
+
+### Cómo leer los resultados
+
+- **La unidad evaluada** es una ventana de 10 minutos para una clave (un tenant o una IP). Es positiva si alguna etiqueta apunta a ella. En un ataque distribuido solo es positiva la unidad del tenant: cada IP suelta se ve como tráfico normal, así que las unidades por IP de esos participantes **se excluyen de la matriz** (el informe dice cuántas).
+- **Los umbrales de las reglas no se ajustaron a la simulación**: son los valores por defecto. El umbral del bosque sale del cuantil 0,995 de los puntajes del propio entrenamiento, sin mirar la evaluación. La tabla de sensibilidad muestra el bosque con otros umbrales solo para ver qué tan sensible es, no para escoger uno.
+- **Los resultados dependen de cómo se simularon los ataques** (intensidad, duración, cantidad de cuentas). Esos parámetros son supuestos y están en `internal/simulate/simulate.go`; conviene decirlo en el informe. La simulación tampoco modela el limitador de tasa por IP de la API, que en producción recortaría varios de estos ataques.
+
+Cifras de referencia con la semilla 42 (matriz sobre 7620 unidades, 140 positivas), para comprobar que tu corrida coincide:
+
+| Método | VP | FP | FN | VN |
+|---|---:|---:|---:|---:|
+| Reglas (umbrales) | 115 | 2 | 25 | 7478 |
+| Señuelos (regla) | 20 | 0 | 120 | 7480 |
+| Reglas + señuelos (línea base) | 135 | 2 | 5 | 7478 |
+| Isolation Forest | 96 | 59 | 44 | 7421 |
+| Combinado | 140 | 59 | 0 | 7421 |
+
+Si cambias el código de la simulación o del detector, estas cifras cambian; actualízalas.
+
+## 3.6 Entrenar con datos propios
+
+`cmd/train` no necesita la simulación: acepta `-desde` y `-hasta` (`AAAA-MM-DD`) para entrenar con un rango de la base local y `-salida` para elegir el archivo (por defecto `DETECTOR_MODEL_PATH`). El rango debe ser tráfico normal: si hay ataques mezclados, el bosque los aprende como normales (el comando avisa cuántas ventanas del entrenamiento ya disparan las reglas). Como solo lee de la base local, para entrenar con datos de producción hay que traer antes una copia a una base local. Copia el archivo resultante al servidor y apunta `DETECTOR_MODEL_PATH` a él; la API lo carga al arrancar.
