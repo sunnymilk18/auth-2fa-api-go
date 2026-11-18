@@ -159,6 +159,8 @@ type Report struct {
 	// (no depende del umbral). Vacío si el modelo no cubre ese tipo de clave.
 	AUC   map[string]Ratio
 	Sweep []SweepRow
+	// Delays: tiempo de detección por escenario y método (ver DelayResult).
+	Delays []DelayResult
 }
 
 type unitID struct {
@@ -326,6 +328,8 @@ func Evaluate(analyses []detector.Analysis, labels []simulate.Label) *Report {
 		rep.Sweep = append(rep.Sweep, row)
 	}
 
+	rep.Delays = computeDelays(byID, inScope)
+
 	// Señuelos.
 	rep.Decoys.Detected = map[string]int{}
 	for _, a := range analyses {
@@ -426,6 +430,9 @@ func countAndPercent(num, den int) string {
 
 // Header describe el experimento: parámetros que van arriba de las tablas.
 type Header struct {
+	// Interval es el intervalo de la tarea del detector (DETECTOR_INTERVAL):
+	// solo se usa para pasar el tiempo de detección a minutos de peor caso.
+	Interval time.Duration
 	// Intensity: nivel de intensidad de los ataques; vacío (la simulación
 	// original) no agrega ninguna línea.
 	Intensity    string
@@ -543,6 +550,7 @@ func (r *Report) Markdown(h Header) string {
 		fmt.Fprintf(&b, "| %s | %s |\n", MethodTitle[m], countAndPercent(r.Decoys.Detected[m], r.Decoys.Units))
 	}
 	fmt.Fprintf(&b, "\nDe esas unidades, %s solo las marcó la regla de señuelos (ni los umbrales ni el bosque las vieron).\n", countAndPercent(r.Decoys.OnlyDecoys, r.Decoys.Units))
+	b.WriteString(r.delaysMarkdown(h.Interval))
 	return b.String()
 }
 

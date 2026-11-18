@@ -13,7 +13,7 @@
   Con la misma semilla, los tres pasos dan exactamente los mismos archivos.
   Escribe en la carpeta de salida: ground_truth.json (etiquetas reales),
   meta.json (rangos de fechas), modelo.json (Isolation Forest entrenado) y los
-  resultados (resultados.md y cuatro CSV).
+  resultados (resultados.md y cinco CSV).
 
   Se niega a correr si la base no es local (ver internal/experiment). La
   confirmación explícita SIMULATE_CONFIRM_LOCAL=yes solo se define mientras

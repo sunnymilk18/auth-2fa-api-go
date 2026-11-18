@@ -101,7 +101,7 @@ func run() error {
 
 	report := evaluation.Evaluate(analyses, truth.Labels)
 	header := evaluation.Header{
-		Seed: truth.Seed, Intensity: truth.Intensity, EvalFrom: from, EvalTo: to, TrainingFrom: meta.TrainingFrom, TrainingTo: meta.TrainingTo,
+		Interval: cfg.Interval, Seed: truth.Seed, Intensity: truth.Intensity, EvalFrom: from, EvalTo: to, TrainingFrom: meta.TrainingFrom, TrainingTo: meta.TrainingTo,
 		Rules: cfg.Rules, Trees: model.Trees, SampleSize: model.SampleSize, ModelSeed: model.Seed,
 		IFThresholds: map[string]float64{}, IFThresholdFixed: cfg.IFThreshold > 0, TrainingUnits: map[string]int{},
 	}
@@ -121,6 +121,7 @@ func run() error {
 		{"resultados_escenarios.csv", report.ScenariosCSV()},
 		{"resultados_senuelos.csv", report.DecoysCSV()},
 		{"resultados_umbral.csv", report.SweepCSV()},
+		{"resultados_tiempos.csv", report.DelaysCSV(cfg.Interval)},
 	}
 	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(*out, f.name), []byte(f.content), 0o644); err != nil {
@@ -129,6 +130,6 @@ func run() error {
 	}
 
 	fmt.Print(markdown)
-	fmt.Printf("\nArchivos escritos en %s: resultados.md, resultados_metricas.csv, resultados_escenarios.csv, resultados_senuelos.csv, resultados_umbral.csv\n", *out)
+	fmt.Printf("\nArchivos escritos en %s: resultados.md, resultados_metricas.csv, resultados_escenarios.csv, resultados_senuelos.csv, resultados_umbral.csv, resultados_tiempos.csv\n", *out)
 	return nil
 }
