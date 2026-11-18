@@ -32,6 +32,8 @@ import (
 // consciously updating this list, which is the whole point (see the
 // relayed spec's "test que falle si una ruta... no registra auditoría").
 var expectedAdminRoutes = map[string]string{
+	"POST /admin/alerts/{id}/dismiss":                  "audited", // alert_dismissed
+	"POST /admin/alerts/{id}/resolve":                  "audited", // alert_resolved
 	"POST /admin/accounts/":                            "audited", // account.create
 	"POST /admin/accounts/{id}/reactivate":             "audited", // account.reactivate
 	"POST /admin/accounts/{id}/revoke":                 "audited", // account.revoke

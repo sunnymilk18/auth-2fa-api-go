@@ -19,6 +19,7 @@ import (
 	"auth-2fa-api/internal/audit"
 	"auth-2fa-api/internal/auth"
 	"auth-2fa-api/internal/authevents"
+	"auth-2fa-api/internal/detector"
 	"auth-2fa-api/internal/middleware"
 	"auth-2fa-api/internal/stats"
 	"auth-2fa-api/internal/user"
@@ -493,6 +494,20 @@ func NewRouter(authHandlers *auth.Handlers, authSvc *auth.Service, tokens *auth.
 		adminRouter.Route("/security/events", func(r chi.Router) {
 			r.Use(adminAccess)
 			r.Get("/", secEventsHandlers.List)
+		})
+
+		// Alertas del detector de accesos anómalos — mismo nivel de acceso que
+		// /security/events (admin y superadmin). Cerrar una alerta (dismiss/
+		// resolve) NO lleva PIN: no quita acceso a nadie, solo marca el
+		// estado de algo que el detector ya generó (mismo razonamiento que
+		// unban). Queda en el registro de actividad, ver alertsHandlers.
+		alertHandlers := &alertsHandlers{repo: detector.NewAlertRepository(pgPool), audit: auditSvc}
+		adminRouter.Route("/alerts", func(r chi.Router) {
+			r.Use(adminAccess)
+			r.Get("/", alertHandlers.List)
+			r.Get("/{id}", alertHandlers.Get)
+			r.Post("/{id}/dismiss", alertHandlers.Dismiss)
+			r.Post("/{id}/resolve", alertHandlers.Resolve)
 		})
 
 		// Manual override for the automatic IP blacklist above — lifts a

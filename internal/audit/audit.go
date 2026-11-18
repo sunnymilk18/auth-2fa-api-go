@@ -64,6 +64,12 @@ const (
 
 	ActionAdminLogin       = "admin.login"
 	ActionAdminLoginFailed = "admin.login_failed"
+
+	// Alertas del detector de accesos anómalos (internal/detector). Estos dos
+	// códigos no llevan punto, a diferencia de los de arriba: son los nombres
+	// que fijó el contrato con el panel.
+	ActionAlertDismissed = "alert_dismissed"
+	ActionAlertResolved  = "alert_resolved"
 )
 
 // TargetType values, paired with Entry.TargetID/TargetLabel.
@@ -73,6 +79,7 @@ const (
 	TargetTypeBlacklistIP  = "blacklist_ip"
 	TargetTypeAllowlistIP  = "allowlist_ip"
 	TargetTypeAdminAccount = "admin_account"
+	TargetTypeAlert        = "alert"
 )
 
 // Entry is one row of admin_audit_log. TargetLabel is a human-readable

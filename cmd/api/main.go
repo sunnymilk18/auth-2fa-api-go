@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,6 +30,7 @@ import (
 	"auth-2fa-api/internal/authevents"
 	"auth-2fa-api/internal/config"
 	"auth-2fa-api/internal/db"
+	"auth-2fa-api/internal/detector"
 	"auth-2fa-api/internal/device"
 	"auth-2fa-api/internal/httpserver"
 	"auth-2fa-api/internal/mailer"
@@ -37,6 +39,7 @@ import (
 	"auth-2fa-api/internal/telemetry"
 	"auth-2fa-api/internal/user"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -67,6 +70,12 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	// Después de config.Load: ese ya cargó el .env, así que las variables
+	// DETECTOR_* puestas ahí también cuentan.
+	detectorCfg, err := detector.LoadConfig()
 	if err != nil {
 		return err
 	}
@@ -236,6 +245,9 @@ func run(logger *slog.Logger) error {
 	}
 	go cleanupExpiredAuditLog(ctx, auditSvc, logger)
 	go cleanupExpiredAuthEvents(ctx, authEventsSvc, logger)
+	if detectorCfg.Enabled {
+		go runDetector(ctx, pgPool, detectorCfg, logger)
+	}
 
 	<-ctx.Done()
 	logger.Info("shutting down...")
@@ -243,6 +255,35 @@ func run(logger *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// runDetector arranca la tarea del detector de accesos anómalos (solo con
+// DETECTOR_ENABLED=true). El modelo del Isolation Forest se carga una sola
+// vez, aquí: sin archivo, o con uno que no se puede leer, la API sigue con
+// las reglas y la regla de señuelos — nunca se cae por esto.
+func runDetector(ctx context.Context, pool *pgxpool.Pool, cfg detector.Config, logger *slog.Logger) {
+	model := loadDetectorModel(cfg.ModelPath, logger)
+
+	d := detector.New(pool, cfg.Rules, model, cfg.IFThreshold, logger)
+	logger.Info("detector: activo", "intervalo", cfg.Interval.String(), "revision_hacia_atras", cfg.Lookback.String())
+	d.Start(ctx, cfg.Interval, cfg.Lookback)
+}
+
+// loadDetectorModel carga el modelo del Isolation Forest, o devuelve nil —
+// nunca un error: sin archivo, o con uno dañado, la API sigue con las reglas y
+// la regla de señuelos.
+func loadDetectorModel(path string, logger *slog.Logger) *detector.Model {
+	m, err := detector.LoadModel(path)
+	switch {
+	case err == nil:
+		logger.Info("detector: modelo cargado", "ruta", path)
+		return m
+	case errors.Is(err, os.ErrNotExist):
+		logger.Info("detector: sin modelo, solo reglas", "ruta", path)
+	default:
+		logger.Error("detector: no se pudo cargar el modelo, solo reglas", "ruta", path, "error", err)
+	}
+	return nil
 }
 
 // cleanupExpiredRefreshTokens runs once at startup (so a fresh deploy
