@@ -255,17 +255,20 @@ func (h *AdminHandlers) ChangeEmail(w http.ResponseWriter, r *http.Request) {
 // — just to show which tenant each row belongs to; always present, never
 // omitted, "" when the tenant can't be resolved.
 type userListItem struct {
-	ID                    string    `json:"id"`
-	APIClientID           string    `json:"api_client_id"`
-	APIClientName         string    `json:"api_client_name"`
-	Email                 string    `json:"email"`
-	Username              string    `json:"username"`
-	RUT                   string    `json:"rut"`
-	IsActive              bool      `json:"is_active"`
-	EmailVerified         bool      `json:"email_verified"`
-	TwoFactorMethodChosen bool      `json:"two_factor_method_chosen"`
-	PinRequiredAtLogin    bool      `json:"pin_required_at_login"`
-	CreatedAt             time.Time `json:"created_at"`
+	ID                    string `json:"id"`
+	APIClientID           string `json:"api_client_id"`
+	APIClientName         string `json:"api_client_name"`
+	Email                 string `json:"email"`
+	Username              string `json:"username"`
+	RUT                   string `json:"rut"`
+	IsActive              bool   `json:"is_active"`
+	EmailVerified         bool   `json:"email_verified"`
+	TwoFactorMethodChosen bool   `json:"two_factor_method_chosen"`
+	PinRequiredAtLogin    bool   `json:"pin_required_at_login"`
+	// IsDecoy es true solo para una cuenta señuelo — que únicamente aparece
+	// en el listado cuando se pide con include_decoys=true.
+	IsDecoy   bool      `json:"is_decoy"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type listUsersResponse struct {
@@ -293,8 +296,11 @@ func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 	q := r.URL.Query().Get("q")
+	// Las cuentas señuelo quedan fuera del listado normal; include_decoys=true
+	// las incluye (cualquier otro valor, o ausente, las deja fuera).
+	includeDecoys := r.URL.Query().Get("include_decoys") == "true"
 
-	users, total, effectivePage, effectivePageSize, err := h.svc.AdminListUsers(r.Context(), apiClientID, page, pageSize, q)
+	users, total, effectivePage, effectivePageSize, err := h.svc.AdminListUsers(r.Context(), apiClientID, page, pageSize, q, includeDecoys)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "no se pudo listar los usuarios")
 		return
@@ -313,6 +319,7 @@ func (h *AdminHandlers) ListUsers(w http.ResponseWriter, r *http.Request) {
 			EmailVerified:         u.EmailVerified,
 			TwoFactorMethodChosen: u.TwoFactorMethodChosen,
 			PinRequiredAtLogin:    u.PinRequiredAtLogin,
+			IsDecoy:               u.IsDecoy,
 			CreatedAt:             u.CreatedAt,
 		})
 	}

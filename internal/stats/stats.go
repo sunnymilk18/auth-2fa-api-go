@@ -135,10 +135,12 @@ func NewRepository(pool *pgxpool.Pool) *Repository {
 	return &Repository{pool: pool}
 }
 
-// UsersTotal counts every user, across every tenant.
+// UsersTotal counts every user, across every tenant. Las cuentas señuelo
+// (users.is_decoy) no cuentan aquí ni en ninguna de las cifras de usuarios
+// de abajo: no son personas reales.
 func (r *Repository) UsersTotal(ctx context.Context) (int, error) {
 	var n int
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&n); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_decoy = FALSE`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting users: %w", err)
 	}
 	return n, nil
@@ -148,7 +150,7 @@ func (r *Repository) UsersTotal(ctx context.Context) (int, error) {
 // user.Service.Ban) — a point-in-time count, not bounded by Range.
 func (r *Repository) UsersBanned(ctx context.Context) (int, error) {
 	var n int
-	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_active = FALSE`).Scan(&n); err != nil {
+	if err := r.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE is_active = FALSE AND is_decoy = FALSE`).Scan(&n); err != nil {
 		return 0, fmt.Errorf("counting banned users: %w", err)
 	}
 	return n, nil
@@ -161,7 +163,7 @@ func (r *Repository) UsersPerDay(ctx context.Context, rng Range) ([]DayCount, er
 	const q = `
 		SELECT (created_at AT TIME ZONE $1)::date AS day, count(*)
 		FROM users
-		WHERE created_at >= $2 AND created_at < $3
+		WHERE created_at >= $2 AND created_at < $3 AND is_decoy = FALSE
 		GROUP BY day
 		ORDER BY day`
 	rows, err := r.pool.Query(ctx, q, rng.TZName, rng.Start, rng.End)
@@ -197,6 +199,7 @@ func (r *Repository) UsersPerTenant(ctx context.Context, rng Range, limit int) (
 			count(*) FILTER (WHERE users.created_at >= $1 AND users.created_at < $2) AS new_in_range
 		FROM users
 		LEFT JOIN api_clients ON api_clients.id = users.api_client_id
+		WHERE users.is_decoy = FALSE
 		GROUP BY users.api_client_id, api_clients.name
 		ORDER BY total DESC, api_clients.name ASC, users.api_client_id ASC
 		LIMIT $3`
@@ -291,16 +294,10 @@ func (r *Repository) OperatorActionsByType(ctx context.Context, rng Range, limit
 // counted in either column — it isn't what these charts are for; the
 // per-result breakdown is what GET /admin/security/events (a later
 // entry) is for.
-var loginFailureResults = []string{
-	authevents.ResultBadCredentials,
-	authevents.ResultBadTOTP,
-	authevents.ResultInvalidCode,
-	authevents.ResultBadPin,
-	authevents.ResultBadDeviceToken,
-	authevents.ResultTooManyAttempts,
-	authevents.ResultLockedOut,
-	authevents.ResultAccountBanned,
-}
+//
+// La lista en sí vive en authevents.LoginFailureResults, compartida con el
+// detector de accesos anómalos para que ambos cuenten lo mismo.
+var loginFailureResults = authevents.LoginFailureResults
 
 // LoginDayCount is one bucket of LoginsByDay — Success/Failed are end-user
 // login attempts (auth_events.kind = 'login'), not operator actions (see

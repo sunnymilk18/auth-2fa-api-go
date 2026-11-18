@@ -139,7 +139,7 @@ const (
 // password, TOTP code, PIN, or token — see package doc comment. Every
 // field left at its zero value ("") is written as SQL NULL, not an empty
 // string, except UserAgent (always NOT NULL, "" when absent) and IsDecoy
-// (always FALSE today — see the migration's own doc comment).
+// (TRUE cuando el intento apunta a una cuenta señuelo — migración 0021).
 type Entry struct {
 	APIClientID string
 	UserID      string
@@ -152,6 +152,36 @@ type Entry struct {
 	IP          string
 	UserAgent   string
 	IsDecoy     bool
+}
+
+// LoginFailureResults es qué valores de result, bajo kind = 'login', cuentan
+// como un intento fallido de credenciales o de códigos. Es la definición que
+// usan Estadísticas (internal/stats) y el detector de accesos anómalos
+// (internal/detector), compartida aquí para que ambos cuenten lo mismo.
+// Deliberadamente NO es "todo lo que no sea success": pin_step_required (la
+// cuenta solo necesita su paso extra de PIN), session_expired (una sesión de
+// verificación vencida) y email_not_verified (la contraseña era correcta) no
+// son intentos fallidos de credenciales, y contarlos inflaría las gráficas
+// y las alertas con filas que parecen un ataque pero no lo son.
+var LoginFailureResults = []string{
+	ResultBadCredentials,
+	ResultBadTOTP,
+	ResultInvalidCode,
+	ResultBadPin,
+	ResultBadDeviceToken,
+	ResultTooManyAttempts,
+	ResultLockedOut,
+	ResultAccountBanned,
+}
+
+// IsLoginFailure reporta si result está en LoginFailureResults.
+func IsLoginFailure(result string) bool {
+	for _, r := range LoginFailureResults {
+		if r == result {
+			return true
+		}
+	}
+	return false
 }
 
 // MaxUserAgentLength bounds UserAgent — a header a caller fully controls,

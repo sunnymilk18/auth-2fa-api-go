@@ -762,3 +762,34 @@ func TestService_Overview_AlwaysIncludesLoginStatsRegardlessOfRole(t *testing.T)
 		t.Fatal("TopFailingIPs = nil, want non-nil (even if empty)")
 	}
 }
+
+// Las cuentas señuelo no son usuarios reales: no cuentan en users_per_tenant
+// (ni en los demás conteos de usuarios, que comparten el mismo filtro).
+func TestRepository_UsersPerTenant_ExcludesDecoys(t *testing.T) {
+	pool := testutil.PostgresPool(t)
+	repo := stats.NewRepository(pool)
+	client, _ := testutil.NewAPIClient(t, pool)
+	testutil.NewDecoyUser(t, pool, client.ID, "correcthorsebattery")
+
+	rng := stats.ResolveRange(7, time.UTC, time.Now())
+	find := func() *stats.TenantCount {
+		rows, err := repo.UsersPerTenant(context.Background(), rng, 1000)
+		if err != nil {
+			t.Fatalf("UsersPerTenant: %v", err)
+		}
+		for i := range rows {
+			if rows[i].APIClientID == client.ID {
+				return &rows[i]
+			}
+		}
+		return nil
+	}
+
+	if row := find(); row != nil {
+		t.Fatalf("un tenant con solo una cuenta señuelo apareció en users_per_tenant: %+v", row)
+	}
+	testutil.NewUser(t, pool, client.ID, "correcthorsebattery")
+	if row := find(); row == nil || row.Total != 1 {
+		t.Fatalf("tras agregar un usuario real, users_per_tenant = %+v, want Total=1 (el señuelo no cuenta)", row)
+	}
+}

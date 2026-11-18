@@ -309,7 +309,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 	}
 
 	// Page size 2, first page — should be the two most recently created.
-	page1, total, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 2, "")
+	page1, total, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 2, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient page 1: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 	}
 
 	// Page 3 of size 2 over 5 rows has exactly one leftover row.
-	page3, total3, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 3, 2, "")
+	page3, total3, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 3, 2, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient page 3: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestListByAPIClient_PagesNewestFirstWithAccurateTotal(t *testing.T) {
 
 	// A different tenant sees none of these.
 	otherSvc, otherClientID := newTestUserService(t)
-	otherPage, otherTotal, _, _, err := otherSvc.ListByAPIClient(t.Context(), otherClientID, 1, 10, "")
+	otherPage, otherTotal, _, _, err := otherSvc.ListByAPIClient(t.Context(), otherClientID, 1, 10, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient other tenant: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestListByAPIClient_ClampsOutOfRangePageParams(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 
-	_, _, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 0, 0, "")
+	_, _, effPage, effPageSize, err := svc.ListByAPIClient(t.Context(), apiClientID, 0, 0, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient page=0 pageSize=0: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestListByAPIClient_ClampsOutOfRangePageParams(t *testing.T) {
 		t.Fatalf("pageSize=0 was clamped to %d, want the 50 default", effPageSize)
 	}
 
-	_, _, _, effPageSize2, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 10000, "")
+	_, _, _, effPageSize2, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 10000, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient pageSize=10000: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestListByAPIClient_SearchMatchesEmailUsernameOrRUT(t *testing.T) {
 	}
 
 	// Uppercased on purpose: ILIKE must still match.
-	results, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "FINDME-"+suffix)
+	results, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "FINDME-"+suffix, false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient with q: %v", err)
 	}
@@ -417,7 +417,7 @@ func TestListByAPIClient_SearchMatchesEmailUsernameOrRUT(t *testing.T) {
 	if _, err := otherSvc.Register(t.Context(), otherClientID, "findme-"+suffix+"-other@example.com", "correcthorsebattery", "other-"+suffix, testutil.UniqueRUT(t)); err != nil {
 		t.Fatalf("Register in other tenant: %v", err)
 	}
-	otherTenantResults, _, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "findme-"+suffix)
+	otherTenantResults, _, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "findme-"+suffix, false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient (checking tenant isolation with q): %v", err)
 	}
@@ -443,7 +443,7 @@ func TestListByAPIClient_SearchEscapesLikeWildcards(t *testing.T) {
 
 	// A literal "%" shouldn't match every username — only one that actually
 	// contains a "%" character (none of them do).
-	_, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "%")
+	_, total, _, _, err := svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "%", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient q=%%: %v", err)
 	}
@@ -453,7 +453,7 @@ func TestListByAPIClient_SearchEscapesLikeWildcards(t *testing.T) {
 
 	// A literal "_" must match only a username with that literal character —
 	// not stand in for "any character" and match everything.
-	_, total, _, _, err = svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "no_percent")
+	_, total, _, _, err = svc.ListByAPIClient(t.Context(), apiClientID, 1, 50, "no_percent", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient q=no_percent: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestListByAPIClient_EmptyAPIClientIDSpansEveryTenant(t *testing.T) {
 		t.Fatalf("Register in tenant B: %v", err)
 	}
 
-	results, _, _, _, err := svcA.ListByAPIClient(t.Context(), "", 1, 200, "")
+	results, _, _, _, err := svcA.ListByAPIClient(t.Context(), "", 1, 200, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient with apiClientID=\"\": %v", err)
 	}
@@ -514,7 +514,7 @@ func TestListByAPIClient_IncludesEachUsersOwnTenantName(t *testing.T) {
 		t.Fatalf("Register in tenant B: %v", err)
 	}
 
-	results, _, _, _, err := svc.ListByAPIClient(t.Context(), "", 1, 200, "")
+	results, _, _, _, err := svc.ListByAPIClient(t.Context(), "", 1, 200, "", false)
 	if err != nil {
 		t.Fatalf("ListByAPIClient: %v", err)
 	}

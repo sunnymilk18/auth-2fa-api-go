@@ -394,9 +394,14 @@ func (s *Service) ResendEmailVerification(ctx context.Context, apiClientID, emai
 func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, password string, r *http.Request) (loginToken string, needsSetup bool, pushOffered bool, method string, err error) {
 	lockoutKey := identifier
 	var resolvedID string
+	// resolvedDecoy: el identificador apunta a una cuenta señuelo — todo
+	// intento queda en auth_events con is_decoy en TRUE (la respuesta HTTP
+	// sigue siendo la de siempre, ver user.Service.VerifyPassword).
+	var resolvedDecoy bool
 	if resolved, lookupErr := s.users.FindByIdentifier(ctx, apiClientID, identifier); lookupErr == nil {
 		lockoutKey = resolved.ID
 		resolvedID = resolved.ID
+		resolvedDecoy = resolved.IsDecoy
 	}
 
 	// logFailure records a failed login attempt — never a success: an
@@ -409,7 +414,7 @@ func (s *Service) LoginStep1(ctx context.Context, apiClientID, identifier, passw
 	// despite the HTTP response staying generic), EmailHash (hashed,
 	// never the raw identifier) when it didn't.
 	logFailure := func(result string) {
-		entry := authevents.Entry{Kind: authevents.KindLogin, Method: authevents.MethodPassword, Result: result}
+		entry := authevents.Entry{Kind: authevents.KindLogin, Method: authevents.MethodPassword, Result: result, IsDecoy: resolvedDecoy}
 		if resolvedID != "" {
 			entry.UserID = resolvedID
 		} else if hash, ok := s.authEvents.HashEmail(identifier); ok {
@@ -936,6 +941,14 @@ func (s *Service) RequestPasswordReset(ctx context.Context, apiClientID, email s
 		return err
 	}
 
+	// Una cuenta señuelo no recibe código (no tiene un correo real al que
+	// mandarlo) y la respuesta es idéntica a la de cualquier otra cuenta — el
+	// intento solo queda registrado, con is_decoy en TRUE.
+	if u.IsDecoy {
+		s.logAuthEvent(ctx, r, apiClientID, authevents.Entry{Kind: authevents.KindPasswordResetRequest, Result: authevents.ResultAccountNotFound, UserID: u.ID, IsDecoy: true})
+		return nil
+	}
+
 	// u.Email, not the raw email param — same reason as
 	// ConfirmEmailVerification's own fix: this key has to be found again
 	// later by ResetPassword using whatever casing the person retypes, and
@@ -1136,8 +1149,8 @@ func (s *Service) AdminRevokeAllSessions(ctx context.Context, apiClientID, userI
 // narrows this to accounts whose email, username or rut contains it. See
 // user.Service.ListByAPIClient for the page/pageSize clamping rules and
 // q's matching semantics.
-func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*user.ListedUser, total, effectivePage, effectivePageSize int, err error) {
-	return s.users.ListByAPIClient(ctx, apiClientID, page, pageSize, q)
+func (s *Service) AdminListUsers(ctx context.Context, apiClientID string, page, pageSize int, q string, includeDecoys bool) (users []*user.ListedUser, total, effectivePage, effectivePageSize int, err error) {
+	return s.users.ListByAPIClient(ctx, apiClientID, page, pageSize, q, includeDecoys)
 }
 
 // PublicKeys exposes every public key access tokens can currently be

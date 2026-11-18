@@ -48,3 +48,17 @@ func UniqueRUT(t *testing.T) string {
 	body := fmt.Sprintf("%08d", binary.BigEndian.Uint32(b[:])%100000000)
 	return user.NewRUT(body)
 }
+
+// NewDecoyUser registra una cuenta señuelo (users.is_decoy = TRUE, ya con el
+// correo verificado, como la dejaría quien las provisiona) bajo apiClientID,
+// con un cleanup propio — mismo orden de borrado que NewUser.
+func NewDecoyUser(t *testing.T, pool *pgxpool.Pool, apiClientID, password string) *user.User {
+	t.Helper()
+
+	u := NewUser(t, pool, apiClientID, password)
+	if _, err := pool.Exec(context.Background(), `UPDATE users SET is_decoy = TRUE, email_verified = TRUE WHERE id = $1`, u.ID); err != nil {
+		t.Fatalf("marcando la cuenta como señuelo: %v", err)
+	}
+	u.IsDecoy, u.EmailVerified = true, true
+	return u
+}

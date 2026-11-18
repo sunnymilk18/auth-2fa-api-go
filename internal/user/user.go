@@ -42,8 +42,13 @@ type User struct {
 	// Defaults false — every account behaves exactly as before this field
 	// existed until something explicitly turns it on.
 	PinRequiredAtLogin bool
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// IsDecoy marca una cuenta señuelo (honeytoken): nunca inicia sesión con
+	// éxito — VerifyPassword la trata como credenciales incorrectas — y
+	// cualquier intento contra ella queda registrado con auth_events.is_decoy
+	// en TRUE. No cuenta como usuario real en estadísticas ni listados.
+	IsDecoy   bool
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // ListedUser is one row of Repository.ListByAPIClient — a User plus its

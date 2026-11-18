@@ -68,12 +68,12 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 		ON CONFLICT (api_client_id, email) DO UPDATE
 			SET password_hash = EXCLUDED.password_hash, username = EXCLUDED.username, rut = EXCLUDED.rut,
 				email_verified = FALSE, two_factor_method_chosen = FALSE, updated_at = now()
-			WHERE users.email_verified = FALSE
-		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, created_at, updated_at`
+			WHERE users.email_verified = FALSE AND users.is_decoy = FALSE
+		RETURNING id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, is_decoy, created_at, updated_at`
 
 	u := &User{}
 	err := r.pool.QueryRow(ctx, q, apiClientID, email, passwordHash, username, rut).Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.IsDecoy, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrEmailTaken
@@ -87,12 +87,12 @@ func (r *Repository) Create(ctx context.Context, apiClientID, email, passwordHas
 	return u, nil
 }
 
-const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, created_at, updated_at"
+const selectUserColumns = "id, api_client_id, email, username, rut, password_hash, is_active, email_verified, totp_enabled, two_factor_method_chosen, pin_required_at_login, is_decoy, created_at, updated_at"
 
 func scanUser(row pgx.Row) (*User, error) {
 	u := &User{}
 	err := row.Scan(
-		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.IsDecoy, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
@@ -198,11 +198,11 @@ func escapeLikePattern(s string) string {
 // `created_at` and `updated_at`, so every column referenced here (SELECT,
 // WHERE, ORDER BY alike) must be qualified with `users.` or it's ambiguous
 // the moment the join is in play.
-func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string) ([]*ListedUser, int, error) {
+func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, offset, limit int, q string, includeDecoys bool) ([]*ListedUser, int, error) {
 	query := `
 		SELECT users.id, users.api_client_id, users.email, users.username, users.rut, users.password_hash,
 			users.is_active, users.email_verified, users.totp_enabled, users.two_factor_method_chosen,
-			users.pin_required_at_login, users.created_at, users.updated_at,
+			users.pin_required_at_login, users.is_decoy, users.created_at, users.updated_at,
 			COALESCE(api_clients.name, '') AS api_client_name,
 			COUNT(*) OVER() AS total
 		FROM users
@@ -213,6 +213,11 @@ func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, of
 	if apiClientID != "" {
 		args = append(args, apiClientID)
 		conditions = append(conditions, fmt.Sprintf("users.api_client_id = $%d", len(args)))
+	}
+	// Las cuentas señuelo no son usuarios reales: quedan fuera salvo que el
+	// operador las pida explícitamente (include_decoys=true).
+	if !includeDecoys {
+		conditions = append(conditions, "users.is_decoy = FALSE")
 	}
 	if q != "" {
 		args = append(args, "%"+escapeLikePattern(q)+"%")
@@ -235,7 +240,7 @@ func (r *Repository) ListByAPIClient(ctx context.Context, apiClientID string, of
 	for rows.Next() {
 		u := &ListedUser{}
 		if err := rows.Scan(
-			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.CreatedAt, &u.UpdatedAt,
+			&u.ID, &u.APIClientID, &u.Email, &u.Username, &u.RUT, &u.PasswordHash, &u.IsActive, &u.EmailVerified, &u.TOTPEnabled, &u.TwoFactorMethodChosen, &u.PinRequiredAtLogin, &u.IsDecoy, &u.CreatedAt, &u.UpdatedAt,
 			&u.APIClientName,
 			&total,
 		); err != nil {

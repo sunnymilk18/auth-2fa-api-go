@@ -168,7 +168,17 @@ func (s *Service) VerifyPassword(ctx context.Context, apiClientID, identifier, p
 		return nil, ErrInvalidCredentials
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)); err != nil {
+	passwordErr := bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password))
+
+	// Una cuenta señuelo jamás inicia sesión, aunque la contraseña coincida:
+	// responde exactamente igual que una contraseña incorrecta. Se compara
+	// igual con bcrypt antes de decidir, para que la demora tampoco delate
+	// que la cuenta es un señuelo.
+	if u.IsDecoy {
+		return nil, ErrInvalidCredentials
+	}
+
+	if passwordErr != nil {
 		return nil, ErrInvalidCredentials
 	}
 
@@ -312,7 +322,9 @@ const (
 // this project. q, when non-empty (after trimming), restricts results to
 // users whose email, username or rut contains it — trimmed only, not
 // lowercased, since ILIKE is already case-insensitive on its own.
-func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page, pageSize int, q string) (users []*ListedUser, total, effectivePage, effectivePageSize int, err error) {
+// includeDecoys false (lo normal) deja fuera las cuentas señuelo — no son
+// usuarios reales, ver User.IsDecoy.
+func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page, pageSize int, q string, includeDecoys bool) (users []*ListedUser, total, effectivePage, effectivePageSize int, err error) {
 	if page < 1 {
 		page = 1
 	}
@@ -325,7 +337,7 @@ func (s *Service) ListByAPIClient(ctx context.Context, apiClientID string, page,
 	q = strings.TrimSpace(q)
 
 	offset := (page - 1) * pageSize
-	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize, q)
+	users, total, err = s.repo.ListByAPIClient(ctx, apiClientID, offset, pageSize, q, includeDecoys)
 	return users, total, page, pageSize, err
 }
 
