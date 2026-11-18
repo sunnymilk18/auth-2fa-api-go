@@ -586,3 +586,21 @@ Cómo leer estas cifras:
 - **El retraso solo cuenta los incidentes detectados.** El bosque aparece siempre con retraso 0, pero no detecta la mitad de las fuerzas brutas ni entre el 69 y el 75 % de los ataques distribuidos: un promedio sin mirar los "sin detectar" engaña.
 - **La simulación no tiene escalada:** cada ataque arranca a plena intensidad en el comienzo de una ventana, así que un retraso 0 es en buena parte consecuencia de cómo se simuló. Los retrasos mayores que 0 (las reglas con ataques lentos) son lo más informativo de esta métrica.
 - **El inicio del ataque se toma como el comienzo de su primera ventana**, por lo que el peor caso es conservador: un ataque real que empieza a mitad de ventana se detecta en menos tiempo.
+
+## 3.8 Alertas de prueba para el panel
+
+Para probar la pantalla del panel con alertas reales (y no inventadas a mano), con la simulación ya cargada (`cmd/simulate`) y el modelo entrenado (`cmd/train`; el script `scripts/experimento.ps1` hace las dos cosas):
+
+```powershell
+$env:SIMULATE_CONFIRM_LOCAL = "yes"
+go run ./cmd/seedalerts -meta experimento/meta.json -modelo experimento/modelo.json
+```
+
+`cmd/seedalerts` hace que el detector recorra el período de evaluación (12 al 16 de octubre de 2026 en la simulación original) con `detector.Run`, o sea, por el mismo camino que la tarea en segundo plano de la API: nunca inserta alertas a mano. Después cierra algunas por las rutas de la API (`POST /admin/alerts/{id}/dismiss` y `/resolve`, con una nota): unas como `descartada` y otras como `resuelta`, y deja el resto `abierta`. Con la semilla 42 en intensidad `actual` quedan 292 alertas: 117 de la fuente `regla`, 20 de `senuelo` y 155 de `isolation_forest`; de cada fuente, 2 descartadas, 2 resueltas y el resto abiertas (`-por-fuente N` cambia cuántas).
+
+- **Es repetible:** correrlo otra vez no duplica alertas (índice único de `alerts`) ni cierra más: los cierres se calculan contra las que ya están cerradas.
+- **Solo base local:** mismas protecciones que `cmd/simulate` (se niega si la base no es local y exige `SIMULATE_CONFIRM_LOCAL=yes`) y no carga el `.env`. Solo toca alertas de tenants `sim-*`.
+- **Cómo pasa por las rutas sin levantar la API:** sirve el router real de la API en proceso, con un Redis en memoria y una credencial `X-Admin-Token` aleatoria que no sale del proceso. Por eso los cierres quedan atribuidos a esa credencial compartida (`resolved_by` vacío) y en el registro de actividad aparecen con actor `token`, no con la cuenta de un operador.
+- **Se borra con `cmd/simulate -limpiar`:** junto con los tenants `sim-*` se borran sus alertas y las entradas del registro de actividad de esos cierres.
+
+Si no hay `modelo.json`, `cmd/seedalerts` se niega: corre antes `cmd/train` (o el script de un solo comando).
